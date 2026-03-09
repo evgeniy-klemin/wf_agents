@@ -1,0 +1,1010 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Workflow Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            surface: { DEFAULT: '#0f172a', light: '#1e293b', lighter: '#334155' },
+            accent: { DEFAULT: '#6366f1', light: '#818cf8' },
+            success: '#22c55e',
+            warning: '#f59e0b',
+            danger: '#ef4444',
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    @keyframes pulse-ring {
+      0%, 100% { opacity: 0.15; }
+      50% { opacity: 0.5; }
+    }
+    @keyframes flow-dash {
+      to { stroke-dashoffset: -20; }
+    }
+    .pulse-ring { animation: pulse-ring 2.5s ease-in-out infinite; }
+    .flow-active { animation: flow-dash 1s linear infinite; stroke-dasharray: 8 4; }
+    .node-card {
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    .node-card:hover {
+      filter: brightness(1.15);
+      transform: translateY(-2px);
+    }
+    .event-row { transition: background-color 0.2s; }
+    .event-row:hover { background-color: rgba(99, 102, 241, 0.08); }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #1e293b; }
+    ::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
+  </style>
+</head>
+<body class="h-full bg-surface text-gray-200 dark">
+  <div id="app" class="h-full flex flex-col">
+    <!-- Header -->
+    <header class="bg-surface-light border-b border-gray-700/50 px-6 py-3 flex items-center justify-between flex-shrink-0">
+      <div class="flex items-center gap-3">
+        <div class="w-8 h-8 rounded-lg bg-accent flex items-center justify-center">
+          <svg class="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+          </svg>
+        </div>
+        <h1 class="text-lg font-semibold text-white">Workflow Dashboard</h1>
+      </div>
+      <div class="flex items-center gap-3">
+        <span id="connection-status" class="flex items-center gap-1.5 text-xs text-gray-400">
+          <span class="w-2 h-2 rounded-full bg-gray-500"></span>
+          Connecting...
+        </span>
+        <button onclick="refreshAll()" class="px-3 py-1.5 text-sm bg-surface-lighter hover:bg-gray-600 rounded-lg transition-colors flex items-center gap-1.5">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+          Refresh
+        </button>
+      </div>
+    </header>
+
+    <!-- Main -->
+    <div class="flex-1 flex overflow-hidden">
+      <!-- Sidebar: Workflow List -->
+      <aside id="sidebar" class="w-72 bg-surface-light border-r border-gray-700/50 flex flex-col flex-shrink-0">
+        <div class="px-4 py-3 border-b border-gray-700/50">
+          <h2 class="text-sm font-medium text-gray-400 uppercase tracking-wider">Workflows</h2>
+        </div>
+        <div id="workflow-list" class="flex-1 overflow-y-auto p-2 space-y-1">
+          <div class="text-sm text-gray-500 p-4 text-center">Loading...</div>
+        </div>
+      </aside>
+
+      <!-- Content -->
+      <main class="flex-1 flex flex-col overflow-hidden">
+        <!-- Empty state -->
+        <div id="empty-state" class="flex-1 flex items-center justify-center">
+          <div class="text-center">
+            <svg class="w-16 h-16 text-gray-600 mx-auto mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M9 17V7m0 10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h2a2 2 0 012 2m0 10a2 2 0 002 2h2a2 2 0 002-2M9 7a2 2 0 012-2h2a2 2 0 012 2m0 10V7m0 10a2 2 0 002 2h2a2 2 0 002-2V7a2 2 0 00-2-2h-2a2 2 0 00-2 2"/>
+            </svg>
+            <p class="text-gray-500 text-sm">Select a workflow to view its diagram</p>
+          </div>
+        </div>
+
+        <!-- Workflow view (hidden initially) -->
+        <div id="workflow-view" class="flex-1 flex flex-col overflow-hidden hidden">
+          <!-- Status bar -->
+          <div id="status-bar" class="px-6 py-3 bg-surface border-b border-gray-700/50 flex items-center justify-between flex-shrink-0">
+            <div class="flex items-center gap-3">
+              <h2 id="wf-title" class="text-base font-medium text-white"></h2>
+              <span id="wf-phase-badge" class="px-2.5 py-0.5 rounded-full text-xs font-medium"></span>
+            </div>
+            <div id="wf-meta" class="flex items-center gap-4 text-xs text-gray-400"></div>
+          </div>
+
+          <!-- Diagram -->
+          <div class="flex-shrink-0 px-6 py-6 overflow-x-auto">
+            <svg id="workflow-diagram" viewBox="0 0 1350 320" class="w-full max-w-7xl mx-auto" style="min-width:1000px;"></svg>
+          </div>
+
+          <!-- Phase History Bar -->
+          <div id="phase-history" class="px-6 py-3 border-t border-gray-700/50 flex-shrink-0"></div>
+
+          <!-- Timeline -->
+          <div class="flex-1 border-t border-gray-700/50 flex flex-col overflow-hidden">
+            <div class="px-6 py-2 flex items-center justify-between bg-surface-light flex-shrink-0">
+              <h3 class="text-sm font-medium text-gray-400 uppercase tracking-wider">Event Timeline</h3>
+              <div class="flex gap-1">
+                <button onclick="filterEvents('all')" class="ev-filter px-2 py-0.5 text-xs rounded bg-surface-lighter text-gray-300" data-filter="all">All</button>
+                <button onclick="filterEvents('transition')" class="ev-filter px-2 py-0.5 text-xs rounded text-gray-500 hover:text-gray-300" data-filter="transition">Transitions</button>
+                <button onclick="filterEvents('tool_use')" class="ev-filter px-2 py-0.5 text-xs rounded text-gray-500 hover:text-gray-300" data-filter="tool_use">Tools</button>
+                <button onclick="filterEvents('hook_denial')" class="ev-filter px-2 py-0.5 text-xs rounded text-gray-500 hover:text-gray-300" data-filter="hook_denial">Denials</button>
+                <button onclick="filterEvents('agent_spawn')" class="ev-filter px-2 py-0.5 text-xs rounded text-gray-500 hover:text-gray-300" data-filter="agent_spawn">Agents</button>
+                <button onclick="filterEvents('error')" class="ev-filter px-2 py-0.5 text-xs rounded text-gray-500 hover:text-gray-300" data-filter="error">Errors</button>
+              </div>
+            </div>
+            <div id="timeline" class="flex-1 overflow-y-auto px-4 py-2 space-y-0.5 text-sm font-mono"></div>
+          </div>
+        </div>
+      </main>
+    </div>
+  </div>
+
+<script>
+// ---- State ----
+let selectedWorkflowID = null;
+let workflowsCache = []; // cached list from last loadWorkflows
+let currentFilter = 'all';
+let refreshTimer = null;
+
+// ---- Phase definitions ----
+const PHASES = [
+  { id: 'PLANNING',    label: 'Planning',    icon: 'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2' },
+  { id: 'RESPAWN',     label: 'Respawn',     icon: 'M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15' },
+  { id: 'DEVELOPING',  label: 'Developing',  icon: 'M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4' },
+  { id: 'REVIEWING',   label: 'Reviewing',   icon: 'M15 12a3 3 0 11-6 0 3 3 0 016 0z M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z' },
+  { id: 'COMMITTING',  label: 'Committing',  icon: 'M5 13l4 4L19 7' },
+  { id: 'PR_CREATION', label: 'PR Creation', icon: 'M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4' },
+  { id: 'FEEDBACK',    label: 'Feedback',    icon: 'M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z' },
+  { id: 'COMPLETE',    label: 'Complete',    icon: 'M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z' },
+];
+
+const TERMINAL_PHASES = [
+  { id: 'BLOCKED', label: 'Blocked (pause)', icon: 'M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z' },
+];
+
+// Transitions: [from, to] pairs (including loops)
+const TRANSITIONS = [
+  ['PLANNING', 'RESPAWN'],
+  ['RESPAWN', 'DEVELOPING'],
+  ['DEVELOPING', 'REVIEWING'],
+  ['REVIEWING', 'COMMITTING'],
+  ['REVIEWING', 'DEVELOPING'],      // reject loop
+  ['COMMITTING', 'RESPAWN'],        // more iterations loop
+  ['COMMITTING', 'PR_CREATION'],    // all iterations done
+  ['PR_CREATION', 'FEEDBACK'],
+  ['FEEDBACK', 'COMPLETE'],
+  ['FEEDBACK', 'RESPAWN'],          // iterate on feedback
+];
+
+const PHASE_COLORS = {
+  PLANNING:    { bg: '#4f46e5', ring: '#6366f1', text: '#e0e7ff' },
+  RESPAWN:     { bg: '#7c3aed', ring: '#8b5cf6', text: '#ede9fe' },
+  DEVELOPING:  { bg: '#2563eb', ring: '#3b82f6', text: '#dbeafe' },
+  REVIEWING:   { bg: '#9333ea', ring: '#a855f7', text: '#f3e8ff' },
+  COMMITTING:  { bg: '#0891b2', ring: '#06b6d4', text: '#cffafe' },
+  PR_CREATION: { bg: '#d97706', ring: '#f59e0b', text: '#fef3c7' },
+  FEEDBACK:    { bg: '#0d9488', ring: '#14b8a6', text: '#ccfbf1' },
+  COMPLETE:    { bg: '#16a34a', ring: '#22c55e', text: '#dcfce7' },
+  BLOCKED:     { bg: '#dc2626', ring: '#ef4444', text: '#fee2e2' },
+};
+
+const EVENT_ICONS = {
+  transition:  { color: '#6366f1', symbol: '&#x2192;' },
+  tool_use:    { color: '#3b82f6', symbol: '&#x2699;' },
+  hook_denial: { color: '#ef4444', symbol: '&#x26D4;' },
+  agent_spawn: { color: '#22c55e', symbol: '&#x25B6;' },
+  agent_stop:  { color: '#f59e0b', symbol: '&#x25A0;' },
+  journal:     { color: '#8b5cf6', symbol: '&#x270E;' },
+  error:       { color: '#ef4444', symbol: '&#x2716;' },
+};
+
+// ---- Stuck detection ----
+const STUCK_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes without events = stuck
+
+function isStuck(w) {
+  if (w.status !== 'RUNNING') return false;
+  if (w.phase === 'BLOCKED' || w.phase === 'COMPLETE') return false;
+  if (!w.last_updated_at) return false;
+  const lastUpdate = new Date(w.last_updated_at).getTime();
+  return (Date.now() - lastUpdate) > STUCK_THRESHOLD_MS;
+}
+
+// ---- API ----
+async function apiGet(path) {
+  const resp = await fetch(path);
+  if (!resp.ok) throw new Error(await resp.text());
+  return resp.json();
+}
+
+async function apiPost(path) {
+  const resp = await fetch(path, { method: 'POST' });
+  if (!resp.ok) throw new Error(await resp.text());
+  return resp.json();
+}
+
+async function terminateWorkflow(wfID) {
+  if (!confirm(`Terminate workflow ${wfID}? This will stop the Temporal workflow and cannot be undone.`)) return;
+  try {
+    await apiPost(`/api/terminate/${encodeURIComponent(wfID)}`);
+    await refreshAll();
+  } catch (e) {
+    alert('Failed to terminate: ' + e.message);
+  }
+}
+
+// ---- Workflow List ----
+async function loadWorkflows() {
+  try {
+    const workflows = await apiGet('/api/workflows');
+    workflowsCache = workflows || [];
+    const el = document.getElementById('workflow-list');
+    if (!workflows || workflows.length === 0) {
+      el.innerHTML = '<div class="text-sm text-gray-500 p-4 text-center">No workflows found.<br><span class="text-xs">Start one with wf-client.</span></div>';
+      setConnectionStatus(true);
+      return;
+    }
+
+    el.innerHTML = workflows.map(w => {
+      const isBlocked = w.phase === 'BLOCKED';
+      const isComplete = w.phase === 'COMPLETE' || w.status === 'COMPLETED';
+      const stuck = isStuck(w);
+      const dotColor = stuck ? 'bg-orange-400 animate-pulse' :
+        isBlocked ? 'bg-red-400 animate-pulse' :
+        w.status === 'RUNNING' ? 'bg-green-400' :
+        isComplete ? 'bg-gray-400' : 'bg-red-400';
+      const ringClass = stuck ? 'ring-1 ring-orange-500/40 ' :
+        isBlocked ? 'ring-1 ring-red-500/30 ' : '';
+
+      const stuckLabel = stuck ? `<span class="text-[10px] text-orange-400 font-medium">STUCK ${timeAgo(w.last_updated_at)}</span>` : '';
+      const phaseLabel = w.phase
+        ? `<span class="text-xs" style="color:${isBlocked ? '#ef4444' : stuck ? '#fb923c' : PHASE_COLORS[w.phase] ? PHASE_COLORS[w.phase].ring : '#6b7280'}">${w.phase}</span>`
+        : '';
+
+      return `
+      <div class="wf-item rounded-lg transition-colors ${ringClass}${
+          selectedWorkflowID === w.workflow_id
+            ? 'bg-accent/20 border border-accent/30'
+            : 'hover:bg-surface-lighter border border-transparent'
+        }" data-id="${w.workflow_id}">
+        <button onclick="selectWorkflow('${w.workflow_id}')" class="w-full text-left px-3 py-2.5">
+          <div class="flex items-center justify-between">
+            <span class="text-sm font-medium text-gray-200 truncate">${w.task ? esc(truncate(w.task, 35)) : w.session_id}</span>
+            <span class="flex-shrink-0 w-2 h-2 rounded-full ${dotColor}"></span>
+          </div>
+          ${w.task ? `<div class="text-[10px] text-gray-500 truncate mt-0.5">${esc(w.session_id)}</div>` : ''}
+          <div class="flex items-center justify-between mt-0.5">
+            <span class="text-xs text-gray-500">${w.start_time ? timeAgo(w.start_time) : 'Unknown'}</span>
+            <div class="flex items-center gap-1.5">
+              ${stuckLabel}
+              ${phaseLabel}
+            </div>
+          </div>
+        </button>
+        ${stuck && w.status === 'RUNNING' ? `<div class="px-3 pb-2">
+          <button onclick="event.stopPropagation();terminateWorkflow('${w.workflow_id}')"
+            class="w-full px-2 py-1 text-xs font-medium text-orange-300 bg-orange-900/30 hover:bg-orange-900/50 border border-orange-700/40 rounded transition-colors">
+            Terminate stuck session
+          </button>
+        </div>` : ''}
+      </div>`;
+    }).join('');
+
+    setConnectionStatus(true);
+  } catch (e) {
+    setConnectionStatus(false);
+    console.error('Failed to load workflows:', e);
+  }
+}
+
+function setConnectionStatus(ok) {
+  const el = document.getElementById('connection-status');
+  if (ok) {
+    el.innerHTML = '<span class="w-2 h-2 rounded-full bg-green-400"></span>Connected';
+    el.className = 'flex items-center gap-1.5 text-xs text-green-400';
+  } else {
+    el.innerHTML = '<span class="w-2 h-2 rounded-full bg-red-400"></span>Disconnected';
+    el.className = 'flex items-center gap-1.5 text-xs text-red-400';
+  }
+}
+
+// ---- Workflow Selection ----
+async function selectWorkflow(wfID) {
+  selectedWorkflowID = wfID;
+  document.getElementById('empty-state').classList.add('hidden');
+  document.getElementById('workflow-view').classList.remove('hidden');
+
+  // Highlight in sidebar
+  document.querySelectorAll('.wf-item').forEach(el => {
+    if (el.dataset.id === wfID) {
+      el.className = el.className.replace('hover:bg-surface-lighter border-transparent', '').replace('bg-accent/20 border-accent/30', '') + ' bg-accent/20 border border-accent/30';
+    } else {
+      el.className = el.className.replace('bg-accent/20 border-accent/30', '').replace('bg-accent/20 border border-accent/30', '') + ' hover:bg-surface-lighter border border-transparent';
+    }
+  });
+
+  await loadWorkflowDetail(wfID);
+}
+
+async function loadWorkflowDetail(wfID) {
+  try {
+    const [status, timeline] = await Promise.all([
+      apiGet(`/api/workflows/${encodeURIComponent(wfID)}/status`),
+      apiGet(`/api/workflows/${encodeURIComponent(wfID)}/timeline`),
+    ]);
+
+    renderStatusBar(wfID, status, timeline);
+    renderDiagram(status, status.pre_blocked_phase, timeline);
+    renderPhaseHistory(timeline);
+    renderTimeline(timeline, status);
+  } catch (e) {
+    console.error('Failed to load workflow detail:', e);
+    document.getElementById('wf-title').textContent = 'Error loading workflow';
+  }
+}
+
+// ---- Status Bar ----
+function renderStatusBar(wfID, status, timeline) {
+  const sessionID = wfID.replace('coding-session-', '');
+  document.getElementById('wf-title').textContent = sessionID;
+
+  const badge = document.getElementById('wf-phase-badge');
+  const pc = PHASE_COLORS[status.phase] || PHASE_COLORS.PLANNING;
+  const phaseDisplay = status.phase === 'BLOCKED' && status.pre_blocked_phase
+    ? `BLOCKED (${phaseName(status.pre_blocked_phase)})`
+    : phaseName(status.phase);
+  badge.textContent = phaseDisplay;
+  badge.style.backgroundColor = pc.bg + '33';
+  badge.style.color = pc.text;
+  badge.style.borderColor = pc.ring;
+  badge.className = 'px-2.5 py-0.5 rounded-full text-xs font-medium border';
+
+  const meta = document.getElementById('wf-meta');
+  const blockedInfo = status.phase === 'BLOCKED' && status.pre_blocked_phase
+    ? `<span>Paused from: <strong class="text-red-300">${esc(status.pre_blocked_phase)}</strong></span>` : '';
+
+  // Total session duration
+  const events = timeline.events || [];
+  const sessionDur = events.length > 0
+    ? formatDuration(Date.now() - new Date(events[0].timestamp).getTime())
+    : '';
+
+  // Stuck detection — only for RUNNING workflows
+  const wfEntry = workflowsCache.find(w => w.workflow_id === wfID);
+  const isRunning = wfEntry ? wfEntry.status === 'RUNNING' : true;
+  const lastUpdate = status.last_updated_at ? new Date(status.last_updated_at).getTime() : 0;
+  const idleMs = lastUpdate ? Date.now() - lastUpdate : 0;
+  const stuck = isRunning && status.phase !== 'BLOCKED' && status.phase !== 'COMPLETE' && idleMs > STUCK_THRESHOLD_MS;
+
+  const stuckInfo = stuck
+    ? `<span class="flex items-center gap-1.5 text-orange-400">
+        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+        <strong>Stuck</strong> (idle ${formatDuration(idleMs)})
+      </span>
+      <button onclick="terminateWorkflow('${wfID}')"
+        class="px-2 py-0.5 text-xs font-medium text-orange-300 bg-orange-900/30 hover:bg-orange-900/50 border border-orange-700/40 rounded transition-colors">
+        Terminate
+      </button>`
+    : '';
+
+  meta.innerHTML = `
+    ${sessionDur ? `<span class="flex items-center gap-1"><svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg><strong class="text-gray-200">${sessionDur}</strong></span>` : ''}
+    <span>Iter: <strong class="text-gray-200">${status.iteration}</strong></span>
+    <span>Events: <strong class="text-gray-200">${status.event_count}</strong></span>
+    <span class="flex items-center gap-1"><svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/></svg><strong class="${(status.active_agents || []).length > 0 ? 'text-green-400' : 'text-gray-200'}">${(status.active_agents || []).length}</strong></span>
+    ${blockedInfo}
+    ${stuckInfo}
+    ${status.task ? `<span class="max-w-xs truncate" title="${esc(status.task)}">${esc(status.task)}</span>` : ''}
+  `;
+}
+
+// ---- Phase durations from transition events ----
+function computePhaseDurations(timeline) {
+  const events = timeline.events || [];
+  const durations = {}; // phase → total ms
+  let currentPhase = null;
+  let phaseStart = null;
+
+  for (const ev of events) {
+    if (ev.type === 'transition' && ev.detail) {
+      const ts = new Date(ev.timestamp).getTime();
+      const from = ev.detail.from;
+      const to = ev.detail.to;
+
+      // Close previous phase
+      if (currentPhase && phaseStart) {
+        durations[currentPhase] = (durations[currentPhase] || 0) + (ts - phaseStart);
+      }
+      currentPhase = to;
+      phaseStart = ts;
+    }
+  }
+  // Current phase is still running
+  if (currentPhase && phaseStart) {
+    durations[currentPhase] = (durations[currentPhase] || 0) + (Date.now() - phaseStart);
+  }
+
+  // If no transitions yet, the first event marks PLANNING start
+  if (!currentPhase && events.length > 0) {
+    durations['PLANNING'] = Date.now() - new Date(events[0].timestamp).getTime();
+  }
+
+  return durations;
+}
+
+// ---- Phase History (stacked bar) ----
+function computePhaseSegments(timeline) {
+  const events = timeline.events || [];
+  const segments = []; // { phase, startMs, durationMs }
+  let currentPhase = null;
+  let phaseStart = null;
+  let sessionStart = null;
+
+  for (const ev of events) {
+    if (ev.type === 'transition' && ev.detail) {
+      const ts = new Date(ev.timestamp).getTime();
+      if (!sessionStart) sessionStart = ts;
+
+      if (currentPhase && phaseStart) {
+        segments.push({ phase: currentPhase, startMs: phaseStart - sessionStart, durationMs: ts - phaseStart });
+      }
+      currentPhase = ev.detail.to;
+      phaseStart = ts;
+    }
+  }
+  // Current phase still running
+  if (currentPhase && phaseStart) {
+    segments.push({ phase: currentPhase, startMs: phaseStart - sessionStart, durationMs: Date.now() - phaseStart });
+  }
+  // No transitions yet
+  if (!currentPhase && events.length > 0) {
+    sessionStart = new Date(events[0].timestamp).getTime();
+    segments.push({ phase: 'PLANNING', startMs: 0, durationMs: Date.now() - sessionStart });
+  }
+
+  return { segments, sessionStart };
+}
+
+function renderPhaseHistory(timeline) {
+  const el = document.getElementById('phase-history');
+  const { segments } = computePhaseSegments(timeline);
+
+  if (segments.length === 0) {
+    el.innerHTML = '';
+    return;
+  }
+
+  const totalMs = segments.reduce((sum, s) => sum + s.durationMs, 0);
+  const totalWork = segments.filter(s => s.phase !== 'BLOCKED').reduce((sum, s) => sum + s.durationMs, 0);
+  const blockedSegments = segments.filter(s => s.phase === 'BLOCKED');
+  const totalBlocked = blockedSegments.reduce((sum, s) => sum + s.durationMs, 0);
+
+  if (totalMs === 0) { el.innerHTML = ''; return; }
+
+  // Detect iteration boundaries
+  let iterNum = 1;
+  const iterBoundaries = [];
+  let cumMs = 0;
+  for (const s of segments) {
+    if (s.phase === 'RESPAWN' && cumMs > 0) {
+      iterNum++;
+      iterBoundaries.push({ pct: (cumMs / totalMs) * 100, label: `Iter ${iterNum}` });
+    }
+    cumMs += s.durationMs;
+  }
+
+  // Build bar segments — all phases including BLOCKED
+  const barSegments = segments.map((s, idx) => {
+    const pct = (s.durationMs / totalMs) * 100;
+    const isBlocked = s.phase === 'BLOCKED';
+    const colors = PHASE_COLORS[s.phase] || { bg: '#475569', text: '#e2e8f0' };
+    const dur = formatDuration(s.durationMs);
+    const name = PHASE_LABELS[s.phase] || s.phase;
+    const label = pct > 8 ? `<span class="text-[10px] font-medium truncate px-1 pointer-events-none" style="color:${colors.text}">${name}</span>` : '';
+    const durLabel = pct > 5 ? `<span class="text-[9px] opacity-70 px-1 pointer-events-none" style="color:${colors.text}">${dur}</span>` : '';
+    const bg = isBlocked
+      ? `background:repeating-linear-gradient(135deg,${colors.bg},${colors.bg} 3px,${colors.bg}99 3px,${colors.bg}99 6px)`
+      : `background:${colors.bg}`;
+    return `<div class="phase-seg h-full flex flex-col items-center justify-center overflow-hidden cursor-default relative"
+      style="width:${Math.max(pct, 0.3)}%;${bg}"
+      data-seg-idx="${idx}">
+      ${label}${durLabel}
+    </div>`;
+  }).join('');
+
+  // Iteration markers
+  const iterMarkers = iterBoundaries.map(b =>
+    `<div class="absolute top-0 bottom-0 border-l-2 border-yellow-500/60" style="left:${b.pct}%">
+      <span class="absolute -top-4 left-1 text-[9px] text-yellow-500 font-medium whitespace-nowrap">${b.label}</span>
+    </div>`
+  ).join('');
+
+  const blockedInfo = totalBlocked > 0
+    ? `<span class="flex items-center gap-1 text-xs text-red-400">
+        <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+        ${formatDuration(totalBlocked)} blocked (${blockedSegments.length}x)
+      </span>`
+    : '';
+
+  // Build tooltip data for segments
+  const segData = segments.map(s => ({
+    phase: s.phase,
+    name: PHASE_LABELS[s.phase] || s.phase,
+    dur: formatDuration(s.durationMs),
+    pct: ((s.durationMs / totalMs) * 100).toFixed(1),
+    color: (PHASE_COLORS[s.phase] || { bg: '#475569' }).bg,
+  }));
+  window._phaseSegData = segData;
+
+  el.innerHTML = `
+    <div class="flex items-center gap-3 mb-1">
+      <h3 class="text-xs font-medium text-gray-500 uppercase tracking-wider">Phase History</h3>
+      <span class="text-xs text-gray-600">Active: ${formatDuration(totalWork)}</span>
+      ${blockedInfo}
+    </div>
+    <div class="relative mt-4">
+      <div class="flex h-7 rounded-lg overflow-hidden border border-gray-700/50" id="phase-bar">
+        ${barSegments}
+      </div>
+      ${iterMarkers}
+    </div>
+    <div id="phase-tooltip" class="hidden fixed z-50 pointer-events-none"></div>
+  `;
+
+  // Attach hover events to segments
+  el.querySelectorAll('.phase-seg').forEach(seg => {
+    seg.addEventListener('mouseenter', (e) => {
+      const idx = parseInt(seg.dataset.segIdx);
+      const d = window._phaseSegData[idx];
+      if (!d) return;
+      const tip = document.getElementById('phase-tooltip');
+      tip.innerHTML = `
+        <div class="bg-gray-900 border border-gray-700 rounded-lg shadow-xl px-3 py-2 text-xs min-w-[140px]">
+          <div class="flex items-center gap-2 mb-1">
+            <span class="w-2.5 h-2.5 rounded-sm flex-shrink-0" style="background:${d.color}"></span>
+            <span class="font-semibold text-gray-100">${d.name}</span>
+          </div>
+          <div class="text-gray-400 space-y-0.5 pl-4">
+            <div>Duration: <span class="text-gray-200 font-medium">${d.dur}</span></div>
+            <div>Share: <span class="text-gray-200 font-medium">${d.pct}%</span></div>
+          </div>
+        </div>`;
+      tip.classList.remove('hidden');
+    });
+    seg.addEventListener('mousemove', (e) => {
+      const tip = document.getElementById('phase-tooltip');
+      let left = e.clientX + 12;
+      // Prevent overflow right
+      if (left + 160 > window.innerWidth) left = e.clientX - 160;
+      tip.style.left = left + 'px';
+      tip.style.top = (e.clientY - 70) + 'px';
+    });
+    seg.addEventListener('mouseleave', () => {
+      document.getElementById('phase-tooltip').classList.add('hidden');
+    });
+  });
+}
+
+// ---- Diagram ----
+function renderDiagram(status, preBlockedPhase, timeline) {
+  const phaseDurations = computePhaseDurations(timeline || { events: [] });
+  const svg = document.getElementById('workflow-diagram');
+  const currentPhase = status.phase;
+
+  // Compute visited phases from the linear order up to current
+  const mainOrder = PHASES.map(p => p.id);
+  let currentIdx = mainOrder.indexOf(currentPhase);
+  const isTerminal = currentPhase === 'BLOCKED';
+
+  // When BLOCKED, use pre-blocked phase to show progress
+  if (isTerminal && preBlockedPhase) {
+    currentIdx = mainOrder.indexOf(preBlockedPhase);
+  }
+
+  // Node positions
+  const nodeW = 130, nodeH = 64;
+  const startX = 30, startY = 50;
+  const gapX = 25;
+  const totalW = PHASES.length * (nodeW + gapX) - gapX + startX * 2;
+
+  // Terminal nodes position
+  const termY = startY + nodeH + 90;
+
+  svg.setAttribute('viewBox', `0 0 ${totalW} 320`);
+
+  let html = '';
+
+  // Defs: arrow markers and gradients
+  html += `<defs>
+    <marker id="arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="#475569"/>
+    </marker>
+    <marker id="arrow-active" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="#6366f1"/>
+    </marker>
+    <marker id="arrow-loop" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="#f59e0b"/>
+    </marker>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="shadow">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-opacity="0.3"/>
+    </filter>
+  </defs>`;
+
+  // Phase positions map
+  const positions = {};
+  PHASES.forEach((p, i) => {
+    positions[p.id] = { x: startX + i * (nodeW + gapX), y: startY };
+  });
+  // Terminal phases below PLANNING and after last
+  TERMINAL_PHASES.forEach((p, i) => {
+    positions[p.id] = { x: startX + (1 + i * 3) * (nodeW + gapX), y: termY };
+  });
+
+  // Draw connections first (behind nodes)
+  // Forward arrows
+  for (let i = 0; i < PHASES.length - 1; i++) {
+    const from = positions[PHASES[i].id];
+    const to = positions[PHASES[i + 1].id];
+    const fx = from.x + nodeW, fy = from.y + nodeH / 2;
+    const tx = to.x, ty = to.y + nodeH / 2;
+
+    const isPast = currentIdx > i || (isTerminal && currentIdx === -1);
+    const isNext = currentIdx === i;
+
+    html += `<line x1="${fx}" y1="${fy}" x2="${tx}" y2="${ty}"
+      stroke="${isPast ? '#6366f1' : isNext ? '#6366f188' : '#334155'}"
+      stroke-width="${isPast ? 2.5 : 2}" marker-end="url(#${isPast ? 'arrow-active' : 'arrow'})"
+      ${isNext ? 'class="flow-active"' : ''}/>`;
+  }
+
+  // Loop: REVIEWING -> DEVELOPING (reject)
+  {
+    const from = positions['REVIEWING'];
+    const to = positions['DEVELOPING'];
+    const fx = from.x + nodeW / 2, fy = from.y + nodeH;
+    const tx = to.x + nodeW / 2, ty = to.y + nodeH;
+    const cy = fy + 35;
+    html += `<path d="M${fx},${fy} C${fx},${cy} ${tx},${cy} ${tx},${ty}"
+      fill="none" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="4 3"
+      marker-end="url(#arrow-loop)" opacity="0.7"/>`;
+    html += `<text x="${(fx + tx) / 2}" y="${cy + 14}" text-anchor="middle"
+      fill="#f59e0b" font-size="10" opacity="0.8">reject</text>`;
+  }
+
+  // Loop: COMMITTING -> RESPAWN (more iterations)
+  {
+    const from = positions['COMMITTING'];
+    const to = positions['RESPAWN'];
+    const fx = from.x + nodeW / 2, fy = from.y + nodeH;
+    const tx = to.x + nodeW / 2, ty = to.y + nodeH;
+    const cy1 = fy + 55, cy2 = ty + 55;
+    html += `<path d="M${fx},${fy} C${fx},${cy1} ${tx},${cy2} ${tx},${ty}"
+      fill="none" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="4 3"
+      marker-end="url(#arrow-loop)" opacity="0.7"/>`;
+    html += `<text x="${(fx + tx) / 2}" y="${Math.max(cy1, cy2) + 14}" text-anchor="middle"
+      fill="#f59e0b" font-size="10" opacity="0.8">more iterations</text>`;
+  }
+
+  // Loop: FEEDBACK -> RESPAWN (iterate on feedback)
+  {
+    const from = positions['FEEDBACK'];
+    const to = positions['RESPAWN'];
+    const fx = from.x + nodeW / 2, fy = from.y + nodeH;
+    const tx = to.x + nodeW / 2, ty = to.y + nodeH;
+    const cy1 = fy + 75, cy2 = ty + 75;
+    html += `<path d="M${fx},${fy} C${fx},${cy1} ${tx},${cy2} ${tx},${ty}"
+      fill="none" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="4 3"
+      marker-end="url(#arrow-loop)" opacity="0.7"/>`;
+    html += `<text x="${(fx + tx) / 2}" y="${Math.max(cy1, cy2) + 14}" text-anchor="middle"
+      fill="#f59e0b" font-size="10" opacity="0.8">feedback changes</text>`;
+  }
+
+  // Blocked arrow: draw from the pre-blocked phase to BLOCKED node
+  TERMINAL_PHASES.forEach(tp => {
+    if (tp.id === currentPhase) {
+      // Use pre_blocked_phase to know where we came from
+      const sourcePhase = preBlockedPhase || PHASES[0].id;
+      const fromP = positions[sourcePhase];
+      const toP = positions[tp.id];
+      if (fromP && toP) {
+        const fx = fromP.x + nodeW / 2, fy = fromP.y + nodeH;
+        const tx = toP.x + nodeW / 2, ty = toP.y;
+        html += `<path d="M${fx},${fy} Q${fx},${(fy + ty) / 2} ${tx},${ty}"
+          fill="none" stroke="#ef4444" stroke-width="2" marker-end="url(#arrow)"/>`;
+        html += `<text x="${(fx + tx) / 2 + 10}" y="${(fy + ty) / 2 - 4}" text-anchor="middle"
+          fill="#ef4444" font-size="10" opacity="0.8">paused</text>`;
+      }
+    }
+  });
+
+  // Draw main phase nodes
+  PHASES.forEach((phase, i) => {
+    const pos = positions[phase.id];
+    const pc = PHASE_COLORS[phase.id];
+    const isCurrent = phase.id === currentPhase;
+    const isPast = currentIdx > i;
+    const isFuture = !isCurrent && !isPast;
+    const dur = phaseDurations[phase.id];
+
+    html += renderNode(pos.x, pos.y, nodeW, nodeH, phase, pc, isCurrent, isPast, isFuture, dur);
+  });
+
+  // Draw terminal nodes
+  TERMINAL_PHASES.forEach(phase => {
+    const pos = positions[phase.id];
+    const pc = PHASE_COLORS[phase.id];
+    const isCurrent = phase.id === currentPhase;
+    const dur = phaseDurations[phase.id];
+    html += renderNode(pos.x, pos.y, nodeW, nodeH, phase, pc, isCurrent, false, !isCurrent, dur);
+  });
+
+  svg.innerHTML = html;
+}
+
+function renderNode(x, y, w, h, phase, colors, isCurrent, isPast, isFuture, durationMs) {
+  const opacity = isFuture ? 0.4 : 1;
+  const fillColor = isCurrent ? colors.bg : (isPast ? colors.bg + 'aa' : '#1e293b');
+  const strokeColor = isCurrent ? colors.ring : (isPast ? colors.ring + '88' : '#334155');
+  const textColor = isCurrent || isPast ? colors.text : '#64748b';
+
+  let html = '';
+
+  // Glow for current phase — breathing ring, no scale
+  if (isCurrent) {
+    html += `<rect x="${x - 5}" y="${y - 5}" width="${w + 10}" height="${h + 10}"
+      rx="15" fill="none" stroke="${colors.ring}" stroke-width="2.5"
+      class="pulse-ring"/>`;
+  }
+
+  // Node background
+  html += `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="10"
+    fill="${fillColor}" stroke="${strokeColor}" stroke-width="${isCurrent ? 2 : 1.5}"
+    opacity="${opacity}" filter="${isCurrent ? 'url(#shadow)' : ''}" class="node-card"/>`;
+
+  // Checkmark for past phases
+  if (isPast) {
+    html += `<circle cx="${x + w - 10}" cy="${y + 10}" r="7" fill="#16a34a"/>`;
+    html += `<path d="M${x + w - 13},${y + 10} l2,2 4,-4" stroke="white" stroke-width="1.5" fill="none"/>`;
+  }
+
+  // Icon
+  html += `<g transform="translate(${x + w / 2 - 10}, ${y + 6})">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="${textColor}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="${opacity}">
+      <path d="${phase.icon}"/>
+    </svg>
+  </g>`;
+
+  // Label
+  const labelY = durationMs && (isCurrent || isPast) ? y + h - 16 : y + h - 12;
+  html += `<text x="${x + w / 2}" y="${labelY}" text-anchor="middle"
+    fill="${textColor}" font-size="11" font-weight="${isCurrent ? '600' : '500'}"
+    font-family="ui-sans-serif, system-ui, sans-serif" opacity="${opacity}">${phase.label}</text>`;
+
+  // Duration below label
+  if (durationMs && (isCurrent || isPast)) {
+    html += `<text x="${x + w / 2}" y="${y + h - 4}" text-anchor="middle"
+      fill="${textColor}" font-size="9" opacity="0.7"
+      font-family="ui-monospace, monospace">${formatDuration(durationMs)}</text>`;
+  }
+
+  return html;
+}
+
+// ---- Timeline ----
+function renderTimeline(timeline, status) {
+  const el = document.getElementById('timeline');
+  const allEvents = timeline.events || [];
+  const events = allEvents.slice().reverse(); // newest first
+
+  if (events.length === 0) {
+    el.innerHTML = '<div class="text-gray-500 text-center py-4">No events yet</div>';
+    return;
+  }
+
+  // Session start time = first event timestamp
+  const sessionStart = allEvents.length > 0 ? new Date(allEvents[0].timestamp).getTime() : Date.now();
+
+  const filtered = currentFilter === 'all' ? events : events.filter(e => e.type === currentFilter);
+
+  el.innerHTML = filtered.map((ev, i) => {
+    const info = EVENT_ICONS[ev.type] || { color: '#64748b', symbol: '&#x2022;' };
+    const ts = ev.timestamp ? new Date(ev.timestamp).getTime() : 0;
+    const relTime = ts ? '+' + formatDuration(ts - sessionStart) : '';
+    const absTime = ts ? new Date(ts).toLocaleTimeString() : '';
+    const detail = formatEventDetail(ev);
+
+    return `<div class="event-row flex items-start gap-3 px-2 py-1.5 rounded">
+      <span class="flex-shrink-0 w-5 text-center" style="color:${info.color}">${info.symbol}</span>
+      <span class="flex-shrink-0 w-16 text-gray-500 text-xs tabular-nums pt-0.5" title="${absTime}">${relTime}</span>
+      <span class="px-1.5 py-0.5 rounded text-xs font-medium whitespace-nowrap" style="background:${info.color}22;color:${info.color}">${ev.type}</span>
+      <span class="text-gray-300 text-xs break-all">${detail}</span>
+    </div>`;
+  }).join('');
+}
+
+function formatEventDetail(ev) {
+  const d = ev.detail || {};
+  const hookType = d.hook_type || '';
+  switch (ev.type) {
+    case 'transition': {
+      const from = d.from || '?';
+      const to = d.to || '?';
+      if (to === 'BLOCKED') {
+        return `<span class="text-red-400">&#x23F8; Paused</span> <span class="text-gray-500">from ${phaseName(from)}</span>${d.reason ? ` <span class="text-gray-600">— ${esc(d.reason)}</span>` : ''}`;
+      }
+      if (from === 'BLOCKED') {
+        return `<span class="text-green-400">&#x25B6; Resumed</span> back to ${phaseName(to)}${d.reason ? ` <span class="text-gray-500">— ${esc(d.reason)}</span>` : ''}`;
+      }
+      return `${phaseName(from)} &#x2192; ${phaseName(to)}${d.reason ? ` <span class="text-gray-500">— ${esc(d.reason)}</span>` : ''}`;
+    }
+    case 'tool_use': {
+      const tool = d.tool_name || d.tool || '';
+      // For non-tool hook events (Notification, UserPromptSubmit, etc.) show human descriptions
+      if (!tool && hookType) return hookDescription(hookType, d);
+      if (hookType === 'PostToolUse' || hookType === 'PostToolUseFailure') {
+        const desc = toolHumanDesc(tool, d.tool_input);
+        const err = d.error ? ` <span class="text-red-400">&#x2716; ${esc(truncate(d.error, 80))}</span>` : '';
+        return `${desc}${err}${hookType === 'PostToolUseFailure' ? ' <span class="text-red-400">[failed]</span>' : ' <span class="text-green-500">&#x2714;</span>'}`;
+      }
+      const denied = d.denied === 'true' ? ' <span class="text-red-400">[denied]</span>' : '';
+      const reason = (d.denied === 'true' && d.reason) ? ` <span class="text-gray-500">— ${esc(d.reason)}</span>` : '';
+      return `${toolHumanDesc(tool, d.tool_input)}${denied}${reason}`;
+    }
+    case 'hook_denial': {
+      const from = d.from || '';
+      const to = d.to || '';
+      if (from && to) {
+        return `<span class="text-red-400">Transition denied:</span> ${phaseName(from)} &#x2192; ${phaseName(to)} <span class="text-gray-500">— ${esc(d.reason || '')}</span>`;
+      }
+      const htool = d.tool_name || d.tool || '';
+      return `${htool ? toolHumanDesc(htool, d.tool_input) : 'Action'} <span class="text-red-400">[denied]</span> <span class="text-gray-500">${esc(d.reason || '')}</span>`;
+    }
+    case 'agent_spawn':
+      return `Subagent started: <strong>${esc(d.agent_type || d.agent_id || '?')}</strong>`;
+    case 'agent_stop':
+      return `Subagent stopped: <strong>${esc(d.agent_type || d.agent_id || '?')}</strong>`;
+    case 'journal':
+      return esc(d.message || '');
+    case 'error':
+      return `<span class="text-red-400">${esc(d.error || d.message || 'Unknown error')}</span>`;
+    default:
+      return hookType ? hookDescription(hookType, d) : esc(JSON.stringify(d).substring(0, 200));
+  }
+}
+
+const PHASE_LABELS = {
+  PLANNING: 'Planning', RESPAWN: 'Respawn', DEVELOPING: 'Developing',
+  REVIEWING: 'Reviewing', COMMITTING: 'Committing', PR_CREATION: 'PR Creation',
+  FEEDBACK: 'Feedback', COMPLETE: 'Complete', BLOCKED: 'Blocked',
+};
+function phaseName(p) { return PHASE_LABELS[p] || p; }
+
+// Human-readable description for hook events without a tool
+function hookDescription(hookType, d) {
+  switch (hookType) {
+    case 'Notification': return `<span class="text-yellow-400">Notification received</span>`;
+    case 'TeammateIdle': return `<span class="text-yellow-400">Waiting for teammate</span>${d.agent_type ? ` (${esc(d.agent_type)})` : ''}`;
+    case 'UserPromptSubmit': return `<span class="text-blue-400">User input</span>${d.prompt ? `: ${esc(truncate(d.prompt, 80))}` : ''}`;
+    case 'SessionStart': return `<span class="text-green-400">Session started</span>${d.model ? ` <span class="text-gray-500">${esc(d.model)}</span>` : ''}`;
+    case 'Stop': return `<span class="text-gray-400">Session stopped</span>`;
+    default: return esc(hookType);
+  }
+}
+
+// Human-readable description for tool usage
+function toolHumanDesc(toolName, rawInput) {
+  const input = parseInput(rawInput);
+  switch (toolName) {
+    case 'Bash': {
+      const cmd = input.command || '';
+      // Show first word of command as verb + truncated rest
+      const parts = cmd.split(/\s+/);
+      const verb = parts[0] || 'command';
+      const rest = parts.slice(1).join(' ');
+      return `<span class="text-blue-300">Run</span> <code class="text-xs bg-gray-800 px-1 rounded">${esc(truncate(cmd, 60))}</code>`;
+    }
+    case 'Read':
+      return `<span class="text-blue-300">Read</span> <code class="text-xs bg-gray-800 px-1 rounded">${input.file_path ? shortPath(input.file_path) : 'file'}</code>`;
+    case 'Edit':
+      return `<span class="text-yellow-300">Edit</span> <code class="text-xs bg-gray-800 px-1 rounded">${input.file_path ? shortPath(input.file_path) : 'file'}</code>`;
+    case 'Write':
+      return `<span class="text-yellow-300">Write</span> <code class="text-xs bg-gray-800 px-1 rounded">${input.file_path ? shortPath(input.file_path) : 'file'}</code>`;
+    case 'Glob':
+      return `<span class="text-blue-300">Find files</span> <code class="text-xs bg-gray-800 px-1 rounded">${input.pattern ? esc(input.pattern) : '*'}</code>`;
+    case 'Grep':
+      return `<span class="text-blue-300">Search</span> <code class="text-xs bg-gray-800 px-1 rounded">/${esc(truncate(input.pattern || '', 40))}/</code>`;
+    case 'Agent':
+      return `<span class="text-purple-300">Agent</span> ${esc(truncate(input.description || 'task', 50))}`;
+    case 'WebFetch':
+      return `<span class="text-blue-300">Fetch</span> <code class="text-xs bg-gray-800 px-1 rounded">${esc(truncate(input.url || '', 50))}</code>`;
+    case 'WebSearch':
+      return `<span class="text-blue-300">Search web</span> "${esc(truncate(input.query || '', 50))}"`;
+    case 'AskUserQuestion':
+      return `<span class="text-yellow-300">Ask user</span> "${esc(truncate(input.question || '', 50))}"`;
+    case 'Skill':
+      return `<span class="text-purple-300">Skill</span> /${esc(input.skill || '?')}`;
+    case 'ToolSearch':
+      return `<span class="text-blue-300">Discover tool</span> ${esc(truncate(input.query || '', 40))}`;
+    default:
+      return `<strong>${esc(toolName)}</strong>`;
+  }
+}
+
+function parseInput(rawInput) {
+  if (!rawInput) return {};
+  try { return typeof rawInput === 'string' ? JSON.parse(rawInput) : rawInput; }
+  catch (e) { return {}; }
+}
+
+function shortPath(p) {
+  if (!p) return '';
+  const parts = p.split('/');
+  if (parts.length <= 3) return esc(p);
+  return esc('.../' + parts.slice(-3).join('/'));
+}
+
+function truncate(s, max) {
+  if (!s) return '';
+  s = s.replace(/\n/g, ' ').trim();
+  return s.length > max ? s.substring(0, max) + '...' : s;
+}
+
+function filterEvents(type) {
+  currentFilter = type;
+  document.querySelectorAll('.ev-filter').forEach(btn => {
+    if (btn.dataset.filter === type) {
+      btn.className = 'ev-filter px-2 py-0.5 text-xs rounded bg-surface-lighter text-gray-300';
+    } else {
+      btn.className = 'ev-filter px-2 py-0.5 text-xs rounded text-gray-500 hover:text-gray-300';
+    }
+  });
+  // Re-render if we have data
+  if (selectedWorkflowID) loadWorkflowDetail(selectedWorkflowID);
+}
+
+// ---- Duration formatting ----
+function formatDuration(ms) {
+  if (ms < 0) ms = 0;
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const rs = s % 60;
+  if (m < 60) return `${m}m ${rs}s`;
+  const h = Math.floor(m / 60);
+  const rm = m % 60;
+  return `${h}h ${rm}m`;
+}
+
+// ---- Utils ----
+function esc(s) {
+  if (!s) return '';
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+function timeAgo(iso) {
+  const d = new Date(iso);
+  const diff = (Date.now() - d.getTime()) / 1000;
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+  if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+  return Math.floor(diff / 86400) + 'd ago';
+}
+
+// ---- Refresh ----
+async function refreshAll() {
+  await loadWorkflows();
+  if (selectedWorkflowID) await loadWorkflowDetail(selectedWorkflowID);
+}
+
+// Auto-refresh every 3 seconds
+function startAutoRefresh() {
+  if (refreshTimer) clearInterval(refreshTimer);
+  refreshTimer = setInterval(refreshAll, 3000);
+}
+
+// ---- Init ----
+(async () => {
+  await loadWorkflows();
+  startAutoRefresh();
+})();
+</script>
+</body>
+</html>

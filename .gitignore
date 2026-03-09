@@ -1,3 +1,3 @@
 bin/
-hook-handler
-web
+/hook-handler
+/web
