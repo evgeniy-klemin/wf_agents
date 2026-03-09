@@ -1,0 +1,10 @@
+{
+  "_comment": "Matches NTCoding original: only RESPAWN blocks writes. Git commands (commit/push/checkout) are blocked globally with per-phase exemptions (handled in hook-handler code, not here).",
+  "RESPAWN": {
+    "forbidden_write": true
+  },
+  "git_exemptions": {
+    "PLANNING": ["git checkout"],
+    "COMMITTING": ["git commit", "git push"]
+  }
+}
