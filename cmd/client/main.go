@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -105,6 +106,9 @@ func cmdStart(ctx context.Context, c client.Client, args []string) {
 	if err != nil {
 		log.Fatalf("Failed to start workflow: %v", err)
 	}
+
+	// Create marker file so hook-handler knows this session is active
+	createSessionMarker(input.SessionID)
 
 	fmt.Printf("Workflow started:\n  ID:    %s\n  RunID: %s\n  UI:    http://localhost:8080/namespaces/default/workflows/%s\n",
 		run.GetID(), run.GetRunID(), workflowID)
@@ -381,6 +385,17 @@ func collectEvidence() map[string]string {
 	}
 
 	return evidence
+}
+
+// createSessionMarker writes a marker file so the hook-handler knows this session
+// has an active workflow. Without the marker, hooks are no-ops.
+func createSessionMarker(sessionID string) {
+	dir := filepath.Join(os.TempDir(), "wf-agents-sessions")
+	os.MkdirAll(dir, 0o755)
+	marker := filepath.Join(dir, sessionID)
+	if err := os.WriteFile(marker, []byte(sessionID), 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not create session marker: %v\n", err)
+	}
 }
 
 func runCmd(timeout time.Duration, name string, args ...string) (string, error) {

@@ -1,13 +1,30 @@
-# wf_agents — Event-Sourced Claude Code Workflows
-
-## What this is
+# wf_agents — Event-Sourced Claude Code Workflow Plugin
 
 Temporal-based observer/event store for Claude Code autonomous coding sessions. Temporal does NOT orchestrate — Claude Code runs autonomously, hooks send signals to Temporal which tracks state, enforces phase transitions, and provides a web dashboard.
 
-Inspired by [NTCoding/autonomous-claude-agent-team](https://github.com/NTCoding/autonomous-claude-agent-team).
+## Plugin Format
 
-## Project structure
+This project is a Claude Code plugin. Install via:
+```bash
+make install                          # builds binaries
+claude --plugin-dir /path/to/wf_agents
+```
 
+### Plugin structure
+```
+.claude-plugin/plugin.json   Plugin manifest
+hooks/hooks.json              Hook configuration (all events → bin/hook-handler)
+agents/                       Subagent definitions with YAML frontmatter
+  feature-team-lead.md        Team Lead: plans, delegates, coordinates phases
+  developer.md                TDD Developer: writes tests first, then implementation
+  reviewer.md                 Code Reviewer: validates correctness, reports verdict
+commands/                     Slash commands
+  start-feature-team.md       /wf-agents:start-feature-team — launch autonomous workflow
+  workflow.md                 /wf-agents:workflow — phase transitions
+  status.md                   /wf-agents:status — check workflow status
+```
+
+### Go backend
 ```
 cmd/
   worker/          Temporal worker process
@@ -17,17 +34,13 @@ cmd/
 internal/
   model/           Phase enum, events, workflow I/O types (state.go, events.go, workflow_input.go)
   workflow/        Main workflow + guards (coding_session.go, guards.go)
-templates/         CLAUDE.md template injected into target projects
-hooks/             hooks.json for Claude Code hook configuration
-claude/agents/     Agent role prompts (team-lead, developer, reviewer)
-claude/states/     Phase instruction prompts
 ```
 
 ## Build and run
 
 ```bash
 docker compose up -d          # Temporal server + UI (port 8080)
-make build                    # builds bin/{worker,wf-client,hook-handler,wf-web}
+make install                  # builds bin/{worker,wf-client,hook-handler,wf-web}
 make worker                   # start worker
 make web                      # start web dashboard (port 8090)
 ```
@@ -57,15 +70,12 @@ Guards validate evidence collected by the client before allowing transitions:
 - PR_CREATION → FEEDBACK: `pr_checks_pass=true`
 - FEEDBACK → COMPLETE: `pr_approved=true` OR `pr_merged=true`
 
-Guards support OR conditions via `altEvidenceKey`/`altWantValue`.
-
 ## Hook permission enforcement (cmd/hook-handler)
 
 **PLANNING phase** — whitelist approach:
 - Only read-only tools allowed (Read, Glob, Grep, WebFetch, etc.)
 - Edit/Write/NotebookEdit are denied
-- Bash: only safe commands from whitelist (ls, cat, grep, git status/log/diff/branch/checkout, gh, go test, etc.)
-- All other Bash commands denied
+- Bash: only safe commands from whitelist
 
 **RESPAWN phase** — Edit/Write/NotebookEdit denied
 
@@ -73,15 +83,17 @@ Guards support OR conditions via `altEvidenceKey`/`altWantValue`.
 - PLANNING: git checkout allowed (branch creation)
 - COMMITTING: git commit, git push allowed
 
-**Auto-BLOCKED**: Stop/Notification/TeammateIdle → transitions to BLOCKED. Any active event (tool use, UserPromptSubmit) → auto-unblocks.
+**Auto-BLOCKED**: Stop/Notification/TeammateIdle → transitions to BLOCKED. Any active event → auto-unblocks.
 
 ## Key patterns
 
+- Hook-handler uses `$CLAUDE_PLUGIN_ROOT` env var to locate `bin/wf-client` and other resources
+- Session marker file in `$TMPDIR/wf-agents-sessions/<session-id>` gates hooks — no marker = no-op
 - Transitions use `UpdateWorkflow` (synchronous allow/deny), not signals
 - `WaitForStage: client.WorkflowUpdateStageCompleted` required in UpdateWorkflow options
-- Task description set via `set-task` signal on first `UserPromptSubmit`, updates Temporal memo via `workflow.UpsertMemo`
-- Web dashboard reads task from Temporal memo in list results (works for completed workflows too)
-- Stuck detection: 5 min idle threshold, terminate via `POST /api/terminate/{id}`
+- Task description set via `set-task` signal on first `UserPromptSubmit`
+- Web dashboard reads task from Temporal memo
+- Phase instructions injected as `additionalContext` on every PreToolUse
 
 ## Testing
 
@@ -90,11 +102,7 @@ go test ./internal/workflow/ -v    # workflow + guard tests
 go test ./internal/model/ -v       # state machine tests
 ```
 
-Tests use `testsuite.TestWorkflowEnvironment`. Evidence maps: `testEvidence` (all pass), `testEvidenceDirty` (dirty working tree for DEVELOPING→REVIEWING).
-
 ## Important conventions
 
 - All communication with Temporal uses workflow ID format: `coding-session-{session-id}`
-- `templates/CLAUDE.md` is the autonomous workflow protocol injected into target projects — describes phase execution for Team Lead agent
-- Phase instructions injected via `additionalContext` in PreToolUse hook responses
 - Web UI is a single embedded HTML file (`cmd/web/static/index.html`) using Tailwind CDN

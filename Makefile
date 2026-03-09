@@ -1,4 +1,4 @@
-.PHONY: build worker client hook-handler web up down status
+.PHONY: build worker client hook-handler web up down status install
 
 # Build all binaries
 build:
@@ -38,6 +38,11 @@ list:
 # Run the web dashboard
 web: build
 	./bin/wf-web
+
+# Install as Claude Code plugin
+install: build
+	@echo "Plugin ready at $(CURDIR)"
+	@echo "Use: claude --plugin-dir $(CURDIR)"
 
 # Clean build artifacts
 clean:

@@ -106,7 +106,7 @@
 
           <!-- Diagram -->
           <div class="flex-shrink-0 px-6 py-6 overflow-x-auto">
-            <svg id="workflow-diagram" viewBox="0 0 1350 320" class="w-full max-w-7xl mx-auto" style="min-width:1000px;"></svg>
+            <svg id="workflow-diagram" viewBox="0 0 1350 220" class="w-full max-w-7xl mx-auto" style="min-width:1000px;"></svg>
           </div>
 
           <!-- Phase History Bar -->
@@ -149,10 +149,6 @@ const PHASES = [
   { id: 'PR_CREATION', label: 'PR Creation', icon: 'M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4' },
   { id: 'FEEDBACK',    label: 'Feedback',    icon: 'M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z' },
   { id: 'COMPLETE',    label: 'Complete',    icon: 'M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z' },
-];
-
-const TERMINAL_PHASES = [
-  { id: 'BLOCKED', label: 'Blocked (pause)', icon: 'M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z' },
 ];
 
 // Transitions: [from, to] pairs (including loops)
@@ -325,9 +321,16 @@ async function loadWorkflowDetail(wfID) {
       apiGet(`/api/workflows/${encodeURIComponent(wfID)}/timeline`),
     ]);
 
-    renderStatusBar(wfID, status, timeline);
-    renderDiagram(status, status.pre_blocked_phase, timeline);
-    renderPhaseHistory(timeline);
+    // Determine session end time: for finished sessions use last_updated_at, otherwise now
+    const wfEntry = workflowsCache.find(w => w.workflow_id === wfID);
+    const isFinished = status.phase === 'COMPLETE' || (wfEntry && wfEntry.status !== 'RUNNING');
+    const sessionEndTime = isFinished && status.last_updated_at
+      ? new Date(status.last_updated_at).getTime()
+      : Date.now();
+
+    renderStatusBar(wfID, status, timeline, sessionEndTime);
+    renderDiagram(status, status.pre_blocked_phase, timeline, sessionEndTime);
+    renderPhaseHistory(timeline, sessionEndTime);
     renderTimeline(timeline, status);
   } catch (e) {
     console.error('Failed to load workflow detail:', e);
@@ -336,7 +339,7 @@ async function loadWorkflowDetail(wfID) {
 }
 
 // ---- Status Bar ----
-function renderStatusBar(wfID, status, timeline) {
+function renderStatusBar(wfID, status, timeline, sessionEndTime) {
   const sessionID = wfID.replace('coding-session-', '');
   document.getElementById('wf-title').textContent = sessionID;
 
@@ -358,7 +361,7 @@ function renderStatusBar(wfID, status, timeline) {
   // Total session duration
   const events = timeline.events || [];
   const sessionDur = events.length > 0
-    ? formatDuration(Date.now() - new Date(events[0].timestamp).getTime())
+    ? formatDuration(sessionEndTime - new Date(events[0].timestamp).getTime())
     : '';
 
   // Stuck detection — only for RUNNING workflows
@@ -391,11 +394,12 @@ function renderStatusBar(wfID, status, timeline) {
 }
 
 // ---- Phase durations from transition events ----
-function computePhaseDurations(timeline) {
+function computePhaseDurations(timeline, endTime) {
   const events = timeline.events || [];
   const durations = {}; // phase → total ms
   let currentPhase = null;
   let phaseStart = null;
+  const now = endTime || Date.now();
 
   for (const ev of events) {
     if (ev.type === 'transition' && ev.detail) {
@@ -411,26 +415,27 @@ function computePhaseDurations(timeline) {
       phaseStart = ts;
     }
   }
-  // Current phase is still running
+  // Current/last phase
   if (currentPhase && phaseStart) {
-    durations[currentPhase] = (durations[currentPhase] || 0) + (Date.now() - phaseStart);
+    durations[currentPhase] = (durations[currentPhase] || 0) + (now - phaseStart);
   }
 
   // If no transitions yet, the first event marks PLANNING start
   if (!currentPhase && events.length > 0) {
-    durations['PLANNING'] = Date.now() - new Date(events[0].timestamp).getTime();
+    durations['PLANNING'] = now - new Date(events[0].timestamp).getTime();
   }
 
   return durations;
 }
 
 // ---- Phase History (stacked bar) ----
-function computePhaseSegments(timeline) {
+function computePhaseSegments(timeline, endTime) {
   const events = timeline.events || [];
   const segments = []; // { phase, startMs, durationMs }
   let currentPhase = null;
   let phaseStart = null;
   let sessionStart = null;
+  const now = endTime || Date.now();
 
   for (const ev of events) {
     if (ev.type === 'transition' && ev.detail) {
@@ -444,22 +449,22 @@ function computePhaseSegments(timeline) {
       phaseStart = ts;
     }
   }
-  // Current phase still running
+  // Current/last phase
   if (currentPhase && phaseStart) {
-    segments.push({ phase: currentPhase, startMs: phaseStart - sessionStart, durationMs: Date.now() - phaseStart });
+    segments.push({ phase: currentPhase, startMs: phaseStart - sessionStart, durationMs: now - phaseStart });
   }
   // No transitions yet
   if (!currentPhase && events.length > 0) {
     sessionStart = new Date(events[0].timestamp).getTime();
-    segments.push({ phase: 'PLANNING', startMs: 0, durationMs: Date.now() - sessionStart });
+    segments.push({ phase: 'PLANNING', startMs: 0, durationMs: now - sessionStart });
   }
 
   return { segments, sessionStart };
 }
 
-function renderPhaseHistory(timeline) {
+function renderPhaseHistory(timeline, sessionEndTime) {
   const el = document.getElementById('phase-history');
-  const { segments } = computePhaseSegments(timeline);
+  const { segments } = computePhaseSegments(timeline, sessionEndTime);
 
   if (segments.length === 0) {
     el.innerHTML = '';
@@ -578,18 +583,18 @@ function renderPhaseHistory(timeline) {
 }
 
 // ---- Diagram ----
-function renderDiagram(status, preBlockedPhase, timeline) {
-  const phaseDurations = computePhaseDurations(timeline || { events: [] });
+function renderDiagram(status, preBlockedPhase, timeline, sessionEndTime) {
+  const phaseDurations = computePhaseDurations(timeline || { events: [] }, sessionEndTime);
   const svg = document.getElementById('workflow-diagram');
   const currentPhase = status.phase;
+  const isBlocked = currentPhase === 'BLOCKED';
 
   // Compute visited phases from the linear order up to current
   const mainOrder = PHASES.map(p => p.id);
   let currentIdx = mainOrder.indexOf(currentPhase);
-  const isTerminal = currentPhase === 'BLOCKED';
 
   // When BLOCKED, use pre-blocked phase to show progress
-  if (isTerminal && preBlockedPhase) {
+  if (isBlocked && preBlockedPhase) {
     currentIdx = mainOrder.indexOf(preBlockedPhase);
   }
 
@@ -599,10 +604,7 @@ function renderDiagram(status, preBlockedPhase, timeline) {
   const gapX = 25;
   const totalW = PHASES.length * (nodeW + gapX) - gapX + startX * 2;
 
-  // Terminal nodes position
-  const termY = startY + nodeH + 90;
-
-  svg.setAttribute('viewBox', `0 0 ${totalW} 320`);
+  svg.setAttribute('viewBox', `0 0 ${totalW} 220`);
 
   let html = '';
 
@@ -631,10 +633,6 @@ function renderDiagram(status, preBlockedPhase, timeline) {
   PHASES.forEach((p, i) => {
     positions[p.id] = { x: startX + i * (nodeW + gapX), y: startY };
   });
-  // Terminal phases below PLANNING and after last
-  TERMINAL_PHASES.forEach((p, i) => {
-    positions[p.id] = { x: startX + (1 + i * 3) * (nodeW + gapX), y: termY };
-  });
 
   // Draw connections first (behind nodes)
   // Forward arrows
@@ -644,7 +642,7 @@ function renderDiagram(status, preBlockedPhase, timeline) {
     const fx = from.x + nodeW, fy = from.y + nodeH / 2;
     const tx = to.x, ty = to.y + nodeH / 2;
 
-    const isPast = currentIdx > i || (isTerminal && currentIdx === -1);
+    const isPast = currentIdx > i;
     const isNext = currentIdx === i;
 
     html += `<line x1="${fx}" y1="${fy}" x2="${tx}" y2="${ty}"
@@ -695,60 +693,36 @@ function renderDiagram(status, preBlockedPhase, timeline) {
       fill="#f59e0b" font-size="10" opacity="0.8">feedback changes</text>`;
   }
 
-  // Blocked arrow: draw from the pre-blocked phase to BLOCKED node
-  TERMINAL_PHASES.forEach(tp => {
-    if (tp.id === currentPhase) {
-      // Use pre_blocked_phase to know where we came from
-      const sourcePhase = preBlockedPhase || PHASES[0].id;
-      const fromP = positions[sourcePhase];
-      const toP = positions[tp.id];
-      if (fromP && toP) {
-        const fx = fromP.x + nodeW / 2, fy = fromP.y + nodeH;
-        const tx = toP.x + nodeW / 2, ty = toP.y;
-        html += `<path d="M${fx},${fy} Q${fx},${(fy + ty) / 2} ${tx},${ty}"
-          fill="none" stroke="#ef4444" stroke-width="2" marker-end="url(#arrow)"/>`;
-        html += `<text x="${(fx + tx) / 2 + 10}" y="${(fy + ty) / 2 - 4}" text-anchor="middle"
-          fill="#ef4444" font-size="10" opacity="0.8">paused</text>`;
-      }
-    }
-  });
-
   // Draw main phase nodes
   PHASES.forEach((phase, i) => {
     const pos = positions[phase.id];
     const pc = PHASE_COLORS[phase.id];
-    const isCurrent = phase.id === currentPhase;
-    const isPast = currentIdx > i;
+    const isThisBlocked = isBlocked && preBlockedPhase === phase.id;
+    const isCurrent = isThisBlocked || phase.id === currentPhase;
+    const isPast = currentIdx > i && !isCurrent;
     const isFuture = !isCurrent && !isPast;
-    const dur = phaseDurations[phase.id];
+    const dur = (phaseDurations[phase.id] || 0) + (isThisBlocked ? (phaseDurations['BLOCKED'] || 0) : 0) || undefined;
 
-    html += renderNode(pos.x, pos.y, nodeW, nodeH, phase, pc, isCurrent, isPast, isFuture, dur);
-  });
-
-  // Draw terminal nodes
-  TERMINAL_PHASES.forEach(phase => {
-    const pos = positions[phase.id];
-    const pc = PHASE_COLORS[phase.id];
-    const isCurrent = phase.id === currentPhase;
-    const dur = phaseDurations[phase.id];
-    html += renderNode(pos.x, pos.y, nodeW, nodeH, phase, pc, isCurrent, false, !isCurrent, dur);
+    html += renderNode(pos.x, pos.y, nodeW, nodeH, phase, pc, isCurrent, isPast, isFuture, dur, isThisBlocked);
   });
 
   svg.innerHTML = html;
 }
 
-function renderNode(x, y, w, h, phase, colors, isCurrent, isPast, isFuture, durationMs) {
+function renderNode(x, y, w, h, phase, colors, isCurrent, isPast, isFuture, durationMs, isBlocked) {
   const opacity = isFuture ? 0.4 : 1;
-  const fillColor = isCurrent ? colors.bg : (isPast ? colors.bg + 'aa' : '#1e293b');
-  const strokeColor = isCurrent ? colors.ring : (isPast ? colors.ring + '88' : '#334155');
-  const textColor = isCurrent || isPast ? colors.text : '#64748b';
+  const blockedColors = PHASE_COLORS.BLOCKED;
+  const ringColor = isBlocked ? blockedColors.ring : colors.ring;
+  const fillColor = isBlocked ? blockedColors.bg : (isCurrent ? colors.bg : (isPast ? colors.bg + 'aa' : '#1e293b'));
+  const strokeColor = isBlocked ? blockedColors.ring : (isCurrent ? colors.ring : (isPast ? colors.ring + '88' : '#334155'));
+  const textColor = isCurrent || isPast ? (isBlocked ? blockedColors.text : colors.text) : '#64748b';
 
   let html = '';
 
   // Glow for current phase — breathing ring, no scale
   if (isCurrent) {
     html += `<rect x="${x - 5}" y="${y - 5}" width="${w + 10}" height="${h + 10}"
-      rx="15" fill="none" stroke="${colors.ring}" stroke-width="2.5"
+      rx="15" fill="none" stroke="${ringColor}" stroke-width="2.5"
       class="pulse-ring"/>`;
   }
 
@@ -757,10 +731,20 @@ function renderNode(x, y, w, h, phase, colors, isCurrent, isPast, isFuture, dura
     fill="${fillColor}" stroke="${strokeColor}" stroke-width="${isCurrent ? 2 : 1.5}"
     opacity="${opacity}" filter="${isCurrent ? 'url(#shadow)' : ''}" class="node-card"/>`;
 
-  // Checkmark for past phases
-  if (isPast) {
+  // Checkmark for past phases (not blocked)
+  if (isPast && !isBlocked) {
     html += `<circle cx="${x + w - 10}" cy="${y + 10}" r="7" fill="#16a34a"/>`;
     html += `<path d="M${x + w - 13},${y + 10} l2,2 4,-4" stroke="white" stroke-width="1.5" fill="none"/>`;
+  }
+
+  // Blocked badge — pause icon in top-right corner
+  if (isBlocked) {
+    html += `<circle cx="${x + w - 10}" cy="${y + 10}" r="8" fill="${blockedColors.bg}" stroke="${blockedColors.ring}" stroke-width="1.5"/>`;
+    html += `<g transform="translate(${x + w - 17}, ${y + 3})">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M10 9v6m4-6v6"/>
+      </svg>
+    </g>`;
   }
 
   // Icon
@@ -774,7 +758,7 @@ function renderNode(x, y, w, h, phase, colors, isCurrent, isPast, isFuture, dura
   const labelY = durationMs && (isCurrent || isPast) ? y + h - 16 : y + h - 12;
   html += `<text x="${x + w / 2}" y="${labelY}" text-anchor="middle"
     fill="${textColor}" font-size="11" font-weight="${isCurrent ? '600' : '500'}"
-    font-family="ui-sans-serif, system-ui, sans-serif" opacity="${opacity}">${phase.label}</text>`;
+    font-family="ui-sans-serif, system-ui, sans-serif" opacity="${opacity}">${isBlocked ? phase.label + ' (paused)' : phase.label}</text>`;
 
   // Duration below label
   if (durationMs && (isCurrent || isPast)) {
