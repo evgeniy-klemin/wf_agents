@@ -233,8 +233,13 @@ func (s *sessionState) handleTransition(ctx workflow.Context, req model.SignalTr
 		s.preBlockedPhase = s.phase
 	}
 
-	// Track iteration on RESPAWN (iteration boundary), except first entry from PLANNING
-	if req.To == model.PhaseRespawn && s.phase != model.PhasePlanning {
+	// Track iteration on RESPAWN (iteration boundary), except first entry from PLANNING.
+	// When unblocking to RESPAWN, use preBlockedPhase to determine origin.
+	originPhase := s.phase
+	if originPhase == model.PhaseBlocked {
+		originPhase = s.preBlockedPhase
+	}
+	if req.To == model.PhaseRespawn && originPhase != model.PhasePlanning {
 		s.iteration++
 		if s.iteration > s.maxIter {
 			s.iteration-- // rollback

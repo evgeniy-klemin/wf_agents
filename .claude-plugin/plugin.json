@@ -1,0 +1,5 @@
+{
+  "name": "wf-agents",
+  "version": "1.0.0",
+  "description": "Autonomous coding workflow engine with phase enforcement, guards, and event tracking"
+}

@@ -15,8 +15,6 @@ import (
 	"go.temporal.io/sdk/client"
 )
 
-const taskQueue = "coding-session"
-
 // claudeHookInput matches the exact JSON schema that Claude Code sends via stdin to hooks.
 type claudeHookInput struct {
 	SessionID      string          `json:"session_id"`
@@ -64,6 +62,11 @@ func main() {
 		os.Exit(0)
 	}
 
+	// No active workflow for this session → hooks are no-ops
+	if !sessionMarkerExists(input.SessionID) {
+		os.Exit(0)
+	}
+
 	workflowID := "coding-session-" + input.SessionID
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -77,11 +80,6 @@ func main() {
 		os.Exit(0)
 	}
 	defer c.Close()
-
-	// On SessionStart — auto-create workflow
-	if input.HookEventName == "SessionStart" {
-		ensureWorkflowExists(ctx, c, workflowID, input)
-	}
 
 	detail := buildDetail(input)
 
@@ -294,77 +292,166 @@ func queryPhase(ctx context.Context, c client.Client, workflowID string) model.P
 	return phase
 }
 
-// phaseInstructions returns context-specific enforcement instructions for the current phase.
-// These are injected as additionalContext on every PreToolUse to keep Claude on track.
+// phaseInstructions returns comprehensive enforcement instructions for the current phase.
+// Injected as additionalContext on every PreToolUse — this is the PRIMARY mechanism
+// that keeps Claude on track (since plugin CLAUDE.md is project docs, not workflow rules).
 func phaseInstructions(phase model.Phase) string {
 	wfc := wfClientBin()
+
+	pluginRoot := os.Getenv("CLAUDE_PLUGIN_ROOT")
+	if pluginRoot == "" {
+		pluginRoot = "${CLAUDE_PLUGIN_ROOT}"
+	}
+	agentFile := pluginRoot + "/agents/feature-team-lead.md"
+
+	// Preamble for Team Lead phases — where the main agent is acting
+	teamLeadPreamble := "You are the Team Lead. You NEVER write code or review code. You plan, delegate, and coordinate.\n" +
+		"If a tool call is denied, DO NOT retry — follow the denial reason.\n" +
+		"CONTEXT RECOVERY: If context was compressed or you lost your role instructions, " +
+		"re-read your full protocol: " + agentFile + "\n\n"
+
+	// Enforcement-only preamble for phases where subagents act
+	enforcementPreamble := "If a tool call is denied, DO NOT retry — follow the denial reason.\n\n"
+
 	switch phase {
 	case model.PhasePlanning:
-		return fmt.Sprintf("PHASE: PLANNING. You are the Team Lead. Analyze the task, explore the codebase, create a plan. DO NOT write/edit code — file writes will be blocked by git restrictions. Only read-only tools allowed. When ready, run: %s transition <id> --to RESPAWN --reason \"<plan summary>\". If transition is DENIED (exit 1), read the error and adjust.", wfc)
+		return teamLeadPreamble + fmt.Sprintf(`PHASE: PLANNING — Read-only exploration and planning.
+
+CHECKLIST:
+- [ ] Run git branch --show-current → record as BASE_BRANCH
+- [ ] Create feature branch: git checkout -b <feature-branch>
+- [ ] Read relevant files, explore codebase structure
+- [ ] Identify files to create or modify
+- [ ] Break task into ordered iteration subtasks
+- [ ] Define testing strategy
+- [ ] Get user approval for the plan
+- [ ] Transition: %s transition <id> --to RESPAWN --reason "Plan: <summary>"
+
+BLOCKED ACTIONS: Edit, Write, NotebookEdit, unsafe Bash commands. Only read-only tools allowed.
+If transition DENIED (exit 1): read error, adjust plan.
+DO NOT offer to clear context or auto-accept edits. Transition to RESPAWN — that is the designed context reset.`, wfc)
 
 	case model.PhaseRespawn:
-		return fmt.Sprintf("PHASE: RESPAWN. Kill existing subagents and spawn fresh ones with clean context. File writes (Edit/Write) are BLOCKED in this phase. Only agent management and reads allowed. When agents are ready: %s transition <id> --to DEVELOPING. If DENIED, check status.", wfc)
+		return teamLeadPreamble + fmt.Sprintf(`PHASE: RESPAWN — Spawn fresh agents with clean context.
+
+CHECKLIST:
+- [ ] Kill existing Developer/Reviewer subagents
+- [ ] Prepare iteration context (plan + current iteration info)
+- [ ] Spawn fresh agents — DO NOT pass stale context from prior iterations
+- [ ] Transition: %s transition <id> --to DEVELOPING --reason "Iteration N: <task>"
+
+BLOCKED ACTIONS: Edit, Write, NotebookEdit. Only agent management and reads.`, wfc)
 
 	case model.PhaseDeveloping:
-		return "PHASE: DEVELOPING. A Developer subagent should be doing the work. If you are the Team Lead, do not write code yourself — spawn a Developer subagent. If you are the Developer, implement via TDD. Git commit/push are BLOCKED — only in COMMITTING phase."
+		return enforcementPreamble + fmt.Sprintf(`PHASE: DEVELOPING — Developer subagent implements via TDD.
+
+IF YOU ARE THE TEAM LEAD: Do NOT write code yourself. Spawn a Developer subagent.
+  Agent instructions: use .claude/agents/developer.md if it exists, otherwise %s/agents/developer.md.
+IF YOU ARE THE DEVELOPER: Implement via TDD — tests first, then code, then refactor.
+  Use simple, single-purpose Bash commands (go test ./..., npm test, make test).
+  For complex commands — create a helper script in scripts/ and run ./scripts/<name>.sh.
+  Do NOT use pipes, subshells, or multi-command chains — they block auto-approve.
+  Do NOT run git add, git commit, or git push — leave changes uncommitted on disk.
+  The REVIEWING guard requires a dirty working tree (uncommitted changes).
+
+CHECKLIST:
+- [ ] Load developer agent: .claude/agents/developer.md (project) or %s/agents/developer.md (plugin default)
+- [ ] Spawn Developer subagent with: agent instructions, plan, iteration number, prior rejection feedback
+- [ ] Developer writes failing tests
+- [ ] Developer implements to pass tests
+- [ ] Developer runs all tests (simple commands only)
+- [ ] Leave all changes UNCOMMITTED — do not git add or git commit
+- [ ] Transition: %s transition <id> --to REVIEWING --reason "Development done, iteration N"
+
+BLOCKED ACTIONS: git add, git commit, git push (only in COMMITTING phase).`, pluginRoot, pluginRoot, wfc)
 
 	case model.PhaseReviewing:
-		return "PHASE: REVIEWING. A Reviewer subagent should be doing the work. If you are the Reviewer, DO NOT modify files — only read and report VERDICT: APPROVED or VERDICT: REJECTED. Git commit/push are BLOCKED."
+		return enforcementPreamble + fmt.Sprintf(`PHASE: REVIEWING — Reviewer subagent validates code quality.
+
+IF YOU ARE THE TEAM LEAD: Do NOT review code yourself. Spawn a Reviewer subagent.
+  Agent instructions: use .claude/agents/reviewer.md if it exists, otherwise %s/agents/reviewer.md.
+IF YOU ARE THE REVIEWER: Read-only. DO NOT modify files. Report verdict.
+
+CHECKLIST:
+- [ ] Load reviewer agent: .claude/agents/reviewer.md (project) or %s/agents/reviewer.md (plugin default)
+- [ ] Spawn Reviewer subagent with: agent instructions, scope of changes, plan context
+- [ ] Reviewer runs git diff, tests, linting
+- [ ] Reviewer outputs VERDICT: APPROVED or VERDICT: REJECTED — <issues>
+- [ ] If APPROVED → %s transition <id> --to COMMITTING --reason "Review approved"
+- [ ] If REJECTED → %s transition <id> --to DEVELOPING --reason "Review rejected: <issues>"
+
+BLOCKED ACTIONS: git commit, git push, Edit/Write (for Reviewer).`, pluginRoot, pluginRoot, wfc, wfc)
 
 	case model.PhaseCommitting:
-		return fmt.Sprintf("PHASE: COMMITTING. Git commit and push are ALLOWED here. Commit and push approved changes. Then: more iterations → %s transition <id> --to RESPAWN (may be DENIED if max iterations reached), or all done → %s transition <id> --to PR_CREATION. Always check exit code.", wfc, wfc)
+		return teamLeadPreamble + fmt.Sprintf(`PHASE: COMMITTING — Git commit and push are ALLOWED.
+
+CHECKLIST:
+- [ ] git add <specific files>
+- [ ] git commit -m "<clear message>"
+- [ ] git push
+- [ ] Verify: git status (working tree must be clean)
+- [ ] Decide: more iterations or all done?
+  - More iterations → %s transition <id> --to RESPAWN --reason "Iteration N+1: <task>"
+  - All done → %s transition <id> --to PR_CREATION --reason "All iterations complete"
+
+If RESPAWN DENIED: max iterations reached, must go to PR_CREATION.`, wfc, wfc)
 
 	case model.PhasePRCreation:
-		return fmt.Sprintf("PHASE: PR_CREATION. Create a draft PR with gh pr create --draft --base BASE_BRANCH. After creating the PR, present the URL to the user and WAIT for CI checks to pass. Then: %s transition <id> --to FEEDBACK.", wfc)
+		return teamLeadPreamble + fmt.Sprintf(`PHASE: PR_CREATION — Create draft PR and wait for CI.
+
+CHECKLIST:
+- [ ] gh pr create --draft --base BASE_BRANCH --title "<title>" --body "<description>"
+- [ ] Present PR URL to user
+- [ ] Wait for CI checks to pass
+- [ ] Transition: %s transition <id> --to FEEDBACK --reason "PR created: <url>, CI passing"
+
+If BASE_BRANCH is not main/master, --base is REQUIRED.`, wfc)
 
 	case model.PhaseFeedback:
-		return fmt.Sprintf("PHASE: FEEDBACK. STOP and WAIT for human PR review. DO NOT transition to COMPLETE until the user explicitly approves. Present the PR URL and wait. When the user provides feedback: changes needed → %s transition <id> --to RESPAWN, user approves → %s transition <id> --to COMPLETE.", wfc, wfc)
+		return teamLeadPreamble + fmt.Sprintf(`PHASE: FEEDBACK — Triage human PR review comments.
+
+CHECKLIST:
+- [ ] Check for comments: gh pr view --json reviewDecision,reviews,comments,state
+- [ ] If NO comments yet — poll in a loop:
+      Run "sleep 60" (Bash), then check again. Repeat until comments appear.
+      Do NOT stop or go idle — keep polling.
+- [ ] When comments found: gh api repos/{owner}/{repo}/pulls/{pr_number}/comments
+- [ ] For each comment: Accept (implement) / Reject (reply with reasoning) / Escalate (BLOCKED)
+- [ ] Reply to EVERY comment with a transparent, concise response:
+      ACCEPTED: what was changed, which files, brief rationale
+      REJECTED: technical reasoning why the change is not needed or harmful
+      Keep replies short but with enough context for the reviewer to understand without checking the code
+- [ ] Changes needed → %s transition <id> --to RESPAWN --reason "Implementing feedback: <summary>"
+- [ ] All comments resolved but PR NOT approved/merged → continue polling loop:
+      sleep 60, then gh pr view --json reviewDecision,reviews,comments,state
+      Watch for: new comments, reviewDecision=APPROVED, or state=MERGED
+      If new comments appear — triage them (repeat from checklist start)
+- [ ] PR approved/merged → %s transition <id> --to COMPLETE --reason "All feedback resolved, PR approved/merged"
+      GUARD: requires reviewDecision=APPROVED or state=MERGED. Will be DENIED otherwise.
+
+IMPORTANT: Do NOT stop and wait passively. Poll actively using sleep + gh pr view loop.`, wfc, wfc)
 
 	case model.PhaseComplete:
-		return "PHASE: COMPLETE. Workflow finished. No further actions allowed. All tool calls except reads will be denied."
+		return "PHASE: COMPLETE. Workflow finished. No further actions needed."
 
 	case model.PhaseBlocked:
-		return fmt.Sprintf("PHASE: BLOCKED. Waiting for human intervention. DO NOT proceed. DO NOT attempt any transitions except back to the pre-blocked phase. Check: %s status <id> to see pre_blocked_phase.", wfc)
+		return fmt.Sprintf(`PHASE: BLOCKED — Paused, waiting for human intervention.
+
+DO NOT proceed. DO NOT attempt transitions except back to the pre-blocked phase.
+Check: %s status <id> to see pre_blocked_phase.
+When unblocked: transition ONLY to the pre-blocked phase.`, wfc)
 
 	default:
 		return ""
 	}
 }
 
-func ensureWorkflowExists(ctx context.Context, c client.Client, workflowID string, input claudeHookInput) {
-	taskDesc := fmt.Sprintf("Claude Code session in %s", filepath.Base(input.CWD))
-
-	wfInput := model.WorkflowInput{
-		SessionID:       input.SessionID,
-		TaskDescription: taskDesc,
-		RepoPath:        input.CWD,
-		MaxIterations:   10,
-	}
-
-	startEvt := model.SignalHookEvent{
-		HookType:  "SessionStart",
-		SessionID: input.SessionID,
-		Detail: map[string]string{
-			"source": input.Source,
-			"model":  input.Model,
-			"cwd":    input.CWD,
-		},
-	}
-
-	opts := client.StartWorkflowOptions{
-		ID:        workflowID,
-		TaskQueue: taskQueue,
-		Memo: map[string]interface{}{
-			"task": taskDesc,
-		},
-	}
-
-	_, err := c.SignalWithStartWorkflow(ctx, workflowID, wf.SignalHookEvent, startEvt, opts, wf.CodingSessionWorkflow, wfInput)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to ensure workflow %s: %v\n", workflowID, err)
-	} else {
-		fmt.Fprintf(os.Stderr, "Workflow %s ready (session: %s, project: %s)\n", workflowID, input.SessionID, filepath.Base(input.CWD))
-	}
+// sessionMarkerExists checks if wf-client start has been run for this session.
+// The marker file is created by wf-client start in $TMPDIR/wf-agents-sessions/<session-id>.
+func sessionMarkerExists(sessionID string) bool {
+	marker := filepath.Join(os.TempDir(), "wf-agents-sessions", sessionID)
+	_, err := os.Stat(marker)
+	return err == nil
 }
 
 func buildDetail(input claudeHookInput) map[string]string {
@@ -448,8 +535,12 @@ func sendHookEvent(ctx context.Context, c client.Client, workflowID string, evt 
 	}
 }
 
-// wfClientBin returns the absolute path to wf-client binary (sibling of hook-handler).
+// wfClientBin returns the absolute path to wf-client binary.
+// Prefers $CLAUDE_PLUGIN_ROOT/bin/wf-client, falls back to sibling of hook-handler.
 func wfClientBin() string {
+	if root := os.Getenv("CLAUDE_PLUGIN_ROOT"); root != "" {
+		return filepath.Join(root, "bin", "wf-client")
+	}
 	exe, err := os.Executable()
 	if err != nil {
 		return "wf-client"
@@ -485,12 +576,12 @@ var fileWritingTools = map[string]bool{
 }
 
 // forbiddenGitCommands are git subcommands forbidden globally by default.
-var forbiddenGitCommands = []string{"git commit", "git push", "git checkout"}
+var forbiddenGitCommands = []string{"git commit", "git push", "git checkout", "git add"}
 
 // gitExemptions lists which git commands are allowed per phase.
 var gitExemptions = map[model.Phase][]string{
 	model.PhasePlanning:   {"git checkout"},
-	model.PhaseCommitting: {"git commit", "git push"},
+	model.PhaseCommitting: {"git add", "git commit", "git push"},
 }
 
 // checkToolPermission checks whether a tool is allowed in the given phase.
@@ -565,21 +656,28 @@ func checkBashPermission(phase model.Phase, toolInput json.RawMessage) permissio
 		return checkPlanningBash(cmd)
 	}
 
-	// Other phases: blacklist approach — block specific git commands
+	// Other phases: blacklist approach — block specific git commands.
+	// Split on pipes/chains so "git add . && git commit" is caught.
 	exemptions := gitExemptions[phase]
-	for _, forbidden := range forbiddenGitCommands {
-		if matchesBashPrefix(cmd, forbidden) {
-			exempted := false
-			for _, ex := range exemptions {
-				if ex == forbidden {
-					exempted = true
-					break
+	for _, segment := range splitBashCommands(cmd) {
+		seg := strings.TrimSpace(segment)
+		if seg == "" {
+			continue
+		}
+		for _, forbidden := range forbiddenGitCommands {
+			if matchesBashPrefix(seg, forbidden) {
+				exempted := false
+				for _, ex := range exemptions {
+					if ex == forbidden {
+						exempted = true
+						break
+					}
 				}
-			}
-			if !exempted {
-				return permissionCheck{
-					denied: true,
-					reason: fmt.Sprintf("%q is not allowed in %s phase. %s", forbidden, phase, phaseHint(phase)),
+				if !exempted {
+					return permissionCheck{
+						denied: true,
+						reason: fmt.Sprintf("%q is not allowed in %s phase. %s", forbidden, phase, phaseHint(phase)),
+					}
 				}
 			}
 		}

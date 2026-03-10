@@ -1,5 +1,7 @@
 # wf-agents — Autonomous Claude Code Workflow Engine
 
+![Workflow Dashboard](docs/workflow_dashboard.png)
+
 Event-sourced state machine for autonomous Claude Code coding sessions. Tracks development phases, enforces rules via hooks, and provides a real-time web dashboard.
 
 ## Concept
@@ -43,15 +45,19 @@ Any phase → BLOCKED (pause) → returns to original phase
 docker compose up -d              # Temporal Server + UI
 
 # 2. Build
-make build                        # bin/{worker,wf-client,hook-handler,wf-web}
+make install                      # bin/{worker,wf-client,hook-handler,wf-web}
 
 # 3. Worker
 make worker                       # start Temporal worker
 
-# 4. Install into target project
-./setup-project.sh /path/to/project
+# 4. Use as Claude Code plugin in target project
+cd /path/to/target-project
+claude --plugin-dir /path/to/wf_agents
 
-# 5. Web dashboard (optional)
+# 5. Inside Claude Code, start the workflow
+/wf-agents:start-feature-team --task "Implement feature X"
+
+# 6. Web dashboard (optional)
 make web                          # http://localhost:8090
 ```
 
@@ -121,10 +127,9 @@ cmd/
 internal/
   model/           Phase, events, workflow types
   workflow/        State machine, guards, event sourcing
-templates/         CLAUDE.md and agent prompts for target projects
-hooks/             hooks.json configuration
+templates/         Legacy CLAUDE.md template (pre-plugin)
+hooks/             hooks.json — plugin hook configuration
+agents/            Subagent definitions (developer, reviewer, feature-team-lead)
+commands/          Slash commands (start-feature-team, workflow, status)
+.claude-plugin/    Plugin manifest
 ```
-
-## Roadmap
-
-See [todo/01-migrate-to-plugin-format.md](todo/01-migrate-to-plugin-format.md) — migration to the official Claude Code plugin format.
