@@ -651,17 +651,17 @@ function renderDiagram(status, preBlockedPhase, timeline, sessionEndTime) {
       ${isNext ? 'class="flow-active"' : ''}/>`;
   }
 
-  // Loop: REVIEWING -> DEVELOPING (reject)
+  // Loop: REVIEWING -> RESPAWN (reject)
   {
     const from = positions['REVIEWING'];
-    const to = positions['DEVELOPING'];
+    const to = positions['RESPAWN'];
     const fx = from.x + nodeW / 2, fy = from.y + nodeH;
     const tx = to.x + nodeW / 2, ty = to.y + nodeH;
-    const cy = fy + 35;
-    html += `<path d="M${fx},${fy} C${fx},${cy} ${tx},${cy} ${tx},${ty}"
+    const cy1 = fy + 45, cy2 = ty + 45;
+    html += `<path d="M${fx},${fy} C${fx},${cy1} ${tx},${cy2} ${tx},${ty}"
       fill="none" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="4 3"
       marker-end="url(#arrow-loop)" opacity="0.7"/>`;
-    html += `<text x="${(fx + tx) / 2}" y="${cy + 14}" text-anchor="middle"
+    html += `<text x="${(fx + tx) / 2}" y="${Math.max(cy1, cy2) + 14}" text-anchor="middle"
       fill="#f59e0b" font-size="10" opacity="0.8">reject</text>`;
   }
 
