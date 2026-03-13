@@ -71,10 +71,8 @@ func guardPRApprovedOrMerged(_ *sessionState, evidence map[string]string) string
 }
 
 // guardMaxIter checks that s.iteration+1 <= s.maxIter.
-// origin is the effective non-BLOCKED phase (caller must pass the resolved origin).
-// For PLANNING origin, iteration is not incremented so the check is always allowed
-// (but that path goes through guardNoActiveAgents, not this guard).
-// This guard is used for transitions TO RESPAWN where we want to pre-check the limit.
+// Internally resolves the origin phase (using preBlockedPhase if currently BLOCKED).
+// First entry from PLANNING doesn't count as an iteration so is always allowed.
 func guardMaxIter(s *sessionState, _ map[string]string) string {
 	// Determine origin phase (BLOCKED uses preBlockedPhase)
 	origin := s.phase
@@ -107,18 +105,18 @@ func guardCleanTreeAndMaxIter(s *sessionState, evidence map[string]string) strin
 //   - BLOCKED → preBlockedPhase is allowed (skip guard). Any other target is denied.
 //   - All other transitions are looked up in the transitions table.
 func validateTransition(s *sessionState, from, to model.Phase, evidence map[string]string) string {
-	// Any non-terminal phase → BLOCKED is always allowed
-	if to == model.PhaseBlocked {
-		if from.IsTerminal() {
-			return fmt.Sprintf("workflow already in terminal state %s", from)
+	// BLOCKED can only return to preBlockedPhase (checked first to prevent BLOCKED → BLOCKED)
+	if from == model.PhaseBlocked {
+		if s.preBlockedPhase == "" || to != s.preBlockedPhase {
+			return fmt.Sprintf("BLOCKED can only return to %s (the pre-blocked phase)", s.preBlockedPhase)
 		}
 		return ""
 	}
 
-	// BLOCKED can only return to preBlockedPhase
-	if from == model.PhaseBlocked {
-		if s.preBlockedPhase == "" || to != s.preBlockedPhase {
-			return fmt.Sprintf("BLOCKED can only return to %s (the pre-blocked phase)", s.preBlockedPhase)
+	// Any non-terminal phase → BLOCKED is always allowed
+	if to == model.PhaseBlocked {
+		if from.IsTerminal() {
+			return fmt.Sprintf("workflow already in terminal state %s", from)
 		}
 		return ""
 	}

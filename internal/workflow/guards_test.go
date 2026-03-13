@@ -226,6 +226,15 @@ func TestValidateTransition(t *testing.T) {
 			evidence: nil,
 			wantDeny: true,
 		},
+		// BLOCKED → BLOCKED DENY (must not re-enter BLOCKED)
+		{
+			name:     "BLOCKED → BLOCKED DENY",
+			state:    makeState(model.PhaseBlocked, model.PhaseDeveloping, 1, 5, nil),
+			from:     model.PhaseBlocked,
+			to:       model.PhaseBlocked,
+			evidence: nil,
+			wantDeny: true,
+		},
 
 		// ---------------------------------------------------------------
 		// Invalid transitions not in the table

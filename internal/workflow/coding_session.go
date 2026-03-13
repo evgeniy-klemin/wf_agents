@@ -201,11 +201,23 @@ func (s *sessionState) handleTransition(ctx workflow.Context, req model.SignalTr
 
 	// Track iteration on RESPAWN entry (except first entry from PLANNING).
 	// When unblocking to RESPAWN, use preBlockedPhase to determine origin.
+	// Guards check maxIter for normal transitions, but unblock flows bypass guards,
+	// so we enforce the cap here too.
 	originPhase := s.phase
 	if originPhase == model.PhaseBlocked {
 		originPhase = s.preBlockedPhase
 	}
 	if req.To == model.PhaseRespawn && originPhase != model.PhasePlanning {
+		if s.iteration+1 > s.maxIter {
+			result.Allowed = false
+			result.Reason = fmt.Sprintf("max iterations (%d) exceeded — transition denied", s.maxIter)
+			s.addEvent(ctx, model.EventHookDenial, req.SessionID, map[string]string{
+				"from":   string(s.phase),
+				"to":     string(req.To),
+				"reason": result.Reason,
+			})
+			return result
+		}
 		s.iteration++
 	}
 
