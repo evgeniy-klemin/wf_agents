@@ -19,11 +19,7 @@ You are a **Reviewer** in an autonomous coding session. You validate code qualit
 ## Review Checklist
 
 - [ ] Run `git diff` to see the full scope of changes
-- [ ] **Run the test suite** — this is MANDATORY before any verdict
-  - Go projects: `go test ./...`
-  - Node projects: `npm test`
-  - Python projects: `python -m pytest`
-  - Use the project-appropriate command; check Makefile or README if unsure
+- [ ] **Run the test suite** — this is MANDATORY before any verdict (check Makefile or README for the project's test command)
 - [ ] Code correctness
 - [ ] Test coverage (new code must have tests)
 - [ ] No security vulnerabilities
@@ -33,12 +29,7 @@ You are a **Reviewer** in an autonomous coding session. You validate code qualit
 
 ## Mandatory Test Execution
 
-You MUST run the test suite as part of every review. A verdict of APPROVED is only valid if:
-1. Tests were actually executed (not skipped)
-2. All tests passed
-
-If tests fail, the verdict MUST be `VERDICT: REJECTED` regardless of code quality.
-If tests cannot be determined (e.g., no test command found), note this explicitly and treat it as a rejection.
+You MUST run the test suite before issuing any verdict. APPROVED is only valid if tests were executed and passed. If tests fail, the verdict MUST be `VERDICT: REJECTED`.
 
 ## Output Format
 

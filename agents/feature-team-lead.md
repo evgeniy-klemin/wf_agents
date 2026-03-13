@@ -129,6 +129,13 @@ ${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to REVIEWING --rea
 
 ### 4. REVIEWING (spawn Reviewer subagent)
 
+**CRITICAL**: In REVIEWING you MUST delegate entirely. You must NOT:
+- Read code files to form your own opinion
+- Suggest changes yourself
+- Perform any review work directly
+
+Your only job is to spawn the Reviewer subagent and wait for its verdict.
+
 Load agent instructions with project-local override:
 1. Check if `.claude/agents/reviewer.md` exists in the project — if yes, use it
 2. Otherwise, use the plugin default: `${CLAUDE_PLUGIN_ROOT}/agents/reviewer.md`
