@@ -15,25 +15,19 @@ type transitionRule struct {
 }
 
 // transitions is the unified table of all valid state machine transitions.
-// BLOCKED is handled specially by validateTransition (not listed here).
+// BLOCKED is handled specially by validateTransition and not listed here:
+// any non-terminal phase → BLOCKED is always allowed, BLOCKED → preBlockedPhase only.
 var transitions = []transitionRule{
 	{from: model.PhasePlanning, to: model.PhaseRespawn, check: nil},
-	{from: model.PhasePlanning, to: model.PhaseBlocked, check: nil},
 	{from: model.PhaseRespawn, to: model.PhaseDeveloping, check: guardNoActiveAgents},
-	{from: model.PhaseRespawn, to: model.PhaseBlocked, check: nil},
 	{from: model.PhaseDeveloping, to: model.PhaseReviewing, check: guardDirtyTree},
-	{from: model.PhaseDeveloping, to: model.PhaseBlocked, check: nil},
 	{from: model.PhaseReviewing, to: model.PhaseCommitting, check: nil},
 	{from: model.PhaseReviewing, to: model.PhaseDeveloping, check: nil},
-	{from: model.PhaseReviewing, to: model.PhaseBlocked, check: nil},
 	{from: model.PhaseCommitting, to: model.PhaseRespawn, check: guardCleanTreeAndMaxIter},
 	{from: model.PhaseCommitting, to: model.PhasePRCreation, check: guardCleanTree},
-	{from: model.PhaseCommitting, to: model.PhaseBlocked, check: nil},
 	{from: model.PhasePRCreation, to: model.PhaseFeedback, check: guardPRChecksPassed},
-	{from: model.PhasePRCreation, to: model.PhaseBlocked, check: nil},
 	{from: model.PhaseFeedback, to: model.PhaseComplete, check: guardPRApprovedOrMerged},
 	{from: model.PhaseFeedback, to: model.PhaseRespawn, check: guardMaxIter},
-	{from: model.PhaseFeedback, to: model.PhaseBlocked, check: nil},
 }
 
 // guardCleanTree requires evidence["working_tree_clean"] == "true".
