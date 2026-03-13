@@ -22,7 +22,7 @@ var transitions = []transitionRule{
 	{from: model.PhaseRespawn, to: model.PhaseDeveloping, check: guardNoActiveAgents},
 	{from: model.PhaseDeveloping, to: model.PhaseReviewing, check: guardDirtyTree},
 	{from: model.PhaseReviewing, to: model.PhaseCommitting, check: nil},
-	{from: model.PhaseReviewing, to: model.PhaseDeveloping, check: nil},
+	{from: model.PhaseReviewing, to: model.PhaseRespawn, check: guardMaxIter},
 	{from: model.PhaseCommitting, to: model.PhaseRespawn, check: guardCleanTreeAndMaxIter},
 	{from: model.PhaseCommitting, to: model.PhasePRCreation, check: guardCleanTree},
 	{from: model.PhasePRCreation, to: model.PhaseFeedback, check: guardPRChecksPassed},

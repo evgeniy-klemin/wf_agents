@@ -266,11 +266,27 @@ func TestValidateTransition(t *testing.T) {
 			evidence: nil,
 		},
 		{
-			name:     "REVIEWING → DEVELOPING no guards (reject loop)",
+			name:     "REVIEWING → RESPAWN within maxIter (reject loop)",
+			state:    makeState(model.PhaseReviewing, "", 1, 5, nil),
+			from:     model.PhaseReviewing,
+			to:       model.PhaseRespawn,
+			evidence: nil,
+		},
+		{
+			name:     "REVIEWING → RESPAWN at maxIter DENY",
+			state:    makeState(model.PhaseReviewing, "", 5, 5, nil),
+			from:     model.PhaseReviewing,
+			to:       model.PhaseRespawn,
+			evidence: nil,
+			wantDeny: true,
+		},
+		{
+			name:     "REVIEWING → DEVELOPING not allowed (removed reject loop path)",
 			state:    makeState(model.PhaseReviewing, "", 1, 5, nil),
 			from:     model.PhaseReviewing,
 			to:       model.PhaseDeveloping,
 			evidence: nil,
+			wantDeny: true,
 		},
 	}
 

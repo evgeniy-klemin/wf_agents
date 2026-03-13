@@ -207,17 +207,10 @@ func (s *sessionState) handleTransition(ctx workflow.Context, req model.SignalTr
 	if originPhase == model.PhaseBlocked {
 		originPhase = s.preBlockedPhase
 	}
-	if req.To == model.PhaseRespawn && originPhase != model.PhasePlanning {
-		if s.iteration+1 > s.maxIter {
-			result.Allowed = false
-			result.Reason = fmt.Sprintf("max iterations (%d) exceeded — transition denied", s.maxIter)
-			s.addEvent(ctx, model.EventHookDenial, req.SessionID, map[string]string{
-				"from":   string(s.phase),
-				"to":     string(req.To),
-				"reason": result.Reason,
-			})
-			return result
-		}
+	// Increment iteration on RESPAWN entry, except:
+	// - First entry from PLANNING (doesn't count)
+	// - Return from BLOCKED (iteration was already counted on original entry)
+	if req.To == model.PhaseRespawn && originPhase != model.PhasePlanning && s.phase != model.PhaseBlocked {
 		s.iteration++
 	}
 
