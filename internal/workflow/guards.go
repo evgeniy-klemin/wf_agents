@@ -414,6 +414,8 @@ func PhaseHint(phase model.Phase) string {
 		return "Only git operations are allowed."
 	case model.PhasePRCreation:
 		return "Only PR creation commands allowed."
+	case model.PhaseFeedback:
+		return "Triage PR comments. For accepted comments: implement changes first (RESPAWN → DEVELOPING → ... → push), return to FEEDBACK, THEN reply describing what was done and which commit. For rejected comments: reply immediately with technical reasoning. Do NOT reply 'will do X' before doing X — the reply must describe what WAS done."
 	case model.PhaseComplete:
 		return "Workflow is complete. No further actions needed."
 	case model.PhaseBlocked:
