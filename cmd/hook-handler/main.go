@@ -120,10 +120,9 @@ func main() {
 	case "PreToolUse":
 		status := queryStatus(ctx, c, workflowID)
 		phase := status.Phase
-		teamLead := !wf.IsSubagent(input.AgentID, status.ActiveAgents)
 
 		// Check if tool is allowed in this phase
-		decision := wf.CheckToolPermission(phase, input.ToolName, input.ToolInput, teamLead)
+		decision := wf.CheckToolPermission(phase, input.ToolName, input.ToolInput, input.AgentID, status.ActiveAgents)
 
 		if decision.Denied {
 			// Record denial in Temporal

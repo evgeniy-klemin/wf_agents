@@ -138,12 +138,14 @@ func validateTransition(s *sessionState, from, to model.Phase, evidence map[stri
 
 // --- Tool permission enforcement ---
 //
-// Matches the original NTCoding model:
-// - RESPAWN: all file writes (Edit/Write/NotebookEdit) are forbidden
-// - Global: git commit, git push, git checkout are forbidden in ALL phases
+// Rules:
+// - Team Lead (main agent, not a subagent): Edit/Write/NotebookEdit are always forbidden —
+//   Team Lead must delegate file changes to Developer subagent.
+// - PLANNING and RESPAWN: all file writes (Edit/Write/NotebookEdit) are forbidden for everyone.
+// - Global: git commit, git push, git checkout, git add are forbidden in ALL phases
 //   except per-phase exemptions:
 //     PLANNING: git checkout allowed
-//     COMMITTING: git commit, git push allowed
+//     COMMITTING: git add, git commit, git push allowed
 // - No other tool restrictions (BLOCKED, COMPLETE, etc. have no enforcement)
 
 // ToolPermissionResult indicates whether a tool use is allowed.
@@ -166,9 +168,19 @@ var gitExemptions = map[model.Phase][]string{
 	model.PhaseCommitting: {"git add", "git commit", "git push"},
 }
 
-// CheckToolPermission checks whether a tool is allowed given the phase, tool name, and agent role.
+// readOnlyTools are tools that only read state and never modify files.
+var readOnlyTools = map[string]bool{
+	"Read": true, "Glob": true, "Grep": true,
+	"WebFetch": true, "WebSearch": true,
+	"ToolSearch": true, "LSP": true,
+}
+
+// CheckToolPermission checks whether a tool is allowed given the phase, tool name,
+// agent ID, and the current set of active agents.
 // This centralizes ALL permission logic alongside transition guards.
-func CheckToolPermission(phase model.Phase, toolName string, toolInput json.RawMessage, isTeamLead bool) ToolPermissionResult {
+func CheckToolPermission(phase model.Phase, toolName string, toolInput json.RawMessage, agentID string, activeAgents []string) ToolPermissionResult {
+	isTeamLead := !IsSubagent(agentID, activeAgents)
+
 	// Team Lead cannot edit files directly — must delegate to Developer subagent.
 	// This check runs before any phase-specific logic.
 	if isTeamLead && fileWritingTools[toolName] {
@@ -179,11 +191,6 @@ func CheckToolPermission(phase model.Phase, toolName string, toolInput json.RawM
 	}
 
 	// Read-only tools are always allowed
-	readOnlyTools := map[string]bool{
-		"Read": true, "Glob": true, "Grep": true,
-		"WebFetch": true, "WebSearch": true,
-		"ToolSearch": true, "LSP": true,
-	}
 	if readOnlyTools[toolName] {
 		return ToolPermissionResult{Denied: false}
 	}
@@ -219,13 +226,20 @@ func IsSubagent(agentID string, activeAgents []string) bool {
 }
 
 // safeGitSubcommands are read-only git subcommands allowed in PLANNING.
+// For multi-word subcommands like "stash list", only the exact combination is allowed
+// (handled separately in isAllowedGitInPlanning).
 var safeGitSubcommands = map[string]bool{
 	"status": true, "log": true, "diff": true, "show": true,
 	"branch": true, "remote": true, "tag": true, "describe": true,
 	"rev-parse": true, "ls-files": true, "ls-tree": true,
-	"blame": true, "shortlog": true, "stash list": true,
+	"blame": true, "shortlog": true,
 	"config": true, "help": true, "version": true,
 	"checkout": true, // allowed in PLANNING for branch creation
+}
+
+// safeGitStashSubcommands are the stash sub-operations that are read-only.
+var safeGitStashSubcommands = map[string]bool{
+	"list": true, "show": true,
 }
 
 // safeBashPrefixes are read-only bash commands allowed in PLANNING.
@@ -253,9 +267,12 @@ func checkBashPermission(phase model.Phase, toolInput json.RawMessage) ToolPermi
 		Command string `json:"command"`
 	}
 	if err := json.Unmarshal(toolInput, &input); err != nil {
-		return ToolPermissionResult{Denied: false}
+		return ToolPermissionResult{Denied: true, Reason: "cannot parse Bash command input"}
 	}
 	cmd := strings.TrimSpace(input.Command)
+	if cmd == "" {
+		return ToolPermissionResult{Denied: true, Reason: "cannot parse Bash command input"}
+	}
 
 	// PLANNING: whitelist approach — only safe commands allowed
 	if phase == model.PhasePlanning {
@@ -343,6 +360,16 @@ func isAllowedGitInPlanning(cmd string) bool {
 		return false
 	}
 	subCmd := parts[idx]
+
+	// "stash" is only allowed with a safe sub-operation (e.g., "stash list", "stash show").
+	// Plain "git stash" or "git stash drop/pop/apply" are not read-only.
+	if subCmd == "stash" {
+		if idx+1 >= len(parts) {
+			return false // bare "git stash" is write-like (saves changes)
+		}
+		return safeGitStashSubcommands[parts[idx+1]]
+	}
+
 	return safeGitSubcommands[subCmd]
 }
 
@@ -409,7 +436,7 @@ func PhaseHint(phase model.Phase) string {
 	case model.PhaseRespawn:
 		return "Only agent management allowed. Transition to DEVELOPING when agents are ready."
 	case model.PhaseReviewing:
-		return "If issues found, transition back to DEVELOPING."
+		return "Team Lead must delegate review to Reviewer subagent — do NOT review code directly. If issues found, transition back to DEVELOPING."
 	case model.PhaseCommitting:
 		return "Only git operations are allowed."
 	case model.PhasePRCreation:
