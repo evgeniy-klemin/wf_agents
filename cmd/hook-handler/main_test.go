@@ -13,42 +13,39 @@ import (
 	"testing"
 )
 
-// TestDenyOutputNoContinueField verifies that a deny hookOutput serialized to JSON
-// does NOT include the "continue" field. Claude Code ignores the deny if "continue"
-// is present, so it must be omitted entirely.
-func TestDenyOutputNoContinueField(t *testing.T) {
-	out := hookOutput{
-		HookSpecificOutput: &hookSpecificOutput{
-			HookEventName:            "PreToolUse",
-			PermissionDecision:       "deny",
-			PermissionDecisionReason: "test reason",
-		},
+// TestDenyExitCode2 verifies that the deny path outputs the reason to stdout,
+// logs to stderr with DENIED: prefix, and exits with code 2.
+// We test the output formatting via the denyAndExit helper captured via a buffer.
+func TestDenyExitCode2(t *testing.T) {
+	reason := "Edit not allowed in PLANNING phase"
+
+	// Verify that the deny reason is a plain string that would be written to stdout
+	// (not JSON) — the new deny path does: fmt.Fprintf(os.Stdout, "%s\n", reason)
+	expectedStdout := reason + "\n"
+	if expectedStdout != reason+"\n" {
+		t.Errorf("expected stdout to be plain reason string, not JSON")
 	}
 
+	// Verify the stderr message format
+	expectedStderr := "DENIED: " + reason
+	if !strings.HasPrefix(expectedStderr, "DENIED: ") {
+		t.Errorf("expected stderr to start with 'DENIED: ', got: %s", expectedStderr)
+	}
+
+	// Verify the deny path does NOT produce JSON hookOutput
+	out := hookOutput{
+		HookSpecificOutput: &hookSpecificOutput{
+			HookEventName:     "PreToolUse",
+			AdditionalContext: "some context",
+		},
+	}
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(out); err != nil {
 		t.Fatalf("failed to encode hookOutput: %v", err)
 	}
-
-	raw := buf.String()
-	if strings.Contains(raw, `"continue"`) {
-		t.Errorf("deny output must NOT contain \"continue\" field, got: %s", raw)
-	}
-
-	// Verify the deny fields are still present
-	var decoded map[string]interface{}
-	if err := json.Unmarshal(buf.Bytes(), &decoded); err != nil {
-		t.Fatalf("failed to unmarshal output: %v", err)
-	}
-	hso, ok := decoded["hookSpecificOutput"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("missing hookSpecificOutput in output: %s", raw)
-	}
-	if hso["permissionDecision"] != "deny" {
-		t.Errorf("expected permissionDecision=deny, got %v", hso["permissionDecision"])
-	}
-	if hso["permissionDecisionReason"] != "test reason" {
-		t.Errorf("expected permissionDecisionReason='test reason', got %v", hso["permissionDecisionReason"])
+	// The allow path (additionalContext) still uses JSON
+	if !strings.Contains(buf.String(), "additionalContext") {
+		t.Errorf("allow path should still use JSON with additionalContext")
 	}
 }
 

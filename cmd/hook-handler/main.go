@@ -141,16 +141,11 @@ func main() {
 			})
 
 			// Block the tool call.
-			// Do NOT set Continue — Claude Code ignores deny when "continue" is present.
-			out := hookOutput{
-				HookSpecificOutput: &hookSpecificOutput{
-					HookEventName:            "PreToolUse",
-					PermissionDecision:       "deny",
-					PermissionDecisionReason: decision.Reason,
-				},
-			}
-			json.NewEncoder(os.Stdout).Encode(out)
-			os.Exit(0)
+			// Exit code 2 signals a denial to Claude Code.
+			// Write reason to stderr (logged) and stdout (shown to Claude).
+			fmt.Fprintf(os.Stderr, "DENIED: %s\n", decision.Reason)
+			fmt.Fprintf(os.Stdout, "%s\n", decision.Reason)
+			os.Exit(2)
 		}
 
 		// Tool allowed — send event + inject context
