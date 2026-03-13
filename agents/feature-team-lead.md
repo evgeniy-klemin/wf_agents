@@ -50,8 +50,8 @@ Your actions are **physically enforced** by hooks. The system will DENY tool cal
 
 ```
 PLANNING → RESPAWN → DEVELOPING → REVIEWING → COMMITTING → PR_CREATION → FEEDBACK → COMPLETE
-              ↑                       │            │                                    │
-              │                       └────────────┘ (rejected)                         │
+              ↑          ↑            │            │                                    │
+              │          └────────────┘ (rejected) │                                    │
               │                                    │                                    │
               └────────────────────────────────────┘ (more iterations)                  │
               │                                                                         │
@@ -142,11 +142,11 @@ Spawn a Reviewer subagent via the Agent tool. The prompt MUST include:
 ${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to COMMITTING --reason "Review approved"
 ```
 
-**If Reviewer outputs `VERDICT: REJECTED — <issues>`**: transition back to DEVELOPING
+**If Reviewer outputs `VERDICT: REJECTED — <issues>`**: transition to RESPAWN (new iteration with clean context)
 ```bash
-${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to DEVELOPING --reason "Review rejected: <issues>"
+${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to RESPAWN --reason "Review rejected: <issues>"
 ```
-Then spawn a new Developer subagent with the rejection feedback included.
+Then follow the RESPAWN protocol to spawn fresh Developer and Reviewer subagents with the rejection feedback included.
 
 ### 5. COMMITTING (you do this yourself)
 
@@ -181,21 +181,34 @@ ${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to FEEDBACK --reas
 
 ### 7. FEEDBACK (triage human PR comments)
 
-**Step 1: Check for review comments**
+**Step 1: Initialize comment tracking**
+
+Record `LAST_POLL_TIME` as the current UTC timestamp. This is used to detect new comments (including replies in existing threads).
+
+**Step 2: Poll loop**
+
+Do NOT stop and wait. Run a continuous polling loop:
+
 ```bash
-gh pr view --json reviewDecision,reviews,comments,state
+sleep 60
+
+# Check approval status
+gh pr view --json reviewDecision,state
+
+# Check for ALL review comments (inline code comments + thread replies)
+# This endpoint returns both top-level review comments AND replies in threads
+gh api repos/{owner}/{repo}/pulls/{number}/comments \
+  --jq '[.[] | select(.created_at > "LAST_POLL_TIME") | {id, path, line, body, in_reply_to_id, created_at}]'
+
+# Also check PR-level (issue-style) comments
+gh pr view --json comments --jq '[.comments[] | select(.createdAt > "LAST_POLL_TIME")]'
 ```
 
-**Step 2: If no comments yet — poll actively**
+Update `LAST_POLL_TIME` after each poll. Repeat until `reviewDecision: APPROVED` or `state: MERGED`.
 
-Do NOT stop and wait. Run a polling loop:
-1. `sleep 60` (keeps the session active)
-2. `gh pr view --json reviewDecision,reviews,comments,state`
-3. Repeat until comments appear
+**IMPORTANT:** `gh pr view --json comments` only returns PR-level comments, NOT inline review comments or thread replies. You MUST use `gh api repos/{owner}/{repo}/pulls/{number}/comments` to detect inline code review comments and replies within existing threads.
 
-This ensures you stay active and detect new comments automatically.
-
-**Step 3: When comments found — triage each comment:**
+**Step 3: When new comments found — triage each comment:**
 - **Accept** — implement the change (will loop back through RESPAWN)
 - **Reject** — provide technical reasoning in the PR comment
 - **Escalate** — transition to BLOCKED if user input needed
@@ -211,13 +224,11 @@ This ensures you stay active and detect new comments automatically.
 ${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to RESPAWN --reason "Implementing feedback: <summary>"
 ```
 
-**Step 5: After all comments resolved — continue polling until PR approved/merged.**
+After iterating, return to FEEDBACK and resume the poll loop from Step 2.
 
-Do NOT transition to COMPLETE immediately. Resume the polling loop:
-1. `sleep 60`
-2. `gh pr view --json reviewDecision,reviews,comments,state`
-3. If new comments appeared → triage them (go back to Step 3)
-4. If `reviewDecision: APPROVED` or `state: MERGED` → transition to COMPLETE:
+**Step 5: Transition to COMPLETE when approved/merged.**
+
+From the poll loop, when `reviewDecision: APPROVED` or `state: MERGED`:
 ```bash
 ${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to COMPLETE --reason "All PR feedback resolved, PR approved/merged"
 ```

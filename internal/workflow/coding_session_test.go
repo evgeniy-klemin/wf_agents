@@ -102,7 +102,8 @@ func TestReviewRejectLoop(t *testing.T) {
 		model.PhaseRespawn,
 		model.PhaseDeveloping,
 		model.PhaseReviewing,
-		model.PhaseDeveloping, // reject
+		model.PhaseRespawn,  // reject now goes through RESPAWN, not directly to DEVELOPING
+		model.PhaseDeveloping,
 		model.PhaseReviewing,
 		model.PhaseCommitting,
 		model.PhasePRCreation,
@@ -205,7 +206,7 @@ func TestMaxIterationsEnforced(t *testing.T) {
 		model.PhaseCommitting,
 	})
 
-	// iter 3 → DENIED
+	// iter 3 → DENIED by guard
 	env.RegisterDelayedCallback(func() {
 		updateMayDeny(env, model.PhaseRespawn)
 	}, 0)
@@ -241,6 +242,97 @@ func TestMaxIterationsEnforced(t *testing.T) {
 		}
 	}
 	assert.True(t, hasDenial, "should have denial for max iterations")
+}
+
+func TestBlockedRespawnNoDoubleCount(t *testing.T) {
+	// When unblocking back to RESPAWN, iteration should NOT be incremented again
+	// (it was already counted on the original entry to RESPAWN).
+	env := setupEnv(t)
+
+	registerTransitions(env, t, []model.Phase{
+		model.PhaseRespawn,       // iter 1 (from PLANNING, doesn't count)
+		model.PhaseDeveloping,
+		model.PhaseReviewing,
+		model.PhaseCommitting,
+		model.PhaseRespawn,       // iter 2
+		model.PhaseDeveloping,
+		model.PhaseBlocked,       // blocked in DEVELOPING
+		model.PhaseDeveloping,    // unblock back to DEVELOPING
+		model.PhaseReviewing,
+		model.PhaseCommitting,
+		model.PhasePRCreation,
+		model.PhaseFeedback,
+		model.PhaseComplete,
+	})
+
+	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
+		SessionID: "test", TaskDescription: "test", MaxIterations: 2,
+	})
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	val, err := env.QueryWorkflow(QueryStatus)
+	require.NoError(t, err)
+	var status model.WorkflowStatus
+	require.NoError(t, val.Get(&status))
+	assert.Equal(t, 2, status.Iteration, "iteration should still be 2 after unblock")
+}
+
+func TestBlockedAtMaxIterNoBypass(t *testing.T) {
+	// When at maxIter and BLOCKED, unblocking should work but further
+	// RESPAWN attempts should still be denied by guards.
+	env := setupEnv(t)
+
+	registerTransitions(env, t, []model.Phase{
+		model.PhaseRespawn,       // iter 1 (from PLANNING, doesn't count)
+		model.PhaseDeveloping,
+		model.PhaseReviewing,
+		model.PhaseCommitting,
+		model.PhaseRespawn,       // iter 2 (maxIter reached)
+		model.PhaseDeveloping,
+		model.PhaseReviewing,
+		model.PhaseCommitting,
+		model.PhaseBlocked,       // blocked in COMMITTING at iter 2
+		model.PhaseCommitting,    // unblock back to COMMITTING
+	})
+
+	// COMMITTING → RESPAWN must be DENIED (maxIter exceeded)
+	env.RegisterDelayedCallback(func() {
+		updateMayDeny(env, model.PhaseRespawn)
+	}, 0)
+
+	// Complete via valid path
+	registerTransitions(env, t, []model.Phase{
+		model.PhasePRCreation,
+		model.PhaseFeedback,
+		model.PhaseComplete,
+	})
+
+	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
+		SessionID: "test", TaskDescription: "test", MaxIterations: 2,
+	})
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	val, err := env.QueryWorkflow(QueryStatus)
+	require.NoError(t, err)
+	var status model.WorkflowStatus
+	require.NoError(t, val.Get(&status))
+	assert.Equal(t, 2, status.Iteration, "iteration should be 2 (maxIter)")
+
+	var timeline model.WorkflowTimeline
+	require.NoError(t, env.GetWorkflowResult(&timeline))
+	hasDenial := false
+	for _, e := range timeline.Events {
+		if e.Type == model.EventHookDenial && e.Detail["reason"] != "" {
+			hasDenial = true
+			assert.Contains(t, e.Detail["reason"], "max iterations")
+			break
+		}
+	}
+	assert.True(t, hasDenial, "should deny RESPAWN after BLOCKED when at maxIter")
 }
 
 func TestBlockedAndUnblock(t *testing.T) {

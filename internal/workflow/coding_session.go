@@ -170,6 +170,7 @@ func (s *sessionState) handleTransition(ctx workflow.Context, req model.SignalTr
 		To:   req.To,
 	}
 
+	// Terminal state check
 	if s.phase.IsTerminal() {
 		result.Allowed = false
 		result.Reason = fmt.Sprintf("workflow already in terminal state %s", s.phase)
@@ -181,45 +182,10 @@ func (s *sessionState) handleTransition(ctx workflow.Context, req model.SignalTr
 		return result
 	}
 
-	// BLOCKED → can only return to the phase that was active before entering BLOCKED
-	if s.phase == model.PhaseBlocked {
-		if s.preBlockedPhase == "" || req.To != s.preBlockedPhase {
-			result.Allowed = false
-			result.Reason = fmt.Sprintf("BLOCKED can only return to %s (the pre-blocked phase)", s.preBlockedPhase)
-			s.addEvent(ctx, model.EventHookDenial, req.SessionID, map[string]string{
-				"from":   string(s.phase),
-				"to":     string(req.To),
-				"reason": result.Reason,
-			})
-			return result
-		}
-	} else if !s.phase.CanTransitionTo(req.To) {
-		result.Allowed = false
-		result.Reason = fmt.Sprintf("transition %s → %s is not allowed", s.phase, req.To)
-		s.addEvent(ctx, model.EventHookDenial, req.SessionID, map[string]string{
-			"from":   string(s.phase),
-			"to":     string(req.To),
-			"reason": result.Reason,
-		})
-		return result
-	}
-
-	// Transition guards — validate evidence from client
-	if reason := checkGuards(s.phase, req.To, req.Guards); reason != "" {
+	// Validate transition + guards via unified transition table
+	if reason := validateTransition(s, s.phase, req.To, req.Guards); reason != "" {
 		result.Allowed = false
 		result.Reason = reason
-		s.addEvent(ctx, model.EventHookDenial, req.SessionID, map[string]string{
-			"from":   string(s.phase),
-			"to":     string(req.To),
-			"reason": result.Reason,
-		})
-		return result
-	}
-
-	// RESPAWN → DEVELOPING: all old subagents must be stopped (context cleared)
-	if s.phase == model.PhaseRespawn && req.To == model.PhaseDeveloping && len(s.activeAgents) > 0 {
-		result.Allowed = false
-		result.Reason = fmt.Sprintf("cannot leave RESPAWN with %d active subagent(s) — kill old agents before spawning new ones", len(s.activeAgents))
 		s.addEvent(ctx, model.EventHookDenial, req.SessionID, map[string]string{
 			"from":   string(s.phase),
 			"to":     string(req.To),
@@ -233,25 +199,19 @@ func (s *sessionState) handleTransition(ctx workflow.Context, req model.SignalTr
 		s.preBlockedPhase = s.phase
 	}
 
-	// Track iteration on RESPAWN (iteration boundary), except first entry from PLANNING.
+	// Track iteration on RESPAWN entry (except first entry from PLANNING).
 	// When unblocking to RESPAWN, use preBlockedPhase to determine origin.
+	// Guards check maxIter for normal transitions, but unblock flows bypass guards,
+	// so we enforce the cap here too.
 	originPhase := s.phase
 	if originPhase == model.PhaseBlocked {
 		originPhase = s.preBlockedPhase
 	}
-	if req.To == model.PhaseRespawn && originPhase != model.PhasePlanning {
+	// Increment iteration on RESPAWN entry, except:
+	// - First entry from PLANNING (doesn't count)
+	// - Return from BLOCKED (iteration was already counted on original entry)
+	if req.To == model.PhaseRespawn && originPhase != model.PhasePlanning && s.phase != model.PhaseBlocked {
 		s.iteration++
-		if s.iteration > s.maxIter {
-			s.iteration-- // rollback
-			result.Allowed = false
-			result.Reason = fmt.Sprintf("max iterations (%d) exceeded — transition denied", s.maxIter)
-			s.addEvent(ctx, model.EventHookDenial, req.SessionID, map[string]string{
-				"from":   string(s.phase),
-				"to":     string(req.To),
-				"reason": result.Reason,
-			})
-			return result
-		}
 	}
 
 	// Apply transition

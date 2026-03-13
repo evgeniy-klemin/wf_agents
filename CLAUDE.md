@@ -51,9 +51,9 @@ Uses Colima as Docker runtime. If Docker socket stops responding: `colima restar
 
 ```
 PLANNING → RESPAWN → DEVELOPING → REVIEWING → COMMITTING → PR_CREATION → FEEDBACK → COMPLETE
-              ↑          ↑            │            │                                    │
-              │          └────────────┘ (reject)   │                                    │
-              └────────────────────────────────────┘ (more iterations)                  │
+              ↑          ↑                         │            │                        │
+              │          └─────────────────────────┘ (reject)   │                        │
+              └────────────────────────────────────────────────┘ (more iterations)       │
               └─────────────────────────────────────────────────────────────────────────┘ (feedback)
 
 Any non-terminal phase → BLOCKED (pause, remembers pre-blocked phase)
