@@ -35,10 +35,15 @@ type claudeHookInput struct {
 }
 
 // hookOutput is the JSON structure that Claude Code expects on stdout (exit 0).
+// Continue is a pointer so it is omitted from JSON when nil — deny responses must
+// NOT include "continue" at all, otherwise Claude Code ignores the deny decision.
 type hookOutput struct {
-	Continue          bool                    `json:"continue"`
-	HookSpecificOutput *hookSpecificOutput    `json:"hookSpecificOutput,omitempty"`
+	Continue           *bool               `json:"continue,omitempty"`
+	HookSpecificOutput *hookSpecificOutput `json:"hookSpecificOutput,omitempty"`
 }
+
+// boolPtr returns a pointer to the given bool value.
+func boolPtr(b bool) *bool { return &b }
 
 type hookSpecificOutput struct {
 	HookEventName            string `json:"hookEventName"`
@@ -135,17 +140,12 @@ func main() {
 				Detail:    detail,
 			})
 
-			// Block the tool call
-			out := hookOutput{
-				Continue: true,
-				HookSpecificOutput: &hookSpecificOutput{
-					HookEventName:            "PreToolUse",
-					PermissionDecision:       "deny",
-					PermissionDecisionReason: decision.Reason,
-				},
-			}
-			json.NewEncoder(os.Stdout).Encode(out)
-			os.Exit(0)
+			// Block the tool call.
+			// Exit code 2 signals a denial to Claude Code.
+			// Write reason to stderr (logged) and stdout (shown to Claude).
+			fmt.Fprintf(os.Stderr, "DENIED: %s\n", decision.Reason)
+			fmt.Fprintf(os.Stdout, "%s\n", decision.Reason)
+			os.Exit(2)
 		}
 
 		// Tool allowed — send event + inject context
@@ -161,9 +161,8 @@ func main() {
 		instructions := phaseInstructions(currentPhase)
 		if instructions != "" {
 			out := hookOutput{
-				Continue: true,
 				HookSpecificOutput: &hookSpecificOutput{
-					HookEventName:    "PreToolUse",
+					HookEventName:     "PreToolUse",
 					AdditionalContext: fmt.Sprintf("[Workflow Phase: %s] %s", currentPhase, instructions),
 				},
 			}
@@ -239,7 +238,7 @@ func main() {
 		// Inject session context so Claude knows its workflow ID and wf-client path
 		wfClientPath := wfClientBin()
 		out := hookOutput{
-			Continue: true,
+			Continue: boolPtr(true),
 			HookSpecificOutput: &hookSpecificOutput{
 				HookEventName: "SessionStart",
 				AdditionalContext: fmt.Sprintf(
@@ -318,9 +317,9 @@ func phaseInstructions(phase model.Phase) string {
 	case model.PhasePlanning:
 		return teamLeadPreamble + fmt.Sprintf(`PHASE: PLANNING — Read-only exploration and planning.
 
-CHECKLIST:
+CHECKLIST (in order — do NOT skip steps):
 - [ ] Run git branch --show-current → record as BASE_BRANCH
-- [ ] Create feature branch: git checkout -b <feature-branch>
+- [ ] Create feature branch: git checkout -b <feature-branch-name> (MANDATORY — never commit to BASE_BRANCH)
 - [ ] Read relevant files, explore codebase structure
 - [ ] Identify files to create or modify
 - [ ] Break task into ordered iteration subtasks
@@ -395,6 +394,7 @@ CHECKLIST:
   - More iterations → %s transition <id> --to RESPAWN --reason "Iteration N+1: <task>"
   - All done → %s transition <id> --to PR_CREATION --reason "All iterations complete"
 
+VERIFY: You must be on the feature branch (not BASE_BRANCH). Run git branch --show-current to confirm.
 If RESPAWN DENIED: max iterations reached, must go to PR_CREATION.`, wfc, wfc)
 
 	case model.PhasePRCreation:
@@ -406,6 +406,7 @@ CHECKLIST:
 - [ ] Wait for CI checks to pass
 - [ ] Transition: %s transition <id> --to FEEDBACK --reason "PR created: <url>, CI passing"
 
+VERIFY: Current branch must NOT be BASE_BRANCH. If it is, you forgot to create a feature branch in PLANNING.
 If BASE_BRANCH is not main/master, --base is REQUIRED.`, wfc)
 
 	case model.PhaseFeedback:
