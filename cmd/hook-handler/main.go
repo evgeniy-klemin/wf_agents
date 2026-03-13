@@ -35,10 +35,15 @@ type claudeHookInput struct {
 }
 
 // hookOutput is the JSON structure that Claude Code expects on stdout (exit 0).
+// Continue is a pointer so it is omitted from JSON when nil — deny responses must
+// NOT include "continue" at all, otherwise Claude Code ignores the deny decision.
 type hookOutput struct {
-	Continue          bool                    `json:"continue"`
-	HookSpecificOutput *hookSpecificOutput    `json:"hookSpecificOutput,omitempty"`
+	Continue           *bool               `json:"continue,omitempty"`
+	HookSpecificOutput *hookSpecificOutput `json:"hookSpecificOutput,omitempty"`
 }
+
+// boolPtr returns a pointer to the given bool value.
+func boolPtr(b bool) *bool { return &b }
 
 type hookSpecificOutput struct {
 	HookEventName            string `json:"hookEventName"`
@@ -135,9 +140,9 @@ func main() {
 				Detail:    detail,
 			})
 
-			// Block the tool call
+			// Block the tool call.
+			// Do NOT set Continue — Claude Code ignores deny when "continue" is present.
 			out := hookOutput{
-				Continue: true,
 				HookSpecificOutput: &hookSpecificOutput{
 					HookEventName:            "PreToolUse",
 					PermissionDecision:       "deny",
@@ -161,9 +166,8 @@ func main() {
 		instructions := phaseInstructions(currentPhase)
 		if instructions != "" {
 			out := hookOutput{
-				Continue: true,
 				HookSpecificOutput: &hookSpecificOutput{
-					HookEventName:    "PreToolUse",
+					HookEventName:     "PreToolUse",
 					AdditionalContext: fmt.Sprintf("[Workflow Phase: %s] %s", currentPhase, instructions),
 				},
 			}
@@ -239,7 +243,7 @@ func main() {
 		// Inject session context so Claude knows its workflow ID and wf-client path
 		wfClientPath := wfClientBin()
 		out := hookOutput{
-			Continue: true,
+			Continue: boolPtr(true),
 			HookSpecificOutput: &hookSpecificOutput{
 				HookEventName: "SessionStart",
 				AdditionalContext: fmt.Sprintf(
