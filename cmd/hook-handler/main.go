@@ -119,10 +119,12 @@ func main() {
 
 	switch input.HookEventName {
 	case "PreToolUse":
-		phase := queryPhase(ctx, c, workflowID)
+		status := queryStatus(ctx, c, workflowID)
+		phase := status.Phase
+		teamLead := !isSubagent(input.AgentID, status.ActiveAgents)
 
 		// Check if tool is allowed in this phase
-		decision := checkToolPermission(phase, input.ToolName, input.ToolInput)
+		decision := checkToolPermission(phase, input.ToolName, input.ToolInput, teamLead)
 
 		if decision.denied {
 			// Record denial in Temporal
@@ -155,8 +157,9 @@ func main() {
 			Tool:      input.ToolName,
 			Detail:    detail,
 		})
-		// Re-query phase after possible auto-transition (e.g., AskUserQuestion → BLOCKED)
-		currentPhase := queryPhase(ctx, c, workflowID)
+		// Re-query status after possible auto-transition (e.g., AskUserQuestion → BLOCKED)
+		currentStatus := queryStatus(ctx, c, workflowID)
+		currentPhase := currentStatus.Phase
 		instructions := phaseInstructions(currentPhase)
 		if instructions != "" {
 			out := hookOutput{
@@ -585,7 +588,17 @@ var gitExemptions = map[model.Phase][]string{
 }
 
 // checkToolPermission checks whether a tool is allowed in the given phase.
-func checkToolPermission(phase model.Phase, toolName string, toolInput json.RawMessage) permissionCheck {
+// isTeamLead is true when the caller is the main agent (not a subagent).
+func checkToolPermission(phase model.Phase, toolName string, toolInput json.RawMessage, isTeamLead bool) permissionCheck {
+	// Team Lead cannot edit files directly — must delegate to Developer subagent.
+	// This check runs before any phase-specific logic.
+	if isTeamLead && fileWritingTools[toolName] {
+		return permissionCheck{
+			denied: true,
+			reason: "Team Lead cannot edit files directly — delegate to Developer subagent",
+		}
+	}
+
 	// Read-only tools are always allowed
 	readOnlyTools := map[string]bool{
 		"Read": true, "Glob": true, "Grep": true,
@@ -610,6 +623,20 @@ func checkToolPermission(phase model.Phase, toolName string, toolInput json.RawM
 	}
 
 	return permissionCheck{denied: false}
+}
+
+// isSubagent returns true if agentID is non-empty and present in the activeAgents list.
+// If agentID is empty or not in the list, the caller is assumed to be the Team Lead (main agent).
+func isSubagent(agentID string, activeAgents []string) bool {
+	if agentID == "" {
+		return false
+	}
+	for _, id := range activeAgents {
+		if id == agentID {
+			return true
+		}
+	}
+	return false
 }
 
 // safeGitSubcommands are read-only git subcommands allowed in PLANNING.
