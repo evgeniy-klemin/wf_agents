@@ -129,6 +129,13 @@ ${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to REVIEWING --rea
 
 ### 4. REVIEWING (spawn Reviewer subagent)
 
+**CRITICAL**: In REVIEWING you MUST delegate entirely. You must NOT:
+- Read code files to form your own opinion
+- Suggest changes yourself
+- Perform any review work directly
+
+Your only job is to spawn the Reviewer subagent and wait for its verdict.
+
 Load agent instructions with project-local override:
 1. Check if `.claude/agents/reviewer.md` exists in the project — if yes, use it
 2. Otherwise, use the plugin default: `${CLAUDE_PLUGIN_ROOT}/agents/reviewer.md`
@@ -213,10 +220,16 @@ Update `LAST_POLL_TIME` after each poll. Repeat until `reviewDecision: APPROVED`
 - **Reject** — provide technical reasoning in the PR comment
 - **Escalate** — transition to BLOCKED if user input needed
 
-**Step 4: Reply to every comment explicitly.** Each reply must be:
+**Step 4: Reply to every comment explicitly.**
+
+**CRITICAL timing rule:**
+- **Accepted comments** (changes needed): implement ALL changes first (RESPAWN → DEVELOPING → ... → push), return to FEEDBACK, THEN reply to each comment describing what was done and which commit contains the fix. Do NOT reply "will do X" or "I'll fix this" before the work is done — the reply must describe what WAS done.
+- **Rejected comments** (no changes needed): reply immediately with clear technical reasoning for why the suggestion doesn't apply or would be harmful.
+
+Each reply must be:
 - **Transparent** — clearly state what was done or why not
 - **Concise** — short but with enough context so the reviewer understands without checking code
-- For accepted comments: describe the change made, which files were affected, and brief rationale
+- For accepted comments: describe the change made, which files were affected, and which commit SHA
 - For rejected comments: explain the technical reason why the suggestion doesn't apply or would be harmful
 
 **Changes needed** → iterate:
