@@ -51,10 +51,10 @@ Uses Colima as Docker runtime. If Docker socket stops responding: `colima restar
 
 ```
 PLANNING → RESPAWN → DEVELOPING → REVIEWING → COMMITTING → PR_CREATION → FEEDBACK → COMPLETE
-              ↑                       │            │                          │
-              ├───────────────────────┘ (reject)   │                          │
-              ├────────────────────────────────────┘ (more iterations)        │
-              └──────────────────────────────────────────────────────────────┘ (feedback)
+              ↑          ↑                         │            │                        │
+              │          └─────────────────────────┘ (reject)   │                        │
+              └────────────────────────────────────────────────┘ (more iterations)       │
+              └─────────────────────────────────────────────────────────────────────────┘ (feedback)
 
 Any non-terminal phase → BLOCKED (pause, remembers pre-blocked phase)
 BLOCKED → pre-blocked phase only
@@ -82,8 +82,6 @@ Guards validate evidence collected by the client before allowing transitions:
 **Global git restrictions** — git commit/push/checkout denied everywhere except:
 - PLANNING: git checkout allowed (branch creation)
 - COMMITTING: git commit, git push allowed
-
-**Team Lead write guard** — Team Lead (main agent, not a subagent) is denied Edit/Write/NotebookEdit in ALL phases. Determined by querying Temporal `activeAgents` and checking if caller's `agentID` is in the list.
 
 **Auto-BLOCKED**: Stop/Notification/TeammateIdle → transitions to BLOCKED. Any active event → auto-unblocks.
 

@@ -137,7 +137,7 @@ func main() {
 
 			// Block the tool call
 			out := hookOutput{
-				Continue: false,
+				Continue: true,
 				HookSpecificOutput: &hookSpecificOutput{
 					HookEventName:            "PreToolUse",
 					PermissionDecision:       "deny",
