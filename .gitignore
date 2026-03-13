@@ -1,3 +1,5 @@
 bin/
 /hook-handler
 /web
+.DS_Store
+/client
