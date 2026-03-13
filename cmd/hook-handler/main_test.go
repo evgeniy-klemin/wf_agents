@@ -13,41 +13,14 @@ import (
 	"testing"
 )
 
-// TestDenyExitCode2 verifies that the deny path outputs the reason to stdout,
-// logs to stderr with DENIED: prefix, and exits with code 2.
-// We test the output formatting via the denyAndExit helper captured via a buffer.
-func TestDenyExitCode2(t *testing.T) {
-	reason := "Edit not allowed in PLANNING phase"
-
-	// Verify that the deny reason is a plain string that would be written to stdout
-	// (not JSON) — the new deny path does: fmt.Fprintf(os.Stdout, "%s\n", reason)
-	expectedStdout := reason + "\n"
-	if expectedStdout != reason+"\n" {
-		t.Errorf("expected stdout to be plain reason string, not JSON")
-	}
-
-	// Verify the stderr message format
-	expectedStderr := "DENIED: " + reason
-	if !strings.HasPrefix(expectedStderr, "DENIED: ") {
-		t.Errorf("expected stderr to start with 'DENIED: ', got: %s", expectedStderr)
-	}
-
-	// Verify the deny path does NOT produce JSON hookOutput
-	out := hookOutput{
-		HookSpecificOutput: &hookSpecificOutput{
-			HookEventName:     "PreToolUse",
-			AdditionalContext: "some context",
-		},
-	}
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(out); err != nil {
-		t.Fatalf("failed to encode hookOutput: %v", err)
-	}
-	// The allow path (additionalContext) still uses JSON
-	if !strings.Contains(buf.String(), "additionalContext") {
-		t.Errorf("allow path should still use JSON with additionalContext")
-	}
-}
+// The deny path in main.go calls os.Exit(2) after writing the reason to stdout/stderr.
+// os.Exit(2) cannot be tested in-process without subprocess scaffolding, so there is no
+// TestDenyOutputFormat here. The deny behavior (exit code 2, plain-text reason on stdout)
+// was verified via live testing — the Edit tool was blocked with exit code 2 as expected.
+//
+// The logic that decides WHAT to deny (which tools are forbidden in which phase, subagent
+// detection, etc.) is thoroughly tested in internal/workflow/tool_permissions_test.go via
+// the exported CheckToolPermission and IsSubagent functions.
 
 // TestSessionStartOutputHasContinueTrue verifies that the SessionStart hookOutput
 // serialized to JSON DOES include "continue": true so Claude keeps running.
