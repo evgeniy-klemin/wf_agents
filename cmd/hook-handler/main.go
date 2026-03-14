@@ -95,7 +95,8 @@ func main() {
 	// Stop = Claude finished turn, waiting for user input
 	// Notification = system notification (e.g., teammate needs attention)
 	// TeammateIdle = subagent waiting
-	isBlockingEvent := input.HookEventName == "Stop" || input.HookEventName == "Notification" || input.HookEventName == "TeammateIdle"
+	isBlockingEvent := input.HookEventName == "Stop" || input.HookEventName == "Notification" ||
+		input.HookEventName == "TeammateIdle"
 
 	if isBlockingEvent {
 		phase := queryPhase(ctx, c, workflowID)
@@ -292,7 +293,13 @@ func main() {
 	case "PermissionRequest":
 		// Auto-allow safe commands when Claude Code would prompt the user
 		prStatus := queryStatus(ctx, c, workflowID)
-		prDecision := wf.CheckToolPermission(prStatus.Phase, input.ToolName, input.ToolInput, input.AgentID, prStatus.ActiveAgents)
+		prDecision := wf.CheckToolPermission(
+			prStatus.Phase,
+			input.ToolName,
+			input.ToolInput,
+			input.AgentID,
+			prStatus.ActiveAgents,
+		)
 
 		if prDecision.Allowed {
 			detail["auto_allowed"] = "true"
@@ -612,4 +619,3 @@ func temporalHost() string {
 	}
 	return "localhost:7233"
 }
-
