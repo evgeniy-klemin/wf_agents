@@ -9,8 +9,13 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/eklemin/wf-agents/internal/model"
 )
 
 // The deny path in main.go calls os.Exit(2) after writing the reason to stdout/stderr.
@@ -62,6 +67,70 @@ func TestAllowWithContextOutputNoContinueField(t *testing.T) {
 	raw := buf.String()
 	if strings.Contains(raw, `"continue"`) {
 		t.Errorf("allow-with-context output must NOT contain \"continue\" field, got: %s", raw)
+	}
+}
+
+// TestPhaseInstructionsNonEmpty verifies that phaseInstructions returns non-empty content
+// for all phases, and that no {{...}} placeholders remain unresolved.
+func TestPhaseInstructionsNonEmpty(t *testing.T) {
+	// Find the project root by locating the claude/states directory.
+	// The test binary runs from the package directory, so we go up two levels.
+	projectRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("cannot determine project root: %v", err)
+	}
+	// Verify the states directory exists at the expected location.
+	statesDir := filepath.Join(projectRoot, "claude", "states")
+	if _, err := os.Stat(statesDir); err != nil {
+		t.Fatalf("claude/states directory not found at %s: %v", statesDir, err)
+	}
+
+	// Set CLAUDE_PLUGIN_ROOT so phaseInstructions can locate the state files.
+	t.Setenv("CLAUDE_PLUGIN_ROOT", projectRoot)
+
+	// phaseInstructions reads CLAUDE_PLUGIN_ROOT and uses wfClientBin() which reads env.
+	// We also set WF_CLIENT_BIN to a known value so the placeholder resolves.
+	t.Setenv("WF_CLIENT_BIN", "/usr/local/bin/wf-client")
+
+	unresolvedPlaceholder := regexp.MustCompile(`\{\{[A-Z_]+\}\}`)
+
+	phases := []model.Phase{
+		model.PhasePlanning,
+		model.PhaseRespawn,
+		model.PhaseDeveloping,
+		model.PhaseReviewing,
+		model.PhaseCommitting,
+		model.PhasePRCreation,
+		model.PhaseFeedback,
+		model.PhaseComplete,
+		model.PhaseBlocked,
+	}
+
+	for _, phase := range phases {
+		t.Run(string(phase), func(t *testing.T) {
+			result := phaseInstructions(phase)
+
+			if strings.TrimSpace(result) == "" {
+				t.Errorf("phaseInstructions(%s) returned empty string", phase)
+			}
+
+			if matches := unresolvedPlaceholder.FindAllString(result, -1); len(matches) > 0 {
+				t.Errorf("phaseInstructions(%s) has unresolved placeholders: %v\nContent:\n%s",
+					phase, matches, result)
+			}
+		})
+	}
+}
+
+// TestPhaseInstructionsFallbackOnMissingFile verifies that phaseInstructions falls back
+// gracefully when CLAUDE_PLUGIN_ROOT points to a directory without state files.
+func TestPhaseInstructionsFallbackOnMissingFile(t *testing.T) {
+	t.Setenv("CLAUDE_PLUGIN_ROOT", "/nonexistent/path")
+
+	// Should not panic, should return a non-empty fallback string.
+	result := phaseInstructions(model.PhasePlanning)
+	if strings.TrimSpace(result) == "" {
+		t.Error("phaseInstructions fallback must return non-empty string")
 	}
 }
 

@@ -119,7 +119,7 @@ Claude Code  ──hooks──►  hook-handler  ──signals──►  Tempora
                          inject context              web dashboard
 ```
 
-- **hook-handler** — Go binary invoked by Claude Code hooks, bridges events to Temporal
+- **hook-handler** — Go binary invoked by Claude Code hooks, bridges events to Temporal, loads phase instructions from `claude/states/*.md`
 - **Temporal workflow** — event store + state machine, NOT an orchestrator
 - **wf-client** — CLI for managing transitions
 - **wf-web** — web dashboard with phase diagram, timeline, stuck detection
@@ -138,6 +138,7 @@ internal/
 templates/         Legacy CLAUDE.md template (pre-plugin)
 hooks/             hooks.json — plugin hook configuration
 agents/            Subagent definitions (developer, reviewer, feature-team-lead)
+claude/states/     Phase instructions (*.md) — loaded at runtime by hook-handler
 commands/          Slash commands (start-feature-team, workflow, status)
 .claude-plugin/    Plugin manifest
 ```

@@ -85,18 +85,19 @@ ${CLAUDE_PLUGIN_ROOT}/bin/wf-client status <session-id>
 ### 1. PLANNING (you do this yourself)
 
 **Branch setup — MANDATORY first step, do NOT skip:**
-1. Run `git branch --show-current` to determine the current branch
-2. **If the current branch is NOT `main`/`master`** — ask the user:
-   > "Current branch is `<branch>`. Should I switch to `main`, pull latest, and create the feature branch from there?"
-   - If user says **yes**: run `git checkout main && git pull`, then create the feature branch from `main`. Record `main` as `BASE_BRANCH`.
-   - If user says **no**: stay on the current branch and use it as `BASE_BRANCH`.
-   - **Do NOT proceed without the user's answer.**
-3. If the current branch IS `main`/`master` — record it as `BASE_BRANCH` and proceed.
-4. Create a new feature branch: `git checkout -b <feature-branch>`
-   - Branch name should reflect the task (e.g., `fix/hook-deny-exit-code`, `feat/add-dashboard`)
-5. NEVER commit directly to BASE_BRANCH — all work happens on the feature branch
 
-⚠️ If you skip this step, all commits will land on the wrong branch and the PR will be incorrect.
+- [ ] `git branch --show-current` — what branch are you on?
+- [ ] **If NOT on `main`/`master`**: ask the user —
+  > "Current branch is `<branch>`. Switch to `main`, pull latest, and create feature branch from there?"
+  - **Yes** → `git checkout main && git pull` → record `BASE_BRANCH=main`
+  - **No** → stay, record current branch as `BASE_BRANCH`
+  - **Do NOT proceed without the user's answer.**
+- [ ] **If on `main`/`master`**: `git pull` to get latest → record as `BASE_BRANCH`
+- [ ] `git checkout -b <feature-branch>` — branch name from task (e.g., `fix/hook-deny`, `feat/dashboard`)
+- [ ] **VERIFY**: `git branch --show-current` — confirm you are on the feature branch, NOT `BASE_BRANCH`
+
+⛔ **STOP** — Do NOT proceed to planning until ALL boxes above are checked.
+NEVER commit directly to BASE_BRANCH — all work happens on the feature branch.
 
 Remember `BASE_BRANCH` — you will need it in PR_CREATION.
 
@@ -122,6 +123,7 @@ ${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to RESPAWN --reaso
 
 Kill existing Developer/Reviewer subagents and spawn fresh ones with clean context:
 - This deliberately clears accumulated context window noise from prior iterations
+- Determine the current iteration task from your plan — this is the ONLY task the Developer will receive
 - Prepare the current iteration task context
 - Only pass the plan and current iteration info to new agents
 - **File writes are BLOCKED in this phase** — only agent management
@@ -133,14 +135,10 @@ ${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to DEVELOPING --re
 
 ### 3. DEVELOPING (spawn Developer subagent)
 
-Load agent instructions with project-local override:
-1. Check if `.claude/agents/developer.md` exists in the project — if yes, use it
-2. Otherwise, use the plugin default: `${CLAUDE_PLUGIN_ROOT}/agents/developer.md`
-
-Spawn a Developer subagent via the Agent tool. The prompt MUST include:
-- The agent instructions loaded above
-- Your implementation plan
+Spawn a Developer subagent via the Agent tool with `subagent_type: "wf-agents:developer"`. The prompt MUST include:
+- The current iteration task ONLY (not the full plan — the Developer must focus on one task at a time)
 - The current iteration number and any feedback from prior rejections
+- A brief summary of the overall goal (one sentence) for context
 
 When the Developer finishes, transition:
 ```bash
@@ -156,12 +154,7 @@ ${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to REVIEWING --rea
 
 Your only job is to spawn the Reviewer subagent and wait for its verdict.
 
-Load agent instructions with project-local override:
-1. Check if `.claude/agents/reviewer.md` exists in the project — if yes, use it
-2. Otherwise, use the plugin default: `${CLAUDE_PLUGIN_ROOT}/agents/reviewer.md`
-
-Spawn a Reviewer subagent via the Agent tool. The prompt MUST include:
-- The agent instructions loaded above
+Spawn a Reviewer subagent via the Agent tool with `subagent_type: "wf-agents:reviewer"`. The prompt MUST include:
 - The scope of changes to review (which files, what the plan was)
 
 **If Reviewer outputs `VERDICT: APPROVED`**: transition to COMMITTING

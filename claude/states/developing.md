@@ -1,26 +1,13 @@
-# DEVELOPING Phase
+PHASE: DEVELOPING — Developer subagent implements via TDD.
 
-You are in the DEVELOPING phase. Implement the plan using TDD.
+Do NOT write code yourself. Spawn a Developer subagent.
 
-## Steps
+CHECKLIST:
+- [ ] Spawn Developer subagent (subagent_type: "wf-agents:developer") with prompt containing: current iteration task ONLY (not full plan), iteration number, prior rejection feedback
+- [ ] Developer writes failing tests
+- [ ] Developer implements to pass tests
+- [ ] Developer runs all tests (simple commands only)
+- [ ] Leave all changes UNCOMMITTED — do not git add or git commit
+- [ ] Transition: {{WF_CLIENT}} transition <id> --to REVIEWING --reason "Development done, iteration N"
 
-1. Review the plan from the PLANNING phase
-2. For each subtask:
-   a. Write failing tests first
-   b. Implement the minimum code to pass tests
-   c. Refactor if needed
-3. Run all tests to ensure nothing is broken
-4. Stage and commit your changes
-
-## If this is a fix iteration (review rejected or tests failed)
-
-1. Read the feedback carefully
-2. Address ONLY the issues mentioned
-3. Do not refactor unrelated code
-4. Run tests after fixing
-
-## Constraints
-
-- Follow TDD strictly
-- Commit with clear messages
-- Do not modify files outside the plan scope
+BLOCKED ACTIONS: git add, git commit, git push (only in COMMITTING phase).

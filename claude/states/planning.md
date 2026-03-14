@@ -1,33 +1,17 @@
-# PLANNING Phase
+PHASE: PLANNING — Read-only exploration and planning.
 
-You are in the PLANNING phase. Your goal is to create an implementation plan.
+CHECKLIST (in order — do NOT skip steps):
+- [ ] Run git branch --show-current → if on main, run git pull; if NOT on main, ask user whether to switch
+- [ ] Record BASE_BRANCH (main or current branch per user's choice)
+- [ ] Create feature branch: git checkout -b <feature-branch-name>
+- [ ] VERIFY: git branch --show-current — confirm on feature branch, NOT BASE_BRANCH
+- [ ] Read relevant files, explore codebase structure
+- [ ] Identify files to create or modify
+- [ ] Break task into ordered iteration subtasks
+- [ ] Define testing strategy
+- [ ] Get user approval for the plan
+- [ ] Transition: {{WF_CLIENT}} transition <id> --to RESPAWN --reason "Plan: <summary>"
 
-## Steps
-
-1. **Branch setup** — before anything else:
-   - Run `git branch --show-current` to determine the current branch
-   - Record it as `BASE_BRANCH` (whatever it is — `main`, `develop`, a feature branch, etc.)
-   - Create a new feature branch **from the current branch**: `git checkout -b <feature-branch>`
-   - NEVER switch to `main`/`master` first — always branch from what is current
-   - Remember `BASE_BRANCH` — it will be the PR target in PR_CREATION
-2. Analyze the task requirements
-3. Explore the existing codebase to understand the current structure
-4. Identify files that need to be created or modified
-5. Break the task into ordered subtasks
-6. Estimate complexity of each subtask
-7. Create a clear, actionable plan
-
-## Output
-
-Produce a plan with:
-- Summary of changes needed
-- Ordered list of subtasks
-- Files to create/modify per subtask
-- Testing strategy
-- Potential risks or blockers
-
-## Constraints
-
-- Read-only: do NOT modify any files
-- Do NOT write code yet
-- Focus on analysis and planning
+BLOCKED ACTIONS: Edit, Write, NotebookEdit, unsafe Bash commands. Only read-only tools allowed.
+If transition DENIED (exit 1): read error, adjust plan.
+DO NOT offer to clear context or auto-accept edits. Transition to RESPAWN — that is the designed context reset.
