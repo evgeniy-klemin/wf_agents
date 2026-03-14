@@ -1,8 +1,10 @@
 PHASE: PLANNING — Read-only exploration and planning.
 
 CHECKLIST (in order — do NOT skip steps):
-- [ ] Run git branch --show-current → record as BASE_BRANCH
-- [ ] Create feature branch: git checkout -b <feature-branch-name> (MANDATORY — never commit to BASE_BRANCH)
+- [ ] Run git branch --show-current → if on main, run git pull; if NOT on main, ask user whether to switch
+- [ ] Record BASE_BRANCH (main or current branch per user's choice)
+- [ ] Create feature branch: git checkout -b <feature-branch-name>
+- [ ] VERIFY: git branch --show-current — confirm on feature branch, NOT BASE_BRANCH
 - [ ] Read relevant files, explore codebase structure
 - [ ] Identify files to create or modify
 - [ ] Break task into ordered iteration subtasks
