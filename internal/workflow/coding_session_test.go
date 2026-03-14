@@ -9,6 +9,77 @@ import (
 	"go.temporal.io/sdk/testsuite"
 )
 
+func TestStatusIncludesPhaseDurations(t *testing.T) {
+	env := setupEnv(t)
+
+	registerTransitions(env, t, []model.Phase{
+		model.PhaseRespawn,
+		model.PhaseDeveloping,
+		model.PhaseReviewing,
+		model.PhaseCommitting,
+		model.PhasePRCreation,
+		model.PhaseFeedback,
+		model.PhaseComplete,
+	})
+
+	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
+		SessionID: "test", TaskDescription: "test", MaxIterations: 5,
+	})
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	val, err := env.QueryWorkflow(QueryStatus)
+	require.NoError(t, err)
+	var status model.WorkflowStatus
+	require.NoError(t, val.Get(&status))
+
+	// CurrentPhaseSecs should be non-negative (COMPLETE phase has some duration)
+	assert.GreaterOrEqual(t, status.CurrentPhaseSecs, 0.0, "CurrentPhaseSecs should be >= 0")
+
+	// PhaseDurationSecs should contain entries for phases we transitioned through
+	require.NotNil(t, status.PhaseDurationSecs, "PhaseDurationSecs should be populated")
+	assert.Contains(t, status.PhaseDurationSecs, "PLANNING", "should have PLANNING duration")
+	assert.Contains(t, status.PhaseDurationSecs, "RESPAWN", "should have RESPAWN duration")
+	assert.Contains(t, status.PhaseDurationSecs, "DEVELOPING", "should have DEVELOPING duration")
+	assert.Contains(t, status.PhaseDurationSecs, "COMPLETE", "should have COMPLETE duration for current phase")
+}
+
+func TestStatusCurrentPhaseSecsIsCurrentPhaseOnly(t *testing.T) {
+	// Verify that CurrentPhaseSecs reflects time in current phase,
+	// while PhaseDurationSecs has cumulative data.
+	env := setupEnv(t)
+
+	registerTransitions(env, t, []model.Phase{
+		model.PhaseRespawn,
+		model.PhaseDeveloping,
+		model.PhaseReviewing,
+		model.PhaseCommitting,
+		model.PhasePRCreation,
+		model.PhaseFeedback,
+		model.PhaseComplete,
+	})
+
+	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
+		SessionID: "test", TaskDescription: "test", MaxIterations: 5,
+	})
+
+	require.True(t, env.IsWorkflowCompleted())
+
+	val, err := env.QueryWorkflow(QueryStatus)
+	require.NoError(t, err)
+	var status model.WorkflowStatus
+	require.NoError(t, val.Get(&status))
+
+	// CurrentPhaseSecs should equal the COMPLETE phase duration since that's current
+	completeDur, ok := status.PhaseDurationSecs["COMPLETE"]
+	if !ok {
+		t.Fatal("PhaseDurationSecs missing COMPLETE key")
+	}
+	assert.InDelta(t, status.CurrentPhaseSecs, completeDur, 0.001,
+		"CurrentPhaseSecs should match COMPLETE phase duration in PhaseDurationSecs")
+}
+
 func setupEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
 	t.Helper()
 	suite := &testsuite.WorkflowTestSuite{}
@@ -481,6 +552,126 @@ func TestPRCreationToCompleteDenied(t *testing.T) {
 		}
 	}
 	assert.True(t, hasDenial, "PR_CREATION → COMPLETE must be denied")
+}
+
+// TestCurrentIterPhaseDurations_SingleIteration verifies that for a single-iteration
+// workflow, CurrentIterPhaseSecs equals PhaseDurationSecs (same data).
+func TestCurrentIterPhaseDurations_SingleIteration(t *testing.T) {
+	env := setupEnv(t)
+
+	registerTransitions(env, t, []model.Phase{
+		model.PhaseRespawn,
+		model.PhaseDeveloping,
+		model.PhaseReviewing,
+		model.PhaseCommitting,
+		model.PhasePRCreation,
+		model.PhaseFeedback,
+		model.PhaseComplete,
+	})
+
+	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
+		SessionID: "test", TaskDescription: "test", MaxIterations: 5,
+	})
+
+	require.True(t, env.IsWorkflowCompleted())
+
+	val, err := env.QueryWorkflow(QueryStatus)
+	require.NoError(t, err)
+	var status model.WorkflowStatus
+	require.NoError(t, val.Get(&status))
+
+	// CurrentIterPhaseSecs must be populated
+	require.NotNil(t, status.CurrentIterPhaseSecs, "CurrentIterPhaseSecs must be populated")
+
+	// For single iteration all cumulative durations match iter durations
+	for phase, iterDur := range status.CurrentIterPhaseSecs {
+		totalDur, ok := status.PhaseDurationSecs[phase]
+		require.True(t, ok, "phase %s should be in PhaseDurationSecs", phase)
+		assert.InDelta(t, totalDur, iterDur, 0.001,
+			"single-iter: CurrentIterPhaseSecs[%s] should equal PhaseDurationSecs[%s]", phase, phase)
+	}
+}
+
+// TestCurrentIterPhaseDurations_MultiIteration verifies that for a multi-iteration
+// workflow, CurrentIterPhaseSecs only reflects durations since the last RESPAWN.
+func TestCurrentIterPhaseDurations_MultiIteration(t *testing.T) {
+	env := setupEnv(t)
+
+	registerTransitions(env, t, []model.Phase{
+		model.PhaseRespawn,     // iter 1 (from PLANNING)
+		model.PhaseDeveloping,
+		model.PhaseReviewing,
+		model.PhaseCommitting,
+		model.PhaseRespawn,     // iter 2
+		model.PhaseDeveloping,
+		model.PhaseReviewing,
+		model.PhaseCommitting,
+		model.PhasePRCreation,
+		model.PhaseFeedback,
+		model.PhaseComplete,
+	})
+
+	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
+		SessionID: "test", TaskDescription: "test", MaxIterations: 5,
+	})
+
+	require.True(t, env.IsWorkflowCompleted())
+
+	val, err := env.QueryWorkflow(QueryStatus)
+	require.NoError(t, err)
+	var status model.WorkflowStatus
+	require.NoError(t, val.Get(&status))
+
+	assert.Equal(t, 2, status.Iteration)
+
+	require.NotNil(t, status.CurrentIterPhaseSecs, "CurrentIterPhaseSecs must be populated")
+
+	// Cumulative DEVELOPING should be >= iter DEVELOPING (two visits in total)
+	totalDev := status.PhaseDurationSecs["DEVELOPING"]
+	iterDev := status.CurrentIterPhaseSecs["DEVELOPING"]
+	// Both visits are instant in tests, so totals may be 0, but iter must not exceed total
+	assert.GreaterOrEqual(t, totalDev, iterDev,
+		"total DEVELOPING duration should be >= current iter DEVELOPING duration")
+
+	// PLANNING should NOT appear in CurrentIterPhaseSecs (it was before first RESPAWN in iter 1)
+	_, planningInIter := status.CurrentIterPhaseSecs["PLANNING"]
+	assert.False(t, planningInIter, "PLANNING should not appear in current iter durations (happened before iter 2 RESPAWN)")
+}
+
+// TestCurrentIterPhaseDurations_FirstIterationOnly verifies that when there is only
+// a single iteration (no boundary RESPAWN), CurrentIterPhaseSecs covers all phases
+// including PLANNING (i.e., accumulation starts from the beginning).
+func TestCurrentIterPhaseDurations_FirstIterationOnly(t *testing.T) {
+	// We can only query after workflow completes in test env, so use a minimal path.
+	env := setupEnv(t)
+
+	registerTransitions(env, t, []model.Phase{
+		model.PhaseRespawn,
+		model.PhaseDeveloping,
+		model.PhaseReviewing,
+		model.PhaseCommitting,
+		model.PhasePRCreation,
+		model.PhaseFeedback,
+		model.PhaseComplete,
+	})
+
+	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
+		SessionID: "test", TaskDescription: "test", MaxIterations: 5,
+	})
+
+	require.True(t, env.IsWorkflowCompleted())
+
+	val, err := env.QueryWorkflow(QueryStatus)
+	require.NoError(t, err)
+	var status model.WorkflowStatus
+	require.NoError(t, val.Get(&status))
+
+	require.NotNil(t, status.CurrentIterPhaseSecs)
+
+	// Since there was only one iteration starting from PLANNING,
+	// PLANNING should appear in CurrentIterPhaseSecs (it's the first and only iter).
+	assert.Contains(t, status.CurrentIterPhaseSecs, "PLANNING",
+		"PLANNING should appear in CurrentIterPhaseSecs for iteration 1")
 }
 
 func TestRespawnGuardActiveAgents(t *testing.T) {

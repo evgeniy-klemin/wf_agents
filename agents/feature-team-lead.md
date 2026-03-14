@@ -100,12 +100,15 @@ ${CLAUDE_PLUGIN_ROOT}/bin/wf-client status <session-id>
 
 Remember `BASE_BRANCH` — you will need it in PR_CREATION.
 
-Analyze the task:
-- Read relevant files, explore the codebase structure
-- Identify files to create or modify
-- Break the task into ordered iteration subtasks
-- Define a testing strategy
-- Get user approval for the plan
+**Create and approve the plan — MANDATORY:**
+
+Use Claude Code's built-in plan mode to formalize your plan:
+1. Explore the codebase: read relevant files, understand the architecture
+2. Identify files to create or modify
+3. Break the task into ordered iteration subtasks
+4. Define a testing strategy
+5. Write the plan using plan mode — this creates a plan file that the user can review
+6. **Wait for explicit user approval** before transitioning — do NOT proceed without it
 
 When the plan is ready, transition:
 ```bash
@@ -204,30 +207,38 @@ ${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to FEEDBACK --reas
 
 **Step 1: Initialize comment tracking**
 
-Record `LAST_POLL_TIME` as the current UTC timestamp. This is used to detect new comments (including replies in existing threads).
+Initialize `SEEN_COMMENT_IDS` as an empty set. This is used to track which comments have already been processed (by ID), so new comments are reliably detected across every poll cycle.
 
-**Step 2: Poll loop**
+**Step 2: Poll loop — ALL THREE checks are MANDATORY on every cycle**
 
-Do NOT stop and wait. Run a continuous polling loop:
+Do NOT stop and wait. Run a continuous polling loop. Each cycle must execute ALL three checks — do NOT skip any:
 
 ```bash
 sleep 60
-
-# Check approval status
-gh pr view --json reviewDecision,state
-
-# Check for ALL review comments (inline code comments + thread replies)
-# This endpoint returns both top-level review comments AND replies in threads
-gh api repos/{owner}/{repo}/pulls/{number}/comments \
-  --jq '[.[] | select(.created_at > "LAST_POLL_TIME") | {id, path, line, body, in_reply_to_id, created_at}]'
-
-# Also check PR-level (issue-style) comments
-gh pr view --json comments --jq '[.comments[] | select(.createdAt > "LAST_POLL_TIME")]'
 ```
 
-Update `LAST_POLL_TIME` after each poll. Repeat until `reviewDecision: APPROVED` or `state: MERGED`.
+**2a.** Check approval and merge status:
+```bash
+gh pr view --json reviewDecision,state
+```
+If `reviewDecision: APPROVED` or `state: MERGED` → go to Step 5.
 
-**IMPORTANT:** `gh pr view --json comments` only returns PR-level comments, NOT inline review comments or thread replies. You MUST use `gh api repos/{owner}/{repo}/pulls/{number}/comments` to detect inline code review comments and replies within existing threads.
+**2b.** Fetch ALL inline review comments and filter out already-seen ones:
+```bash
+gh api repos/{owner}/{repo}/pulls/{number}/comments \
+  --jq '[.[] | {id, path, line, body, in_reply_to_id, created_at}]'
+```
+Compare returned IDs against `SEEN_COMMENT_IDS` set. Any new IDs = new comments.
+
+**2c.** Fetch ALL PR-level comments and filter out already-seen ones:
+```bash
+gh pr view --json comments --jq '[.comments[] | {id: .id, body: .body, createdAt: .createdAt}]'
+```
+Compare returned IDs against `SEEN_COMMENT_IDS` set. Any new IDs = new comments.
+
+Add new comment IDs to `SEEN_COMMENT_IDS` after each cycle. If 2b or 2c returned new comments → go to Step 3. Otherwise → repeat from `sleep 60`.
+
+**WARNING:** `gh pr view --json comments` (2c) only returns PR-level comments, NOT inline code review comments or thread replies. Step 2b is MANDATORY — without it you will miss all inline review feedback.
 
 **Step 3: When new comments found — triage each comment:**
 - **Accept** — implement the change (will loop back through RESPAWN)
