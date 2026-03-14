@@ -212,14 +212,14 @@ func TestCheckToolPermission_SafeBashAutoAllowed(t *testing.T) {
 	}
 }
 
-func TestCheckToolPermission_UnsafeBashNotAutoAllowed(t *testing.T) {
+func TestCheckToolPermission_UnsafeBashAutoAllowedForSubagent(t *testing.T) {
 	agentID, activeAgents := subagentArgs()
-	// rm -rf / is not in the safe list, but in DEVELOPING it's not denied (only git is blocked)
-	// It should NOT be auto-allowed
+	// rm -rf / is not in the safe list, but in DEVELOPING it's not denied (only git is blocked).
+	// Subagents get auto-approved for any non-denied Bash command (permission bypass).
 	input, _ := json.Marshal(map[string]string{"command": "rm -rf /"})
 	result := CheckToolPermission(model.PhaseDeveloping, "Bash", input, agentID, activeAgents)
 	assert.False(t, result.Denied, "rm -rf / is not denied in DEVELOPING (only git commands are blocked)")
-	assert.False(t, result.Allowed, "rm -rf / should NOT be auto-allowed")
+	assert.True(t, result.Allowed, "rm -rf / should be auto-approved for subagents (permission bypass)")
 }
 
 func TestCheckToolPermission_DeniedNotAutoAllowed(t *testing.T) {
@@ -273,13 +273,14 @@ func TestCheckToolPermission_TeamLeadBashNotAutoAllowed(t *testing.T) {
 
 // --- Auto-approve narrow list tests ---
 
-func TestCheckToolPermission_CurlNotAutoAllowed(t *testing.T) {
+func TestCheckToolPermission_CurlAutoAllowedForSubagent(t *testing.T) {
 	agentID, activeAgents := subagentArgs()
-	// curl is in safeBashPrefixes (PLANNING whitelist) but NOT in autoApproveBashPrefixes
+	// curl is in safeBashPrefixes (PLANNING whitelist) but NOT in autoApproveBashPrefixes.
+	// However, subagents get auto-approved for any non-denied Bash command (same as non-Bash tools).
 	input, _ := json.Marshal(map[string]string{"command": "curl https://example.com"})
 	result := CheckToolPermission(model.PhaseDeveloping, "Bash", input, agentID, activeAgents)
 	assert.False(t, result.Denied, "curl is not denied in DEVELOPING (only git commands are blocked)")
-	assert.False(t, result.Allowed, "curl should NOT be auto-approved (not in narrow auto-approve list)")
+	assert.True(t, result.Allowed, "curl should be auto-approved for subagents (bypass permission prompt)")
 }
 
 func TestCheckToolPermission_GitDiffAutoAllowed(t *testing.T) {
@@ -290,13 +291,14 @@ func TestCheckToolPermission_GitDiffAutoAllowed(t *testing.T) {
 	assert.True(t, result.Allowed, "git diff should be auto-approved (truly read-only)")
 }
 
-func TestCheckToolPermission_GitConfigNotAutoAllowed(t *testing.T) {
+func TestCheckToolPermission_GitConfigAutoAllowedForSubagent(t *testing.T) {
 	agentID, activeAgents := subagentArgs()
-	// git config can write — must not be auto-approved
+	// git config can write but is not in the forbidden list, so it's not denied.
+	// Subagents get auto-approved for any non-denied Bash command.
 	input, _ := json.Marshal(map[string]string{"command": "git config user.name"})
 	result := CheckToolPermission(model.PhaseDeveloping, "Bash", input, agentID, activeAgents)
 	assert.False(t, result.Denied, "git config is not denied in DEVELOPING (not a forbidden git command)")
-	assert.False(t, result.Allowed, "git config should NOT be auto-approved (can write)")
+	assert.True(t, result.Allowed, "git config should be auto-approved for subagents (bypass permission prompt)")
 }
 
 // --- isClaudeInfraFile tests ---

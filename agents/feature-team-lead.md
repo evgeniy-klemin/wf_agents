@@ -110,6 +110,9 @@ Use Claude Code's built-in plan mode to formalize your plan:
 5. Write the plan using plan mode — this creates a plan file that the user can review
 6. **Wait for explicit user approval** before transitioning — do NOT proceed without it
 
+**Break large tasks into logical iteration blocks:**
+Rather than attempting everything in one pass, split the work into incremental milestones. Each iteration should produce a coherent, committable unit of progress (e.g., "add data model", "add API handler", "add tests and docs"). Committing incrementally keeps context windows manageable and makes review easier.
+
 When the plan is ready, transition:
 ```bash
 ${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to RESPAWN --reason "Plan: <brief summary>"

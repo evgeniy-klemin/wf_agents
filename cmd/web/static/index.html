@@ -489,7 +489,7 @@ function renderPhaseHistory(timeline, sessionEndTime) {
   if (totalMs === 0) { el.innerHTML = ''; return; }
 
   // Detect iteration boundaries
-  let iterNum = 1;
+  let iterNum = 0;
   const iterBoundaries = [];
   let cumMs = 0;
   for (const s of segments) {

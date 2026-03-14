@@ -233,7 +233,14 @@ func CheckToolPermission(
 
 	// Bash: enforce global git command restrictions with per-phase exemptions
 	if toolName == "Bash" {
-		return checkBashPermission(phase, toolInput)
+		result := checkBashPermission(phase, toolInput)
+		if result.Denied {
+			return result
+		}
+		if !isTeamLead {
+			return ToolPermissionResult{Denied: false, Allowed: true}
+		}
+		return result
 	}
 
 	// If we get here, the tool is allowed. Auto-approve for subagents to bypass permission prompts.
