@@ -34,6 +34,19 @@ make web                      # start web dashboard (port 8090)
 
 Uses Colima as Docker runtime. If Docker socket stops responding: `colima restart && docker compose up -d`.
 
+## Agent Teams (experimental)
+
+This plugin uses Claude Code's Agent Teams feature for multi-agent coordination.
+Requires Claude Code v2.1.32+ and the experimental flag enabled in settings.json:
+
+```json
+{
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  }
+}
+```
+
 ## Testing
 
 ```bash

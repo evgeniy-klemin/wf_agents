@@ -120,6 +120,17 @@
           }
         ]
       }
+    ],
+    "TaskCompleted": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/hook-handler",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }

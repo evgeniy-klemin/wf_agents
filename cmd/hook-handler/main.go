@@ -90,14 +90,12 @@ func main() {
 
 	// --- Auto-BLOCKED / auto-unblock logic (before per-event handling) ---
 	//
-	// "Blocking" events: Notification, TeammateIdle → transition TO BLOCKED
+	// "Blocking" events: Stop, Notification → transition TO BLOCKED
+	// TeammateIdle is handled separately (phase-aware) in its case below.
 	// All other events from Claude Code → transition BACK from BLOCKED
-	// "Blocking" events: agent stopped working, waiting for input
 	// Stop = Claude finished turn, waiting for user input
 	// Notification = system notification (e.g., teammate needs attention)
-	// TeammateIdle = subagent waiting
-	isBlockingEvent := input.HookEventName == "Stop" || input.HookEventName == "Notification" ||
-		input.HookEventName == "TeammateIdle"
+	isBlockingEvent := input.HookEventName == "Stop" || input.HookEventName == "Notification"
 
 	if isBlockingEvent {
 		phase := queryPhase(ctx, c, workflowID)
@@ -114,7 +112,7 @@ func main() {
 			autoTransition(ctx, c, workflowID, input.SessionID, model.PhaseBlocked,
 				fmt.Sprintf("auto: %s in %s", input.HookEventName, phase))
 		}
-	} else if input.HookEventName != "SessionStart" {
+	} else if input.HookEventName != "SessionStart" && input.HookEventName != "TeammateIdle" {
 		// Any active event (tool use, user prompt, subagent, etc.) → auto-unblock
 		status := queryStatus(ctx, c, workflowID)
 		if status.Phase == model.PhaseBlocked && status.PreBlockedPhase != "" {
@@ -245,6 +243,21 @@ func main() {
 			Detail:    detail,
 		})
 
+		// In Agent Teams, teammates idle intentionally during active work phases
+		// (e.g., Developer done, waiting for next instruction from Team Lead).
+		// Only auto-BLOCKED if idle in a phase where no teammate should be idle.
+		phase := queryPhase(ctx, c, workflowID)
+		teammateIdleExpected := map[model.Phase]bool{
+			model.PhaseDeveloping: true,
+			model.PhaseReviewing:  true,
+			model.PhaseCommitting: true,
+			model.PhasePRCreation: true,
+		}
+		if !teammateIdleExpected[phase] {
+			autoTransition(ctx, c, workflowID, input.SessionID, model.PhaseBlocked,
+				fmt.Sprintf("auto: TeammateIdle in %s", phase))
+		}
+
 	case "Stop":
 		sendHookEvent(ctx, c, workflowID, model.SignalHookEvent{
 			HookType:  "Stop",
@@ -290,6 +303,13 @@ func main() {
 		if input.Prompt != "" {
 			setTask(ctx, c, workflowID, input.Prompt)
 		}
+
+	case "TaskCompleted":
+		sendHookEvent(ctx, c, workflowID, model.SignalHookEvent{
+			HookType:  "TaskCompleted",
+			SessionID: input.SessionID,
+			Detail:    detail,
+		})
 
 	case "PermissionRequest":
 		// Log to Temporal for audit trail — PreToolUse already handled auto-approve/deny,
