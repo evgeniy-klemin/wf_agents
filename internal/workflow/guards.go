@@ -219,6 +219,10 @@ func CheckToolPermission(
 		return checkBashPermission(phase, toolInput)
 	}
 
+	// If we get here, the tool is allowed. Auto-approve for subagents to bypass permission prompts.
+	if !isTeamLead {
+		return ToolPermissionResult{Denied: false, Allowed: true}
+	}
 	return ToolPermissionResult{Denied: false}
 }
 

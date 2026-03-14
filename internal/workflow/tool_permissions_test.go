@@ -245,6 +245,31 @@ func TestCheckToolPermission_WfClientShortNameAllowedInPlanning(t *testing.T) {
 	assert.False(t, result.Denied, "wf-client (short name) should not be denied in PLANNING")
 }
 
+// --- Subagent auto-allow for file-writing tools ---
+
+func TestCheckToolPermission_SubagentEditAutoAllowedInDeveloping(t *testing.T) {
+	agentID, activeAgents := subagentArgs()
+	result := CheckToolPermission(model.PhaseDeveloping, "Edit", nil, agentID, activeAgents)
+	assert.False(t, result.Denied, "subagent Edit should not be denied in DEVELOPING")
+	assert.True(t, result.Allowed, "subagent Edit should be auto-allowed (Allowed: true) in DEVELOPING")
+}
+
+func TestCheckToolPermission_SubagentWriteAutoAllowedInDeveloping(t *testing.T) {
+	agentID, activeAgents := subagentArgs()
+	result := CheckToolPermission(model.PhaseDeveloping, "Write", nil, agentID, activeAgents)
+	assert.False(t, result.Denied, "subagent Write should not be denied in DEVELOPING")
+	assert.True(t, result.Allowed, "subagent Write should be auto-allowed (Allowed: true) in DEVELOPING")
+}
+
+func TestCheckToolPermission_TeamLeadBashNotAutoAllowed(t *testing.T) {
+	agentID, activeAgents := teamLeadArgs()
+	// "node server.js" is not in the safe prefix list — should not be auto-approved for Team Lead
+	input, _ := json.Marshal(map[string]string{"command": "node server.js"})
+	result := CheckToolPermission(model.PhaseDeveloping, "Bash", input, agentID, activeAgents)
+	assert.False(t, result.Denied, "Team Lead Bash with node server.js is not denied in DEVELOPING")
+	assert.False(t, result.Allowed, "Team Lead Bash with node server.js should NOT be auto-allowed")
+}
+
 // --- isSafeBashCommand path-stripping tests ---
 
 func TestIsSafeBashCommand_WithPath(t *testing.T) {
