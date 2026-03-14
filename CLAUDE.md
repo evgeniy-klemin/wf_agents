@@ -1,34 +1,20 @@
 # wf_agents — Event-Sourced Claude Code Workflow Plugin
 
-Temporal-based observer/event store for Claude Code autonomous coding sessions. Temporal does NOT orchestrate — Claude Code runs autonomously, hooks send signals to Temporal which tracks state, enforces phase transitions, and provides a web dashboard.
+## Project structure
 
-## Plugin Format
-
-This project is a Claude Code plugin. Install via:
-```bash
-make install                          # builds binaries
-claude --plugin-dir /path/to/wf_agents
-```
-
-### Plugin structure
+### Plugin files
 ```
 .claude-plugin/plugin.json   Plugin manifest
 hooks/hooks.json              Hook configuration (all events → bin/hook-handler)
 agents/                       Subagent definitions with YAML frontmatter
-  feature-team-lead.md        Team Lead: plans, delegates, coordinates phases
-  developer.md                TDD Developer: writes tests first, then implementation
-  reviewer.md                 Code Reviewer: validates correctness, reports verdict
 commands/                     Slash commands
-  start-feature-team.md       /wf-agents:start-feature-team — launch autonomous workflow
-  workflow.md                 /wf-agents:workflow — phase transitions
-  status.md                   /wf-agents:status — check workflow status
 ```
 
 ### Go backend
 ```
 cmd/
   worker/          Temporal worker process
-  client/          CLI: start, status, timeline, transition, journal, complete, list
+  client/          CLI: start, status, timeline, transition, journal, complete, list, reset-iterations
   hook-handler/    Bridge: Claude Code hooks → Temporal signals + permission enforcement
   web/             Web dashboard (Go server + embedded static HTML)
 internal/
@@ -47,43 +33,12 @@ make web                      # start web dashboard (port 8090)
 
 Uses Colima as Docker runtime. If Docker socket stops responding: `colima restart && docker compose up -d`.
 
-## Phase state machine
+## Testing
 
+```bash
+go test ./internal/workflow/ -v    # workflow + guard tests
+go test ./internal/model/ -v       # state machine tests
 ```
-PLANNING → RESPAWN → DEVELOPING → REVIEWING → COMMITTING → PR_CREATION → FEEDBACK → COMPLETE
-              ↑                       │            │                          │
-              ├───────────────────────┘ (reject)   │                          │
-              ├────────────────────────────────────┘ (more iterations)        │
-              └──────────────────────────────────────────────────────────────┘ (feedback)
-
-Any non-terminal phase → BLOCKED (pause, remembers pre-blocked phase)
-BLOCKED → pre-blocked phase only
-```
-
-Only COMPLETE is terminal. BLOCKED is a pause, not terminal.
-
-## Transition guards (internal/workflow/guards.go)
-
-Guards validate evidence collected by the client before allowing transitions:
-- COMMITTING → any: `working_tree_clean=true`
-- DEVELOPING → REVIEWING: `working_tree_clean=false` (must have changes)
-- PR_CREATION → FEEDBACK: `pr_checks_pass=true`
-- FEEDBACK → COMPLETE: `pr_approved=true` OR `pr_merged=true`
-
-## Hook permission enforcement (cmd/hook-handler)
-
-**PLANNING phase** — whitelist approach:
-- Only read-only tools allowed (Read, Glob, Grep, WebFetch, etc.)
-- Edit/Write/NotebookEdit are denied
-- Bash: only safe commands from whitelist
-
-**RESPAWN phase** — Edit/Write/NotebookEdit denied
-
-**Global git restrictions** — git commit/push/checkout denied everywhere except:
-- PLANNING: git checkout allowed (branch creation)
-- COMMITTING: git commit, git push allowed
-
-**Auto-BLOCKED**: Stop/Notification/TeammateIdle → transitions to BLOCKED. Any active event → auto-unblocks.
 
 ## Key patterns
 
@@ -92,15 +47,8 @@ Guards validate evidence collected by the client before allowing transitions:
 - Transitions use `UpdateWorkflow` (synchronous allow/deny), not signals
 - `WaitForStage: client.WorkflowUpdateStageCompleted` required in UpdateWorkflow options
 - Task description set via `set-task` signal on first `UserPromptSubmit`
-- Web dashboard reads task from Temporal memo
 - Phase instructions injected as `additionalContext` on every PreToolUse
-
-## Testing
-
-```bash
-go test ./internal/workflow/ -v    # workflow + guard tests
-go test ./internal/model/ -v       # state machine tests
-```
+- Bash commands chained with `&&`, `||`, `|`, `;` are split and each segment checked independently in guards
 
 ## Important conventions
 

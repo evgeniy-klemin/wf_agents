@@ -75,6 +75,13 @@ Edit/Write/NotebookEdit are blocked. Only agent management and reads allowed.
 - PLANNING: `git checkout` allowed (branch creation)
 - COMMITTING: `git commit`, `git push` allowed
 
+### Phase-specific bash restrictions
+- `gofmt` only allowed in DEVELOPING and REVIEWING (denied in all other phases)
+- Bash commands chained with `&&` are split and each segment checked independently
+
+### Iteration limits
+Soft limit (default 5). When max reached, guard denies RESPAWN with instructions to ask the user. If user confirms: `wf-client reset-iterations <id>` resets the guard counter. `totalIterations` preserved for dashboard display.
+
 ### Auto-BLOCKED
 - `Stop` / `Notification` / `TeammateIdle` → automatic transition to BLOCKED
 - Any active event (tool use, user prompt) → automatic unblock
@@ -97,6 +104,7 @@ wf-client status my-task
 wf-client timeline my-task
 wf-client transition my-task --to DEVELOPING --reason "Plan ready"
 wf-client list
+wf-client reset-iterations my-task    # reset iteration counter (soft limit)
 ```
 
 ## Architecture
@@ -121,7 +129,7 @@ Claude Code  ──hooks──►  hook-handler  ──signals──►  Tempora
 ```
 cmd/
   worker/          Temporal worker
-  client/          CLI (start, status, transition, ...)
+  client/          CLI (start, status, transition, reset-iterations, ...)
   hook-handler/    Hooks → Temporal signals + permission enforcement
   web/             Web dashboard (Go + embedded HTML)
 internal/
