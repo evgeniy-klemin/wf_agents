@@ -1,12 +1,12 @@
-PHASE: REVIEWING — Reviewer subagent validates code quality.
+PHASE: REVIEWING — Reviewer teammate validates code quality.
 
-Do NOT review code yourself. Spawn a Reviewer subagent.
+Do NOT review code yourself. Delegate to the Reviewer teammate.
 
 CHECKLIST:
-- [ ] Spawn Reviewer subagent (subagent_type: "wf-agents:reviewer") with prompt containing: scope of changes, plan context
-- [ ] Reviewer runs git diff, tests, linting
-- [ ] Reviewer outputs VERDICT: APPROVED or VERDICT: REJECTED — <issues>
+- [ ] Tell Reviewer to begin review — do NOT provide a file list (Reviewer uses git diff)
+- [ ] Wait for Reviewer verdict via message — be patient, do NOT check in or nudge
 - [ ] If APPROVED → {{WF_CLIENT}} transition <id> --to COMMITTING --reason "Review approved"
-- [ ] If REJECTED → {{WF_CLIENT}} transition <id> --to DEVELOPING --reason "Review rejected: <issues>"
+- [ ] If REJECTED → send Reviewer feedback to Developer, then:
+      {{WF_CLIENT}} transition <id> --to DEVELOPING --reason "Review rejected: <issues>"
 
 BLOCKED ACTIONS: git commit, git push, Edit/Write (for Reviewer).

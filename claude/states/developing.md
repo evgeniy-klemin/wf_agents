@@ -1,13 +1,16 @@
-PHASE: DEVELOPING — Developer subagent implements via TDD.
+PHASE: DEVELOPING — Developer teammate implements via TDD.
 
-Do NOT write code yourself. Spawn a Developer subagent.
+Do NOT write code yourself. Delegate to the Developer teammate.
 
 CHECKLIST:
-- [ ] Spawn Developer subagent (subagent_type: "wf-agents:developer") with prompt containing: current iteration task ONLY (not full plan), iteration number, prior rejection feedback
-- [ ] Developer writes failing tests
-- [ ] Developer implements to pass tests
-- [ ] Developer runs all tests (simple commands only)
-- [ ] Leave all changes UNCOMMITTED — do not git add or git commit
+- [ ] If entering from RESPAWN with no active teammates: spawn Developer + Reviewer now (both in same message):
+      Agent(subagent_type: "wf-agents:developer", team_name: "feature-team-<session-id>", name: "developer-<N>")
+      Agent(subagent_type: "wf-agents:reviewer", team_name: "feature-team-<session-id>", name: "reviewer-<N>")
+- [ ] Send Developer the current iteration task verbatim — do NOT paraphrase or summarize
+      Include: current iteration task, iteration number, any prior rejection feedback
+- [ ] Wait for Developer to message you they are done — be patient, do NOT check in or nudge
+- [ ] Leave all changes UNCOMMITTED — Developer must not git add or git commit
 - [ ] Transition: {{WF_CLIENT}} transition <id> --to REVIEWING --reason "Development done, iteration N"
+- [ ] Only after transition succeeds — notify Reviewer their work can begin
 
 BLOCKED ACTIONS: git add, git commit, git push (only in COMMITTING phase).

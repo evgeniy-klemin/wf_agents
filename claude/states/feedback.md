@@ -1,4 +1,4 @@
-PHASE: FEEDBACK — Triage human PR review comments.
+PHASE: FEEDBACK — Triage human PR review comments with the team.
 
 CHECKLIST:
 - [ ] Check for comments: gh pr view --json reviewDecision,reviews,comments,state
@@ -6,6 +6,7 @@ CHECKLIST:
       Run "sleep 60" (Bash), then check again. Repeat until comments appear.
       Do NOT stop or go idle — keep polling.
 - [ ] When comments found: gh api repos/{owner}/{repo}/pulls/{pr_number}/comments
+- [ ] Share all comments with Developer and Reviewer — triage together as a team
 - [ ] For each comment: Accept (implement) / Reject (reply with reasoning) / Escalate (BLOCKED)
 - [ ] Reply to EVERY comment with a transparent, concise response:
       ACCEPTED: what was changed, which files, brief rationale
@@ -20,3 +21,5 @@ CHECKLIST:
       GUARD: requires reviewDecision=APPROVED or state=MERGED. Will be DENIED otherwise.
 
 IMPORTANT: Do NOT stop and wait passively. Poll actively using sleep + gh pr view loop.
+
+BLOCKED ACTIONS: Edit, Write, NotebookEdit (except during iteration via RESPAWN). Only PR review and teammate communication allowed.
