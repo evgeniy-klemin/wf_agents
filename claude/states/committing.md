@@ -10,4 +10,4 @@ CHECKLIST:
   - All done → {{WF_CLIENT}} transition <id> --to PR_CREATION --reason "All iterations complete"
 
 VERIFY: You must be on the feature branch (not BASE_BRANCH). Run git branch --show-current to confirm.
-If RESPAWN DENIED: max iterations reached, must go to PR_CREATION.
+If RESPAWN DENIED: max iterations reached — ask the user whether to continue. If yes, run {{WF_CLIENT}} reset-iterations <id> and retry RESPAWN. If no, go to PR_CREATION.
