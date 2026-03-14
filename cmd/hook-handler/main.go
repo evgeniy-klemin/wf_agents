@@ -295,6 +295,13 @@ func main() {
 		prDecision := wf.CheckToolPermission(prStatus.Phase, input.ToolName, input.ToolInput, input.AgentID, prStatus.ActiveAgents)
 
 		if prDecision.Allowed {
+			detail["auto_allowed"] = "true"
+			sendHookEvent(ctx, c, workflowID, model.SignalHookEvent{
+				HookType:  "PermissionRequest",
+				SessionID: input.SessionID,
+				Tool:      input.ToolName,
+				Detail:    detail,
+			})
 			out := map[string]interface{}{
 				"hookSpecificOutput": map[string]interface{}{
 					"hookEventName": "PermissionRequest",

@@ -270,6 +270,34 @@ func TestCheckToolPermission_TeamLeadBashNotAutoAllowed(t *testing.T) {
 	assert.False(t, result.Allowed, "Team Lead Bash with node server.js should NOT be auto-allowed")
 }
 
+// --- Auto-approve narrow list tests ---
+
+func TestCheckToolPermission_CurlNotAutoAllowed(t *testing.T) {
+	agentID, activeAgents := subagentArgs()
+	// curl is in safeBashPrefixes (PLANNING whitelist) but NOT in autoApproveBashPrefixes
+	input, _ := json.Marshal(map[string]string{"command": "curl https://example.com"})
+	result := CheckToolPermission(model.PhaseDeveloping, "Bash", input, agentID, activeAgents)
+	assert.False(t, result.Denied, "curl is not denied in DEVELOPING (only git commands are blocked)")
+	assert.False(t, result.Allowed, "curl should NOT be auto-approved (not in narrow auto-approve list)")
+}
+
+func TestCheckToolPermission_GitDiffAutoAllowed(t *testing.T) {
+	agentID, activeAgents := subagentArgs()
+	input, _ := json.Marshal(map[string]string{"command": "git diff"})
+	result := CheckToolPermission(model.PhaseDeveloping, "Bash", input, agentID, activeAgents)
+	assert.False(t, result.Denied, "git diff should not be denied in DEVELOPING")
+	assert.True(t, result.Allowed, "git diff should be auto-approved (truly read-only)")
+}
+
+func TestCheckToolPermission_GitConfigNotAutoAllowed(t *testing.T) {
+	agentID, activeAgents := subagentArgs()
+	// git config can write — must not be auto-approved
+	input, _ := json.Marshal(map[string]string{"command": "git config user.name"})
+	result := CheckToolPermission(model.PhaseDeveloping, "Bash", input, agentID, activeAgents)
+	assert.False(t, result.Denied, "git config is not denied in DEVELOPING (not a forbidden git command)")
+	assert.False(t, result.Allowed, "git config should NOT be auto-approved (can write)")
+}
+
 // --- isSafeBashCommand path-stripping tests ---
 
 func TestIsSafeBashCommand_WithPath(t *testing.T) {

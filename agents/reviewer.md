@@ -49,7 +49,7 @@ Always include a brief summary of which test command was run and its outcome bef
 
 ## Auto-Approve Compatible Commands
 
-Use simple, single-purpose Bash commands. Do NOT chain with `&&`, `||`, or pipes — compound commands trigger manual approval prompts:
+Prefer simple commands. Compound commands (`&&`, `||`, pipes) are auto-approved only when every segment is a known safe command:
 
 ```bash
 # GOOD — simple commands:
@@ -59,7 +59,9 @@ go clean -testcache
 git diff
 git diff --stat
 
-# BAD — breaks auto-approve:
-go clean -testcache && go test ./... 2>&1
-git diff --stat && go test ./...
+# COMPOUND — auto-approved only if all parts are safe:
+go clean -testcache && go test ./...
+
+# NOT auto-approved — curl is not in auto-approve list:
+curl https://example.com && go test ./...
 ```

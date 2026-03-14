@@ -155,7 +155,7 @@ func validateTransition(s *sessionState, from, to model.Phase, evidence map[stri
 // ToolPermissionResult indicates whether a tool use is allowed.
 type ToolPermissionResult struct {
 	Denied  bool
-	Allowed bool   // explicitly auto-approve (bypass permission prompt)
+	Allowed bool // explicitly auto-approve (bypass permission prompt)
 	Reason  string
 }
 
@@ -257,6 +257,69 @@ var safeGitStashSubcommands = map[string]bool{
 	"list": true, "show": true,
 }
 
+// autoApproveBashPrefixes is a narrow list of commands safe to auto-approve
+// (bypass permission prompts) in any phase. Much smaller than safeBashPrefixes
+// which is used for PLANNING whitelist only.
+var autoApproveBashPrefixes = []string{
+	"go test", "go vet", "go build", "go list", "go mod", "go clean",
+	"npm test", "npm run lint", "cargo test", "cargo check",
+	"python -m pytest", "pytest",
+	"wf-client",
+}
+
+func isAutoApproveBashCommand(cmd string) bool {
+	for _, prefix := range autoApproveBashPrefixes {
+		if matchesBashPrefix(cmd, prefix) {
+			return true
+		}
+	}
+	// Also try basename matching for absolute paths
+	firstWord, rest, _ := strings.Cut(cmd, " ")
+	if strings.Contains(firstWord, "/") {
+		base := filepath.Base(firstWord)
+		cmdWithBase := base
+		if rest != "" {
+			cmdWithBase = base + " " + rest
+		}
+		for _, prefix := range autoApproveBashPrefixes {
+			if matchesBashPrefix(cmdWithBase, prefix) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// autoApproveGitSubcommands are git subcommands safe to auto-approve (truly read-only).
+var autoApproveGitSubcommands = map[string]bool{
+	"status": true, "log": true, "diff": true, "show": true,
+	"branch": true, "remote": true, "tag": true,
+	"rev-parse": true, "ls-files": true, "ls-tree": true,
+	"blame": true, "shortlog": true,
+}
+
+func isAutoApproveGitCommand(seg string) bool {
+	if !strings.HasPrefix(seg, "git ") {
+		return false
+	}
+	parts := strings.Fields(seg)
+	if len(parts) < 2 {
+		return false
+	}
+	// Skip flags to find subcommand
+	idx := 1
+	for idx < len(parts) && strings.HasPrefix(parts[idx], "-") {
+		idx++
+		if idx < len(parts) && (parts[idx-1] == "-C" || parts[idx-1] == "-c") {
+			idx++
+		}
+	}
+	if idx >= len(parts) {
+		return false
+	}
+	return autoApproveGitSubcommands[parts[idx]]
+}
+
 // safeBashPrefixes are read-only bash commands allowed in PLANNING.
 var safeBashPrefixes = []string{
 	"ls", "cat", "head", "tail", "less", "more", "wc", "file",
@@ -321,10 +384,10 @@ func checkBashPermission(phase model.Phase, toolInput json.RawMessage) ToolPermi
 				}
 			}
 		}
-		// Track whether every segment is in the safe prefix list (for auto-allow).
-		// Safe git read-only commands (git diff, git status, etc.) are also auto-allowed.
-		isGitSafe := (strings.HasPrefix(seg, "git ") || seg == "git") && isAllowedGitInPlanning(seg)
-		if !isSafeBashCommand(seg) && !isGitSafe {
+		// Track whether every segment is in the auto-approve list (for auto-allow).
+		// Only truly read-only git commands are auto-approved; git config etc. are not.
+		isGitReadOnly := isAutoApproveGitCommand(seg)
+		if !isAutoApproveBashCommand(seg) && !isGitReadOnly {
 			allSegmentsSafe = false
 		}
 	}
