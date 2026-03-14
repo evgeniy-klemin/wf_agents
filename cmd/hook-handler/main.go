@@ -291,37 +291,8 @@ func main() {
 		}
 
 	case "PermissionRequest":
-		// Auto-allow safe commands when Claude Code would prompt the user
-		prStatus := queryStatus(ctx, c, workflowID)
-		prDecision := wf.CheckToolPermission(
-			prStatus.Phase,
-			input.ToolName,
-			input.ToolInput,
-			input.AgentID,
-			prStatus.ActiveAgents,
-		)
-
-		if prDecision.Allowed {
-			detail["auto_allowed"] = "true"
-			sendHookEvent(ctx, c, workflowID, model.SignalHookEvent{
-				HookType:  "PermissionRequest",
-				SessionID: input.SessionID,
-				Tool:      input.ToolName,
-				Detail:    detail,
-			})
-			out := map[string]interface{}{
-				"hookSpecificOutput": map[string]interface{}{
-					"hookEventName": "PermissionRequest",
-					"decision": map[string]interface{}{
-						"behavior": "allow",
-					},
-				},
-			}
-			json.NewEncoder(os.Stdout).Encode(out)
-			os.Exit(0)
-		}
-
-		// Not auto-allowed — log to Temporal and let Claude Code show the permission prompt
+		// Log to Temporal for audit trail — PreToolUse already handled auto-approve/deny,
+		// so if we reach here, the user needs to decide.
 		sendHookEvent(ctx, c, workflowID, model.SignalHookEvent{
 			HookType:  "PermissionRequest",
 			SessionID: input.SessionID,
