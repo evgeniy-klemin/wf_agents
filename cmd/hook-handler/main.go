@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/eklemin/wf-agents/internal/model"
@@ -329,6 +330,9 @@ func queryPhase(ctx context.Context, c client.Client, workflowID string) model.P
 // phaseInstructions returns comprehensive enforcement instructions for the current phase.
 // Injected as additionalContext on every PreToolUse — this is the PRIMARY mechanism
 // that keeps Claude on track (since plugin CLAUDE.md is project docs, not workflow rules).
+// For most phases, content is loaded from claude/states/<phase>.md under CLAUDE_PLUGIN_ROOT
+// and placeholders ({{WF_CLIENT}}, {{PLUGIN_ROOT}}, {{AGENT_FILE}}) are substituted.
+// COMPLETE and BLOCKED are kept as hardcoded one-liners.
 func phaseInstructions(phase model.Phase) string {
 	wfc := wfClientBin()
 
@@ -347,139 +351,51 @@ func phaseInstructions(phase model.Phase) string {
 	// Enforcement-only preamble for phases where subagents act
 	enforcementPreamble := "If a tool call is denied, DO NOT retry — follow the denial reason.\n\n"
 
+	// Keep simple one-liners hardcoded — no file needed.
 	switch phase {
-	case model.PhasePlanning:
-		return teamLeadPreamble + fmt.Sprintf(`PHASE: PLANNING — Read-only exploration and planning.
-
-CHECKLIST (in order — do NOT skip steps):
-- [ ] Run git branch --show-current → record as BASE_BRANCH
-- [ ] Create feature branch: git checkout -b <feature-branch-name> (MANDATORY — never commit to BASE_BRANCH)
-- [ ] Read relevant files, explore codebase structure
-- [ ] Identify files to create or modify
-- [ ] Break task into ordered iteration subtasks
-- [ ] Define testing strategy
-- [ ] Get user approval for the plan
-- [ ] Transition: %s transition <id> --to RESPAWN --reason "Plan: <summary>"
-
-BLOCKED ACTIONS: Edit, Write, NotebookEdit, unsafe Bash commands. Only read-only tools allowed.
-If transition DENIED (exit 1): read error, adjust plan.
-DO NOT offer to clear context or auto-accept edits. Transition to RESPAWN — that is the designed context reset.`, wfc)
-
-	case model.PhaseRespawn:
-		return teamLeadPreamble + fmt.Sprintf(`PHASE: RESPAWN — Spawn fresh agents with clean context.
-
-CHECKLIST:
-- [ ] Kill existing Developer/Reviewer subagents
-- [ ] Prepare iteration context (plan + current iteration info)
-- [ ] Spawn fresh agents — DO NOT pass stale context from prior iterations
-- [ ] Transition: %s transition <id> --to DEVELOPING --reason "Iteration N: <task>"
-
-BLOCKED ACTIONS: Edit, Write, NotebookEdit. Only agent management and reads.`, wfc)
-
-	case model.PhaseDeveloping:
-		return enforcementPreamble + fmt.Sprintf(`PHASE: DEVELOPING — Developer subagent implements via TDD.
-
-IF YOU ARE THE TEAM LEAD: Do NOT write code yourself. Spawn a Developer subagent.
-  Agent instructions: use .claude/agents/developer.md if it exists, otherwise %s/agents/developer.md.
-IF YOU ARE THE DEVELOPER: Implement via TDD — tests first, then code, then refactor.
-  Use simple, single-purpose Bash commands (go test ./..., npm test, make test).
-  For complex commands — create a helper script in scripts/ and run ./scripts/<name>.sh.
-  Do NOT use pipes, subshells, or multi-command chains — they block auto-approve.
-  Do NOT run git add, git commit, or git push — leave changes uncommitted on disk.
-  The REVIEWING guard requires a dirty working tree (uncommitted changes).
-
-CHECKLIST:
-- [ ] Load developer agent: .claude/agents/developer.md (project) or %s/agents/developer.md (plugin default)
-- [ ] Spawn Developer subagent with: agent instructions, plan, iteration number, prior rejection feedback
-- [ ] Developer writes failing tests
-- [ ] Developer implements to pass tests
-- [ ] Developer runs all tests (simple commands only)
-- [ ] Leave all changes UNCOMMITTED — do not git add or git commit
-- [ ] Transition: %s transition <id> --to REVIEWING --reason "Development done, iteration N"
-
-BLOCKED ACTIONS: git add, git commit, git push (only in COMMITTING phase).`, pluginRoot, pluginRoot, wfc)
-
-	case model.PhaseReviewing:
-		return enforcementPreamble + fmt.Sprintf(`PHASE: REVIEWING — Reviewer subagent validates code quality.
-
-IF YOU ARE THE TEAM LEAD: Do NOT review code yourself. Spawn a Reviewer subagent.
-  Agent instructions: use .claude/agents/reviewer.md if it exists, otherwise %s/agents/reviewer.md.
-IF YOU ARE THE REVIEWER: Read-only. DO NOT modify files. Report verdict.
-
-CHECKLIST:
-- [ ] Load reviewer agent: .claude/agents/reviewer.md (project) or %s/agents/reviewer.md (plugin default)
-- [ ] Spawn Reviewer subagent with: agent instructions, scope of changes, plan context
-- [ ] Reviewer runs git diff, tests, linting
-- [ ] Reviewer outputs VERDICT: APPROVED or VERDICT: REJECTED — <issues>
-- [ ] If APPROVED → %s transition <id> --to COMMITTING --reason "Review approved"
-- [ ] If REJECTED → %s transition <id> --to DEVELOPING --reason "Review rejected: <issues>"
-
-BLOCKED ACTIONS: git commit, git push, Edit/Write (for Reviewer).`, pluginRoot, pluginRoot, wfc, wfc)
-
-	case model.PhaseCommitting:
-		return teamLeadPreamble + fmt.Sprintf(`PHASE: COMMITTING — Git commit and push are ALLOWED.
-
-CHECKLIST:
-- [ ] git add <specific files>
-- [ ] git commit -m "<clear message>"
-- [ ] git push
-- [ ] Verify: git status (working tree must be clean)
-- [ ] Decide: more iterations or all done?
-  - More iterations → %s transition <id> --to RESPAWN --reason "Iteration N+1: <task>"
-  - All done → %s transition <id> --to PR_CREATION --reason "All iterations complete"
-
-VERIFY: You must be on the feature branch (not BASE_BRANCH). Run git branch --show-current to confirm.
-If RESPAWN DENIED: max iterations reached, must go to PR_CREATION.`, wfc, wfc)
-
-	case model.PhasePRCreation:
-		return teamLeadPreamble + fmt.Sprintf(`PHASE: PR_CREATION — Create draft PR and wait for CI.
-
-CHECKLIST:
-- [ ] gh pr create --draft --base BASE_BRANCH --title "<title>" --body "<description>"
-- [ ] Present PR URL to user
-- [ ] Wait for CI checks to pass
-- [ ] Transition: %s transition <id> --to FEEDBACK --reason "PR created: <url>, CI passing"
-
-VERIFY: Current branch must NOT be BASE_BRANCH. If it is, you forgot to create a feature branch in PLANNING.
-If BASE_BRANCH is not main/master, --base is REQUIRED.`, wfc)
-
-	case model.PhaseFeedback:
-		return teamLeadPreamble + fmt.Sprintf(`PHASE: FEEDBACK — Triage human PR review comments.
-
-CHECKLIST:
-- [ ] Check for comments: gh pr view --json reviewDecision,reviews,comments,state
-- [ ] If NO comments yet — poll in a loop:
-      Run "sleep 60" (Bash), then check again. Repeat until comments appear.
-      Do NOT stop or go idle — keep polling.
-- [ ] When comments found: gh api repos/{owner}/{repo}/pulls/{pr_number}/comments
-- [ ] For each comment: Accept (implement) / Reject (reply with reasoning) / Escalate (BLOCKED)
-- [ ] Reply to EVERY comment with a transparent, concise response:
-      ACCEPTED: what was changed, which files, brief rationale
-      REJECTED: technical reasoning why the change is not needed or harmful
-      Keep replies short but with enough context for the reviewer to understand without checking the code
-- [ ] Changes needed → %s transition <id> --to RESPAWN --reason "Implementing feedback: <summary>"
-- [ ] All comments resolved but PR NOT approved/merged → continue polling loop:
-      sleep 60, then gh pr view --json reviewDecision,reviews,comments,state
-      Watch for: new comments, reviewDecision=APPROVED, or state=MERGED
-      If new comments appear — triage them (repeat from checklist start)
-- [ ] PR approved/merged → %s transition <id> --to COMPLETE --reason "All feedback resolved, PR approved/merged"
-      GUARD: requires reviewDecision=APPROVED or state=MERGED. Will be DENIED otherwise.
-
-IMPORTANT: Do NOT stop and wait passively. Poll actively using sleep + gh pr view loop.`, wfc, wfc)
-
 	case model.PhaseComplete:
 		return "PHASE: COMPLETE. Workflow finished. No further actions needed."
-
 	case model.PhaseBlocked:
 		return fmt.Sprintf(`PHASE: BLOCKED — Paused, waiting for human intervention.
 
 DO NOT proceed. DO NOT attempt transitions except back to the pre-blocked phase.
 Check: %s status <id> to see pre_blocked_phase.
 When unblocked: transition ONLY to the pre-blocked phase.`, wfc)
-
-	default:
-		return ""
 	}
+
+	// Map each phase to its state file name and the appropriate preamble.
+	type phaseConfig struct {
+		filename string
+		preamble string
+	}
+	configs := map[model.Phase]phaseConfig{
+		model.PhasePlanning:   {"planning.md", teamLeadPreamble},
+		model.PhaseRespawn:    {"respawn.md", teamLeadPreamble},
+		model.PhaseDeveloping: {"developing.md", enforcementPreamble},
+		model.PhaseReviewing:  {"reviewing.md", enforcementPreamble},
+		model.PhaseCommitting: {"committing.md", teamLeadPreamble},
+		model.PhasePRCreation: {"pr_creation.md", teamLeadPreamble},
+		model.PhaseFeedback:   {"feedback.md", teamLeadPreamble},
+	}
+
+	cfg, ok := configs[phase]
+	if !ok {
+		return fmt.Sprintf("PHASE: %s", phase)
+	}
+
+	stateFile := filepath.Join(pluginRoot, "claude", "states", cfg.filename)
+	raw, err := os.ReadFile(stateFile)
+	if err != nil {
+		return fmt.Sprintf("PHASE: %s", phase)
+	}
+
+	content := strings.NewReplacer(
+		"{{WF_CLIENT}}", wfc,
+		"{{PLUGIN_ROOT}}", pluginRoot,
+		"{{AGENT_FILE}}", agentFile,
+	).Replace(string(raw))
+
+	return cfg.preamble + content
 }
 
 // sessionMarkerExists checks if wf-client start has been run for this session.

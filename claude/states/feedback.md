@@ -1,29 +1,22 @@
-# FEEDBACK Phase
+PHASE: FEEDBACK — Triage human PR review comments.
 
-You are in the FEEDBACK phase. Triage human PR review comments.
+CHECKLIST:
+- [ ] Check for comments: gh pr view --json reviewDecision,reviews,comments,state
+- [ ] If NO comments yet — poll in a loop:
+      Run "sleep 60" (Bash), then check again. Repeat until comments appear.
+      Do NOT stop or go idle — keep polling.
+- [ ] When comments found: gh api repos/{owner}/{repo}/pulls/{pr_number}/comments
+- [ ] For each comment: Accept (implement) / Reject (reply with reasoning) / Escalate (BLOCKED)
+- [ ] Reply to EVERY comment with a transparent, concise response:
+      ACCEPTED: what was changed, which files, brief rationale
+      REJECTED: technical reasoning why the change is not needed or harmful
+      Keep replies short but with enough context for the reviewer to understand without checking the code
+- [ ] Changes needed → {{WF_CLIENT}} transition <id> --to RESPAWN --reason "Implementing feedback: <summary>"
+- [ ] All comments resolved but PR NOT approved/merged → continue polling loop:
+      sleep 60, then gh pr view --json reviewDecision,reviews,comments,state
+      Watch for: new comments, reviewDecision=APPROVED, or state=MERGED
+      If new comments appear — triage them (repeat from checklist start)
+- [ ] PR approved/merged → {{WF_CLIENT}} transition <id> --to COMPLETE --reason "All feedback resolved, PR approved/merged"
+      GUARD: requires reviewDecision=APPROVED or state=MERGED. Will be DENIED otherwise.
 
-## Steps
-
-1. Read all PR review comments using `gh pr view` and `gh api`
-2. For each comment, decide:
-   - **Accept** — the feedback is valid, implement the change
-   - **Reject** — provide technical reasoning in a reply comment
-   - **Escalate** — transition to BLOCKED if user input is needed
-
-3. If changes are needed:
-   - Transition to RESPAWN to implement feedback with fresh agents
-4. If all comments are resolved:
-   - Transition to COMPLETE
-
-## Output
-
-End with a clear decision:
-- `FEEDBACK: ALL RESOLVED` → transition to COMPLETE
-- `FEEDBACK: CHANGES NEEDED — <summary>` → transition to RESPAWN
-- `FEEDBACK: ESCALATING — <reason>` → transition to BLOCKED
-
-## Constraints
-
-- Respond to every comment — do not ignore feedback
-- Be respectful and technical in rejection reasoning
-- Do not make code changes directly in this phase
+IMPORTANT: Do NOT stop and wait passively. Poll actively using sleep + gh pr view loop.

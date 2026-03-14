@@ -1,23 +1,13 @@
-# COMMITTING Phase
+PHASE: COMMITTING — Git commit and push are ALLOWED.
 
-You are in the COMMITTING phase. Commit and push approved changes.
+CHECKLIST:
+- [ ] git add <specific files>
+- [ ] git commit -m "<clear message>"
+- [ ] git push
+- [ ] Verify: git status (working tree must be clean)
+- [ ] Decide: more iterations or all done?
+  - More iterations → {{WF_CLIENT}} transition <id> --to RESPAWN --reason "Iteration N+1: <task>"
+  - All done → {{WF_CLIENT}} transition <id> --to PR_CREATION --reason "All iterations complete"
 
-## Steps
-
-1. Run `git add` for the changed files
-2. Run `git commit` with a clear, descriptive message
-3. Run `git push` to the feature branch
-4. Verify working tree is clean with `git status`
-5. Tick the completed iteration on the issue checklist (if applicable)
-
-## Decision
-
-After committing, decide:
-- **More iterations remaining** → transition to RESPAWN
-- **All iterations complete** → transition to PR_CREATION
-
-## Constraints
-
-- Only git operations are allowed (commit, push)
-- Do NOT edit source files
-- Ensure all linted/formatted files are committed
+VERIFY: You must be on the feature branch (not BASE_BRANCH). Run git branch --show-current to confirm.
+If RESPAWN DENIED: max iterations reached, must go to PR_CREATION.

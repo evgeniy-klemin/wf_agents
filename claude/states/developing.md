@@ -1,26 +1,21 @@
-# DEVELOPING Phase
+PHASE: DEVELOPING — Developer subagent implements via TDD.
 
-You are in the DEVELOPING phase. Implement the plan using TDD.
+IF YOU ARE THE TEAM LEAD: Do NOT write code yourself. Spawn a Developer subagent.
+  Agent instructions: use .claude/agents/developer.md if it exists, otherwise {{PLUGIN_ROOT}}/agents/developer.md.
+IF YOU ARE THE DEVELOPER: Implement via TDD — tests first, then code, then refactor.
+  Use simple, single-purpose Bash commands (go test ./..., npm test, make test).
+  For complex commands — create a helper script in scripts/ and run ./scripts/<name>.sh.
+  Do NOT use pipes, subshells, or multi-command chains — they block auto-approve.
+  Do NOT run git add, git commit, or git push — leave changes uncommitted on disk.
+  The REVIEWING guard requires a dirty working tree (uncommitted changes).
 
-## Steps
+CHECKLIST:
+- [ ] Load developer agent: .claude/agents/developer.md (project) or {{PLUGIN_ROOT}}/agents/developer.md (plugin default)
+- [ ] Spawn Developer subagent with: agent instructions, plan, iteration number, prior rejection feedback
+- [ ] Developer writes failing tests
+- [ ] Developer implements to pass tests
+- [ ] Developer runs all tests (simple commands only)
+- [ ] Leave all changes UNCOMMITTED — do not git add or git commit
+- [ ] Transition: {{WF_CLIENT}} transition <id> --to REVIEWING --reason "Development done, iteration N"
 
-1. Review the plan from the PLANNING phase
-2. For each subtask:
-   a. Write failing tests first
-   b. Implement the minimum code to pass tests
-   c. Refactor if needed
-3. Run all tests to ensure nothing is broken
-4. Stage and commit your changes
-
-## If this is a fix iteration (review rejected or tests failed)
-
-1. Read the feedback carefully
-2. Address ONLY the issues mentioned
-3. Do not refactor unrelated code
-4. Run tests after fixing
-
-## Constraints
-
-- Follow TDD strictly
-- Commit with clear messages
-- Do not modify files outside the plan scope
+BLOCKED ACTIONS: git add, git commit, git push (only in COMMITTING phase).
