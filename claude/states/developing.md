@@ -3,7 +3,7 @@ PHASE: DEVELOPING — Developer teammate implements via TDD.
 Do NOT write code yourself. Delegate to the Developer teammate.
 
 CHECKLIST:
-- [ ] If entering from RESPAWN with no active teammates: spawn Developer + Reviewer now (both in same message):
+- [ ] Spawn fresh Developer and Reviewer teammates (both in same message):
       Agent(subagent_type: "wf-agents:developer", team_name: "feature-team-<session-id>", name: "developer-<N>")
       Agent(subagent_type: "wf-agents:reviewer", team_name: "feature-team-<session-id>", name: "reviewer-<N>")
 - [ ] Send Developer the current iteration task verbatim — do NOT paraphrase or summarize
