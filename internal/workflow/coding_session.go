@@ -9,10 +9,11 @@ import (
 )
 
 const (
-	SignalTransition = "transition"
-	SignalHookEvent  = "hook-event"
-	SignalJournal    = "journal"
-	SignalComplete   = "complete"
+	SignalTransition      = "transition"
+	SignalHookEvent       = "hook-event"
+	SignalJournal         = "journal"
+	SignalComplete        = "complete"
+	SignalResetIterations = "reset-iterations"
 
 	QueryStatus   = "status"
 	QueryTimeline = "timeline"
@@ -29,9 +30,10 @@ func CodingSessionWorkflow(ctx workflow.Context, input model.WorkflowInput) (mod
 	logger := workflow.GetLogger(ctx)
 
 	state := &sessionState{
-		phase:          model.PhasePlanning,
-		iteration:      1,
-		events:         make([]model.WorkflowEvent, 0, 100),
+		phase:           model.PhasePlanning,
+		iteration:       1,
+		totalIterations: 1,
+		events:          make([]model.WorkflowEvent, 0, 100),
 		activeAgents:   make([]string, 0),
 		startedAt:      workflow.Now(ctx),
 		lastUpdated:    workflow.Now(ctx),
@@ -78,6 +80,7 @@ func CodingSessionWorkflow(ctx workflow.Context, input model.WorkflowInput) (mod
 	hookEventCh := workflow.GetSignalChannel(ctx, SignalHookEvent)
 	journalCh := workflow.GetSignalChannel(ctx, SignalJournal)
 	setTaskCh := workflow.GetSignalChannel(ctx, SignalSetTask)
+	resetIterationsCh := workflow.GetSignalChannel(ctx, SignalResetIterations)
 
 	// Drain legacy signal channels to prevent workflow stuck on unprocessed signals
 	legacyTransitionCh := workflow.GetSignalChannel(ctx, SignalTransition)
@@ -118,6 +121,17 @@ func CodingSessionWorkflow(ctx workflow.Context, input model.WorkflowInput) (mod
 			}
 		})
 
+		sel.AddReceive(resetIterationsCh, func(ch workflow.ReceiveChannel, more bool) {
+			var sessionID string
+			ch.Receive(ctx, &sessionID)
+			old := state.iteration
+			state.iteration = 1
+			state.addEvent(ctx, model.EventJournal, sessionID, map[string]string{
+				"message": fmt.Sprintf("iteration counter reset from %d to 1 (totalIterations=%d)", old, state.totalIterations),
+			})
+			logger.Info("Iteration counter reset", "old_iteration", old, "total_iterations", state.totalIterations)
+		})
+
 		// Drain legacy signals (ignore them — transitions must use UpdateWorkflow)
 		sel.AddReceive(legacyTransitionCh, func(ch workflow.ReceiveChannel, more bool) {
 			var req model.SignalTransition
@@ -146,7 +160,8 @@ func CodingSessionWorkflow(ctx workflow.Context, input model.WorkflowInput) (mod
 type sessionState struct {
 	phase           model.Phase
 	preBlockedPhase model.Phase // remembers state before BLOCKED, for returning
-	iteration       int
+	iteration       int         // resettable counter for guard checks
+	totalIterations int         // cumulative counter, never reset
 	events          []model.WorkflowEvent
 	activeAgents    []string
 	startedAt       time.Time
@@ -214,6 +229,7 @@ func (s *sessionState) handleTransition(ctx workflow.Context, req model.SignalTr
 	// - Return from BLOCKED (iteration was already counted on original entry)
 	if req.To == model.PhaseRespawn && originPhase != model.PhasePlanning && s.phase != model.PhaseBlocked {
 		s.iteration++
+		s.totalIterations++
 	}
 
 	// Apply transition
@@ -223,10 +239,11 @@ func (s *sessionState) handleTransition(ctx workflow.Context, req model.SignalTr
 	result.Allowed = true
 
 	s.addEvent(ctx, model.EventTransition, req.SessionID, map[string]string{
-		"from":      string(result.From),
-		"to":        string(req.To),
-		"reason":    req.Reason,
-		"iteration": fmt.Sprintf("%d", s.iteration),
+		"from":             string(result.From),
+		"to":               string(req.To),
+		"reason":           req.Reason,
+		"iteration":        fmt.Sprintf("%d", s.iteration),
+		"total_iterations": fmt.Sprintf("%d", s.totalIterations),
 	})
 
 	return result
@@ -268,6 +285,7 @@ func (s *sessionState) status(now time.Time) model.WorkflowStatus {
 	return model.WorkflowStatus{
 		Phase:                s.phase,
 		Iteration:            s.iteration,
+		TotalIterations:      s.totalIterations,
 		ActiveAgents:         s.activeAgents,
 		EventCount:           len(s.events),
 		StartedAt:            s.startedAt.Format(time.RFC3339),

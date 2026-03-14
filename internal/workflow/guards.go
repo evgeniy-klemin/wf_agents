@@ -90,7 +90,7 @@ func guardMaxIter(s *sessionState, _ map[string]string) string {
 		return ""
 	}
 	if s.iteration+1 > s.maxIter {
-		return fmt.Sprintf("max iterations (%d) exceeded — transition denied", s.maxIter)
+		return fmt.Sprintf("max iterations (%d) reached. Ask the user whether to continue. If yes, run: wf-client reset-iterations <workflow-id>, then retry this transition.", s.maxIter)
 	}
 	return ""
 }
