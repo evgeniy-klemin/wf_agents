@@ -298,6 +298,92 @@ func TestCheckToolPermission_GitConfigNotAutoAllowed(t *testing.T) {
 	assert.False(t, result.Allowed, "git config should NOT be auto-approved (can write)")
 }
 
+// --- isClaudeInfraFile tests ---
+
+func TestIsClaudeInfraFile_PlansFile(t *testing.T) {
+	input, _ := json.Marshal(map[string]string{"file_path": "/Users/alice/.claude/plans/foo.md"})
+	assert.True(t, isClaudeInfraFile(input), "/.claude/plans/ path should be recognized as Claude infra file")
+}
+
+func TestIsClaudeInfraFile_MemoryFile(t *testing.T) {
+	input, _ := json.Marshal(map[string]string{"file_path": "/Users/alice/.claude/projects/proj123/memory/bar.md"})
+	assert.True(t, isClaudeInfraFile(input), "/.claude/projects/.../memory/ path should be recognized as Claude infra file")
+}
+
+func TestIsClaudeInfraFile_ProjectFile(t *testing.T) {
+	input, _ := json.Marshal(map[string]string{"file_path": "/Users/alice/projects/myrepo/cmd/client/main.go"})
+	assert.False(t, isClaudeInfraFile(input), "regular project file should NOT be recognized as Claude infra file")
+}
+
+func TestIsClaudeInfraFile_InvalidJSON(t *testing.T) {
+	assert.False(t, isClaudeInfraFile([]byte("not json")), "invalid JSON should return false (fail-closed)")
+}
+
+func TestIsClaudeInfraFile_NilInput(t *testing.T) {
+	assert.False(t, isClaudeInfraFile(nil), "nil input should return false (fail-closed)")
+}
+
+// --- Team Lead can write Claude infra files (plan/memory) ---
+
+func TestCheckToolPermission_TeamLeadAllowedWriteToPlanFile(t *testing.T) {
+	agentID, activeAgents := teamLeadArgs()
+	input, _ := json.Marshal(map[string]string{"file_path": "/Users/alice/.claude/plans/iteration-plan.md"})
+	result := CheckToolPermission(model.PhaseDeveloping, "Write", input, agentID, activeAgents)
+	assert.False(t, result.Denied, "Team Lead should be allowed to Write to /.claude/plans/ files")
+}
+
+func TestCheckToolPermission_TeamLeadAllowedEditToPlanFile(t *testing.T) {
+	agentID, activeAgents := teamLeadArgs()
+	input, _ := json.Marshal(map[string]string{"file_path": "/home/user/.claude/plans/my-plan.md"})
+	result := CheckToolPermission(model.PhaseDeveloping, "Edit", input, agentID, activeAgents)
+	assert.False(t, result.Denied, "Team Lead should be allowed to Edit /.claude/plans/ files")
+}
+
+func TestCheckToolPermission_TeamLeadAllowedWriteToMemoryFile(t *testing.T) {
+	agentID, activeAgents := teamLeadArgs()
+	input, _ := json.Marshal(map[string]string{"file_path": "/Users/alice/.claude/projects/abc/memory/notes.md"})
+	result := CheckToolPermission(model.PhaseDeveloping, "Write", input, agentID, activeAgents)
+	assert.False(t, result.Denied, "Team Lead should be allowed to Write to /.claude/projects/.../memory/ files")
+}
+
+func TestCheckToolPermission_TeamLeadStillDeniedEditToProjectFile(t *testing.T) {
+	agentID, activeAgents := teamLeadArgs()
+	input, _ := json.Marshal(map[string]string{"file_path": "/Users/alice/projects/myrepo/cmd/client/main.go"})
+	result := CheckToolPermission(model.PhaseDeveloping, "Edit", input, agentID, activeAgents)
+	assert.True(t, result.Denied, "Team Lead should still be denied from editing regular project files")
+	assert.Contains(t, result.Reason, "Team Lead")
+}
+
+// --- PLANNING phase: Claude infra files allowed, project files still denied ---
+
+func TestCheckToolPermission_PlanningAllowedWriteToPlanFile(t *testing.T) {
+	agentID, activeAgents := teamLeadArgs()
+	input, _ := json.Marshal(map[string]string{"file_path": "/Users/alice/.claude/plans/my-plan.md"})
+	result := CheckToolPermission(model.PhasePlanning, "Write", input, agentID, activeAgents)
+	assert.False(t, result.Denied, "Write to /.claude/plans/ should be allowed in PLANNING")
+}
+
+func TestCheckToolPermission_PlanningAllowedWriteToMemoryFile(t *testing.T) {
+	agentID, activeAgents := teamLeadArgs()
+	input, _ := json.Marshal(map[string]string{"file_path": "/Users/alice/.claude/projects/proj/memory/mem.md"})
+	result := CheckToolPermission(model.PhasePlanning, "Write", input, agentID, activeAgents)
+	assert.False(t, result.Denied, "Write to /.claude/projects/.../memory/ should be allowed in PLANNING")
+}
+
+func TestCheckToolPermission_PlanningStillDeniedWriteToProjectFile(t *testing.T) {
+	agentID, activeAgents := subagentArgs()
+	input, _ := json.Marshal(map[string]string{"file_path": "/Users/alice/projects/myrepo/cmd/client/main.go"})
+	result := CheckToolPermission(model.PhasePlanning, "Write", input, agentID, activeAgents)
+	assert.True(t, result.Denied, "Write to project file should still be denied in PLANNING")
+}
+
+func TestCheckToolPermission_RespawnStillDeniedWriteToProjectFile(t *testing.T) {
+	agentID, activeAgents := subagentArgs()
+	input, _ := json.Marshal(map[string]string{"file_path": "/Users/alice/projects/myrepo/internal/workflow/guards.go"})
+	result := CheckToolPermission(model.PhaseRespawn, "Write", input, agentID, activeAgents)
+	assert.True(t, result.Denied, "Write to project file should still be denied in RESPAWN")
+}
+
 // --- isSafeBashCommand path-stripping tests ---
 
 func TestIsSafeBashCommand_WithPath(t *testing.T) {

@@ -180,6 +180,21 @@ var readOnlyTools = map[string]bool{
 	"ToolSearch": true, "LSP": true,
 }
 
+// isClaudeInfraFile returns true if toolInput contains a file_path that points to
+// a Claude Code infrastructure file (plan or memory files). These are exempt from
+// the Team Lead write block and the PLANNING/RESPAWN write block so that Claude Code's
+// plan mode and memory system continue to function.
+func isClaudeInfraFile(toolInput json.RawMessage) bool {
+	var input struct {
+		FilePath string `json:"file_path"`
+	}
+	if err := json.Unmarshal(toolInput, &input); err != nil {
+		return false
+	}
+	return strings.Contains(input.FilePath, "/.claude/plans/") ||
+		(strings.Contains(input.FilePath, "/.claude/projects/") && strings.Contains(input.FilePath, "/memory/"))
+}
+
 // CheckToolPermission checks whether a tool is allowed given the phase, tool name,
 // agent ID, and the current set of active agents.
 // This centralizes ALL permission logic alongside transition guards.
@@ -192,9 +207,10 @@ func CheckToolPermission(
 ) ToolPermissionResult {
 	isTeamLead := !IsSubagent(agentID, activeAgents)
 
-	// Team Lead cannot edit files directly — must delegate to Developer subagent.
-	// This check runs before any phase-specific logic.
-	if isTeamLead && fileWritingTools[toolName] {
+	// Team Lead cannot edit PROJECT files directly — but CAN write plan/memory files
+	// (Claude Code infra: plan mode and memory system). Must delegate project file changes
+	// to Developer subagent.
+	if isTeamLead && fileWritingTools[toolName] && !isClaudeInfraFile(toolInput) {
 		return ToolPermissionResult{
 			Denied: true,
 			Reason: "Team Lead cannot edit files directly — delegate to Developer subagent",
@@ -206,8 +222,9 @@ func CheckToolPermission(
 		return ToolPermissionResult{Denied: false, Allowed: true}
 	}
 
-	// PLANNING and RESPAWN: all file writes are forbidden (read-only phases)
-	if (phase == model.PhasePlanning || phase == model.PhaseRespawn) && fileWritingTools[toolName] {
+	// PLANNING and RESPAWN: project file writes forbidden, but plan/memory files allowed
+	// so that Claude Code's plan mode and memory system continue to function.
+	if (phase == model.PhasePlanning || phase == model.PhaseRespawn) && fileWritingTools[toolName] && !isClaudeInfraFile(toolInput) {
 		return ToolPermissionResult{
 			Denied: true,
 			Reason: fmt.Sprintf("File writes are forbidden in %s phase. %s", phase, PhaseHint(phase)),

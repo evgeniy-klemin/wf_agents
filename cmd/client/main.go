@@ -14,6 +14,7 @@ import (
 
 	"github.com/eklemin/wf-agents/internal/model"
 	wf "github.com/eklemin/wf-agents/internal/workflow"
+	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
 )
@@ -71,6 +72,30 @@ Commands:
   list`)
 }
 
+// buildStartOptions constructs StartWorkflowOptions with an explicit reuse policy
+// that allows the same workflow ID to be reused after the previous run completes.
+func buildStartOptions(workflowID, queue string) client.StartWorkflowOptions {
+	return client.StartWorkflowOptions{
+		ID:        workflowID,
+		TaskQueue: queue,
+		// ALLOW_DUPLICATE permits reusing a workflow ID only after the previous
+		// execution has closed (Completed/Failed/Terminated). A running workflow
+		// with the same ID will cause ExecuteWorkflow to return an error.
+		WorkflowIDReusePolicy: enumspb.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
+	}
+}
+
+// isAlreadyStartedError returns true when the error indicates the workflow ID is
+// already in use by a running execution.
+func isAlreadyStartedError(errMsg string) bool {
+	return strings.Contains(errMsg, "already started") || strings.Contains(errMsg, "AlreadyStarted")
+}
+
+// alreadyStartedMessage returns a human-friendly error message for the given session.
+func alreadyStartedMessage(sessionID string) string {
+	return fmt.Sprintf("A workflow is already running for session %s. Complete or terminate it first, then retry.", sessionID)
+}
+
 func cmdStart(ctx context.Context, c client.Client, args []string) {
 	input := model.WorkflowInput{MaxIterations: 5}
 	for i := 0; i < len(args)-1; i += 2 {
@@ -94,16 +119,16 @@ func cmdStart(ctx context.Context, c client.Client, args []string) {
 	}
 
 	workflowID := "coding-session-" + input.SessionID
-	opts := client.StartWorkflowOptions{
-		ID:        workflowID,
-		TaskQueue: taskQueue,
-		Memo: map[string]interface{}{
-			"task": input.TaskDescription,
-		},
+	opts := buildStartOptions(workflowID, taskQueue)
+	opts.Memo = map[string]interface{}{
+		"task": input.TaskDescription,
 	}
 
 	run, err := c.ExecuteWorkflow(ctx, opts, wf.CodingSessionWorkflow, input)
 	if err != nil {
+		if isAlreadyStartedError(err.Error()) {
+			log.Fatal(alreadyStartedMessage(input.SessionID))
+		}
 		log.Fatalf("Failed to start workflow: %v", err)
 	}
 
