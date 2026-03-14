@@ -209,28 +209,34 @@ ${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to FEEDBACK --reas
 
 Record `LAST_POLL_TIME` as the current UTC timestamp. This is used to detect new comments (including replies in existing threads).
 
-**Step 2: Poll loop**
+**Step 2: Poll loop — ALL THREE checks are MANDATORY on every cycle**
 
-Do NOT stop and wait. Run a continuous polling loop:
+Do NOT stop and wait. Run a continuous polling loop. Each cycle must execute ALL three checks — do NOT skip any:
 
 ```bash
 sleep 60
+```
 
-# Check approval status
+**2a.** Check approval and merge status:
+```bash
 gh pr view --json reviewDecision,state
+```
+If `reviewDecision: APPROVED` or `state: MERGED` → go to Step 5.
 
-# Check for ALL review comments (inline code comments + thread replies)
-# This endpoint returns both top-level review comments AND replies in threads
+**2b.** Check inline review comments and thread replies (this is the ONLY way to see code review comments):
+```bash
 gh api repos/{owner}/{repo}/pulls/{number}/comments \
   --jq '[.[] | select(.created_at > "LAST_POLL_TIME") | {id, path, line, body, in_reply_to_id, created_at}]'
+```
 
-# Also check PR-level (issue-style) comments
+**2c.** Check PR-level (issue-style) comments:
+```bash
 gh pr view --json comments --jq '[.comments[] | select(.createdAt > "LAST_POLL_TIME")]'
 ```
 
-Update `LAST_POLL_TIME` after each poll. Repeat until `reviewDecision: APPROVED` or `state: MERGED`.
+Update `LAST_POLL_TIME` after each cycle. If 2b or 2c returned new comments → go to Step 3. Otherwise → repeat from `sleep 60`.
 
-**IMPORTANT:** `gh pr view --json comments` only returns PR-level comments, NOT inline review comments or thread replies. You MUST use `gh api repos/{owner}/{repo}/pulls/{number}/comments` to detect inline code review comments and replies within existing threads.
+**WARNING:** `gh pr view --json comments` (2c) only returns PR-level comments, NOT inline code review comments or thread replies. Step 2b is MANDATORY — without it you will miss all inline review feedback.
 
 **Step 3: When new comments found — triage each comment:**
 - **Accept** — implement the change (will loop back through RESPAWN)
