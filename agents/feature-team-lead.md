@@ -135,12 +135,7 @@ ${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to DEVELOPING --re
 
 ### 3. DEVELOPING (spawn Developer subagent)
 
-Load agent instructions with project-local override:
-1. Check if `.claude/agents/developer.md` exists in the project — if yes, use it
-2. Otherwise, use the plugin default: `${CLAUDE_PLUGIN_ROOT}/agents/developer.md`
-
-Spawn a Developer subagent via the Agent tool. The prompt MUST include:
-- The agent instructions loaded above
+Spawn a Developer subagent via the Agent tool with `subagent_type: "wf-agents:developer"`. The prompt MUST include:
 - The current iteration task ONLY (not the full plan — the Developer must focus on one task at a time)
 - The current iteration number and any feedback from prior rejections
 - A brief summary of the overall goal (one sentence) for context
@@ -159,12 +154,7 @@ ${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to REVIEWING --rea
 
 Your only job is to spawn the Reviewer subagent and wait for its verdict.
 
-Load agent instructions with project-local override:
-1. Check if `.claude/agents/reviewer.md` exists in the project — if yes, use it
-2. Otherwise, use the plugin default: `${CLAUDE_PLUGIN_ROOT}/agents/reviewer.md`
-
-Spawn a Reviewer subagent via the Agent tool. The prompt MUST include:
-- The agent instructions loaded above
+Spawn a Reviewer subagent via the Agent tool with `subagent_type: "wf-agents:reviewer"`. The prompt MUST include:
 - The scope of changes to review (which files, what the plan was)
 
 **If Reviewer outputs `VERDICT: APPROVED`**: transition to COMMITTING
