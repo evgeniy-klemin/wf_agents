@@ -9,6 +9,76 @@ import (
 	"go.temporal.io/sdk/testsuite"
 )
 
+func TestStatusIncludesPhaseDurations(t *testing.T) {
+	env := setupEnv(t)
+
+	registerTransitions(env, t, []model.Phase{
+		model.PhaseRespawn,
+		model.PhaseDeveloping,
+		model.PhaseReviewing,
+		model.PhaseCommitting,
+		model.PhasePRCreation,
+		model.PhaseFeedback,
+		model.PhaseComplete,
+	})
+
+	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
+		SessionID: "test", TaskDescription: "test", MaxIterations: 5,
+	})
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	val, err := env.QueryWorkflow(QueryStatus)
+	require.NoError(t, err)
+	var status model.WorkflowStatus
+	require.NoError(t, val.Get(&status))
+
+	// CurrentPhaseSecs should be non-negative (COMPLETE phase has some duration)
+	assert.GreaterOrEqual(t, status.CurrentPhaseSecs, 0.0, "CurrentPhaseSecs should be >= 0")
+
+	// PhaseDurationSecs should contain entries for phases we transitioned through
+	require.NotNil(t, status.PhaseDurationSecs, "PhaseDurationSecs should be populated")
+	assert.Contains(t, status.PhaseDurationSecs, "PLANNING", "should have PLANNING duration")
+	assert.Contains(t, status.PhaseDurationSecs, "RESPAWN", "should have RESPAWN duration")
+	assert.Contains(t, status.PhaseDurationSecs, "DEVELOPING", "should have DEVELOPING duration")
+	assert.Contains(t, status.PhaseDurationSecs, "COMPLETE", "should have COMPLETE duration for current phase")
+}
+
+func TestStatusCurrentPhaseSecsIsCurrentPhaseOnly(t *testing.T) {
+	// Verify that CurrentPhaseSecs reflects time in current phase,
+	// while PhaseDurationSecs has cumulative data.
+	env := setupEnv(t)
+
+	registerTransitions(env, t, []model.Phase{
+		model.PhaseRespawn,
+		model.PhaseDeveloping,
+		model.PhaseReviewing,
+		model.PhaseCommitting,
+		model.PhasePRCreation,
+		model.PhaseFeedback,
+		model.PhaseComplete,
+	})
+
+	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
+		SessionID: "test", TaskDescription: "test", MaxIterations: 5,
+	})
+
+	require.True(t, env.IsWorkflowCompleted())
+
+	val, err := env.QueryWorkflow(QueryStatus)
+	require.NoError(t, err)
+	var status model.WorkflowStatus
+	require.NoError(t, val.Get(&status))
+
+	// CurrentPhaseSecs should equal the COMPLETE phase duration since that's current
+	completeDur, ok := status.PhaseDurationSecs["COMPLETE"]
+	if ok {
+		assert.InDelta(t, status.CurrentPhaseSecs, completeDur, 0.001,
+			"CurrentPhaseSecs should match COMPLETE phase duration in PhaseDurationSecs")
+	}
+}
+
 func setupEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
 	t.Helper()
 	suite := &testsuite.WorkflowTestSuite{}

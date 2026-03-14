@@ -29,14 +29,15 @@ func CodingSessionWorkflow(ctx workflow.Context, input model.WorkflowInput) (mod
 	logger := workflow.GetLogger(ctx)
 
 	state := &sessionState{
-		phase:        model.PhasePlanning,
-		iteration:    1,
-		events:       make([]model.WorkflowEvent, 0, 100),
-		activeAgents: make([]string, 0),
-		startedAt:    workflow.Now(ctx),
-		lastUpdated:  workflow.Now(ctx),
-		task:         input.TaskDescription,
-		maxIter:      input.MaxIterations,
+		phase:          model.PhasePlanning,
+		iteration:      1,
+		events:         make([]model.WorkflowEvent, 0, 100),
+		activeAgents:   make([]string, 0),
+		startedAt:      workflow.Now(ctx),
+		lastUpdated:    workflow.Now(ctx),
+		phaseEnteredAt: workflow.Now(ctx),
+		task:           input.TaskDescription,
+		maxIter:        input.MaxIterations,
 	}
 	if state.maxIter == 0 {
 		state.maxIter = 5
@@ -49,7 +50,7 @@ func CodingSessionWorkflow(ctx workflow.Context, input model.WorkflowInput) (mod
 
 	// Register queries
 	if err := workflow.SetQueryHandler(ctx, QueryStatus, func() (model.WorkflowStatus, error) {
-		return state.status(), nil
+		return state.status(workflow.Now(ctx)), nil
 	}); err != nil {
 		return model.WorkflowTimeline{}, fmt.Errorf("set status query: %w", err)
 	}
@@ -143,15 +144,16 @@ func CodingSessionWorkflow(ctx workflow.Context, input model.WorkflowInput) (mod
 
 // sessionState holds the internal mutable state of the workflow.
 type sessionState struct {
-	phase          model.Phase
+	phase           model.Phase
 	preBlockedPhase model.Phase // remembers state before BLOCKED, for returning
-	iteration      int
-	events         []model.WorkflowEvent
-	activeAgents   []string
-	startedAt      time.Time
-	lastUpdated    time.Time
-	task           string
-	maxIter        int
+	iteration       int
+	events          []model.WorkflowEvent
+	activeAgents    []string
+	startedAt       time.Time
+	lastUpdated     time.Time
+	phaseEnteredAt  time.Time
+	task            string
+	maxIter         int
 }
 
 func (s *sessionState) addEvent(ctx workflow.Context, evtType model.EventType, sessionID string, detail map[string]string) {
@@ -217,6 +219,7 @@ func (s *sessionState) handleTransition(ctx workflow.Context, req model.SignalTr
 	// Apply transition
 	s.phase = req.To
 	s.lastUpdated = workflow.Now(ctx)
+	s.phaseEnteredAt = workflow.Now(ctx)
 	result.Allowed = true
 
 	s.addEvent(ctx, model.EventTransition, req.SessionID, map[string]string{
@@ -261,15 +264,48 @@ func (s *sessionState) handleHookEvent(ctx workflow.Context, evt model.SignalHoo
 	s.addEvent(ctx, evtType, evt.SessionID, detail)
 }
 
-func (s *sessionState) status() model.WorkflowStatus {
+func (s *sessionState) status(now time.Time) model.WorkflowStatus {
 	return model.WorkflowStatus{
-		Phase:           s.phase,
-		Iteration:       s.iteration,
-		ActiveAgents:    s.activeAgents,
-		EventCount:      len(s.events),
-		StartedAt:       s.startedAt.Format(time.RFC3339),
-		LastUpdatedAt:   s.lastUpdated.Format(time.RFC3339),
-		Task:            s.task,
-		PreBlockedPhase: s.preBlockedPhase,
+		Phase:             s.phase,
+		Iteration:         s.iteration,
+		ActiveAgents:      s.activeAgents,
+		EventCount:        len(s.events),
+		StartedAt:         s.startedAt.Format(time.RFC3339),
+		LastUpdatedAt:     s.lastUpdated.Format(time.RFC3339),
+		Task:              s.task,
+		PreBlockedPhase:   s.preBlockedPhase,
+		CurrentPhaseSecs:  now.Sub(s.phaseEnteredAt).Seconds(),
+		PhaseDurationSecs: s.computePhaseDurations(now),
 	}
+}
+
+// computePhaseDurations iterates through transition events to compute cumulative
+// seconds spent in each phase. The current phase is open-ended at now.
+func (s *sessionState) computePhaseDurations(now time.Time) map[string]float64 {
+	durations := make(map[string]float64)
+	var currentPhase string
+	var phaseStart time.Time
+
+	for _, ev := range s.events {
+		if ev.Type != model.EventTransition {
+			continue
+		}
+		to, hasTo := ev.Detail["to"]
+		if !hasTo {
+			continue
+		}
+		// Close the previous phase
+		if currentPhase != "" && !phaseStart.IsZero() {
+			durations[currentPhase] += ev.Timestamp.Sub(phaseStart).Seconds()
+		}
+		currentPhase = to
+		phaseStart = ev.Timestamp
+	}
+
+	// Close the current (open) phase using now
+	if currentPhase != "" && !phaseStart.IsZero() {
+		durations[currentPhase] += now.Sub(phaseStart).Seconds()
+	}
+
+	return durations
 }

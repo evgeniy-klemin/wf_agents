@@ -100,12 +100,15 @@ ${CLAUDE_PLUGIN_ROOT}/bin/wf-client status <session-id>
 
 Remember `BASE_BRANCH` — you will need it in PR_CREATION.
 
-Analyze the task:
-- Read relevant files, explore the codebase structure
-- Identify files to create or modify
-- Break the task into ordered iteration subtasks
-- Define a testing strategy
-- Get user approval for the plan
+**Create and approve the plan — MANDATORY:**
+
+Use Claude Code's built-in plan mode to formalize your plan:
+1. Explore the codebase: read relevant files, understand the architecture
+2. Identify files to create or modify
+3. Break the task into ordered iteration subtasks
+4. Define a testing strategy
+5. Write the plan using plan mode — this creates a plan file that the user can review
+6. **Wait for explicit user approval** before transitioning — do NOT proceed without it
 
 When the plan is ready, transition:
 ```bash
