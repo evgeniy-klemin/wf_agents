@@ -53,7 +53,10 @@ func guardNoActiveAgents(s *sessionState, _ map[string]string) string {
 	if len(s.activeAgents) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("cannot leave RESPAWN with %d active subagent(s) — kill old agents before spawning new ones", len(s.activeAgents))
+	return fmt.Sprintf(
+		"cannot leave RESPAWN with %d active subagent(s) — kill old agents before spawning new ones",
+		len(s.activeAgents),
+	)
 }
 
 // guardPRChecksPassed requires evidence["pr_checks_pass"] == "true".
@@ -150,8 +153,9 @@ func validateTransition(s *sessionState, from, to model.Phase, evidence map[stri
 
 // ToolPermissionResult indicates whether a tool use is allowed.
 type ToolPermissionResult struct {
-	Denied bool
-	Reason string
+	Denied  bool
+	Allowed bool   // explicitly auto-approve (bypass permission prompt)
+	Reason  string
 }
 
 // fileWritingTools are tools that modify files.
@@ -178,7 +182,13 @@ var readOnlyTools = map[string]bool{
 // CheckToolPermission checks whether a tool is allowed given the phase, tool name,
 // agent ID, and the current set of active agents.
 // This centralizes ALL permission logic alongside transition guards.
-func CheckToolPermission(phase model.Phase, toolName string, toolInput json.RawMessage, agentID string, activeAgents []string) ToolPermissionResult {
+func CheckToolPermission(
+	phase model.Phase,
+	toolName string,
+	toolInput json.RawMessage,
+	agentID string,
+	activeAgents []string,
+) ToolPermissionResult {
 	isTeamLead := !IsSubagent(agentID, activeAgents)
 
 	// Team Lead cannot edit files directly — must delegate to Developer subagent.
@@ -190,9 +200,9 @@ func CheckToolPermission(phase model.Phase, toolName string, toolInput json.RawM
 		}
 	}
 
-	// Read-only tools are always allowed
+	// Read-only tools are always allowed — explicitly auto-approve to bypass permission prompts
 	if readOnlyTools[toolName] {
-		return ToolPermissionResult{Denied: false}
+		return ToolPermissionResult{Denied: false, Allowed: true}
 	}
 
 	// PLANNING and RESPAWN: all file writes are forbidden (read-only phases)
@@ -282,6 +292,7 @@ func checkBashPermission(phase model.Phase, toolInput json.RawMessage) ToolPermi
 	// Other phases: blacklist approach — block specific git commands.
 	// Split on pipes/chains so "git add . && git commit" is caught.
 	exemptions := gitExemptions[phase]
+	allSegmentsSafe := true
 	for _, segment := range splitBashCommands(cmd) {
 		seg := strings.TrimSpace(segment)
 		if seg == "" {
@@ -304,9 +315,28 @@ func checkBashPermission(phase model.Phase, toolInput json.RawMessage) ToolPermi
 				}
 			}
 		}
+		// Track whether every segment is in the safe prefix list (for auto-allow).
+		// Safe git read-only commands (git diff, git status, etc.) are also auto-allowed.
+		isGitSafe := (strings.HasPrefix(seg, "git ") || seg == "git") && isAllowedGitInPlanning(seg)
+		if !isSafeBashCommand(seg) && !isWfClientCommand(seg) && !isGitSafe {
+			allSegmentsSafe = false
+		}
 	}
 
+	if allSegmentsSafe {
+		return ToolPermissionResult{Denied: false, Allowed: true}
+	}
 	return ToolPermissionResult{Denied: false}
+}
+
+// isWfClientCommand returns true if the command's first word is or ends with "wf-client".
+// Handles both bare "wf-client" and absolute paths like "/path/to/bin/wf-client".
+func isWfClientCommand(seg string) bool {
+	firstWord := seg
+	if idx := strings.IndexAny(seg, " \t"); idx >= 0 {
+		firstWord = seg[:idx]
+	}
+	return firstWord == "wf-client" || strings.HasSuffix(firstWord, "/wf-client")
 }
 
 // checkPlanningBash uses a whitelist: only safe read-only commands in PLANNING.
@@ -318,11 +348,20 @@ func checkPlanningBash(cmd string) ToolPermissionResult {
 			continue
 		}
 
+		// wf-client is always safe — it only talks to Temporal.
+		// Match by path suffix (e.g., /path/to/bin/wf-client) or bare name prefix.
+		if isWfClientCommand(seg) {
+			continue
+		}
+
 		if strings.HasPrefix(seg, "git ") || seg == "git" {
 			if !isAllowedGitInPlanning(seg) {
 				return ToolPermissionResult{
 					Denied: true,
-					Reason: fmt.Sprintf("git command %q is not allowed in PLANNING phase — only read-only git operations permitted. Transition to RESPAWN first.", seg),
+					Reason: fmt.Sprintf(
+						"git command %q is not allowed in PLANNING phase — only read-only git operations permitted. Transition to RESPAWN first.",
+						seg,
+					),
 				}
 			}
 			continue
@@ -334,7 +373,10 @@ func checkPlanningBash(cmd string) ToolPermissionResult {
 
 		return ToolPermissionResult{
 			Denied: true,
-			Reason: fmt.Sprintf("Command %q is not in the allowed list for PLANNING phase — no repository modifications allowed. Transition to RESPAWN to begin development.", truncateCmd(seg, 60)),
+			Reason: fmt.Sprintf(
+				"Command %q is not in the allowed list for PLANNING phase — no repository modifications allowed. Transition to RESPAWN to begin development.",
+				truncateCmd(seg, 60),
+			),
 		}
 	}
 
@@ -352,7 +394,8 @@ func isAllowedGitInPlanning(cmd string) bool {
 	for idx < len(parts) && strings.HasPrefix(parts[idx], "-") {
 		idx++
 		// Skip flag value for flags that take arguments
-		if idx < len(parts) && (parts[idx-1] == "-C" || parts[idx-1] == "-c" || parts[idx-1] == "--git-dir" || parts[idx-1] == "--work-tree") {
+		if idx < len(parts) &&
+			(parts[idx-1] == "-C" || parts[idx-1] == "-c" || parts[idx-1] == "--git-dir" || parts[idx-1] == "--work-tree") {
 			idx++
 		}
 	}

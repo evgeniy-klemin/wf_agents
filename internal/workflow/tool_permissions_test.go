@@ -180,3 +180,67 @@ func TestIsAllowedGitInPlanning_StashPop(t *testing.T) {
 func TestIsAllowedGitInPlanning_BareStash(t *testing.T) {
 	assert.False(t, isAllowedGitInPlanning("git stash"), "bare git stash saves changes and should be denied")
 }
+
+// --- Auto-allow (Allowed field) tests ---
+
+func TestCheckToolPermission_ReadOnlyToolsAutoAllowed(t *testing.T) {
+	agentID, activeAgents := teamLeadArgs()
+	readOnlyToolNames := []string{"Read", "Glob", "Grep", "WebFetch", "WebSearch", "ToolSearch", "LSP"}
+	for _, tool := range readOnlyToolNames {
+		result := CheckToolPermission(model.PhaseDeveloping, tool, nil, agentID, activeAgents)
+		assert.False(t, result.Denied, "read-only tool %s should not be denied", tool)
+		assert.True(t, result.Allowed, "read-only tool %s should be auto-allowed (Allowed: true)", tool)
+	}
+}
+
+func TestCheckToolPermission_SafeBashAutoAllowed(t *testing.T) {
+	agentID, activeAgents := subagentArgs()
+	safeCmds := []string{
+		"go test ./...",
+		"go vet ./...",
+		"go build ./...",
+		"git diff",
+		"git diff --stat",
+		"git status",
+	}
+	for _, cmd := range safeCmds {
+		input, _ := json.Marshal(map[string]string{"command": cmd})
+		result := CheckToolPermission(model.PhaseDeveloping, "Bash", input, agentID, activeAgents)
+		assert.False(t, result.Denied, "safe bash command %q should not be denied", cmd)
+		assert.True(t, result.Allowed, "safe bash command %q should be auto-allowed", cmd)
+	}
+}
+
+func TestCheckToolPermission_UnsafeBashNotAutoAllowed(t *testing.T) {
+	agentID, activeAgents := subagentArgs()
+	// rm -rf / is not in the safe list, but in DEVELOPING it's not denied (only git is blocked)
+	// It should NOT be auto-allowed
+	input, _ := json.Marshal(map[string]string{"command": "rm -rf /"})
+	result := CheckToolPermission(model.PhaseDeveloping, "Bash", input, agentID, activeAgents)
+	assert.False(t, result.Denied, "rm -rf / is not denied in DEVELOPING (only git commands are blocked)")
+	assert.False(t, result.Allowed, "rm -rf / should NOT be auto-allowed")
+}
+
+func TestCheckToolPermission_DeniedNotAutoAllowed(t *testing.T) {
+	agentID, activeAgents := subagentArgs()
+	// git commit in DEVELOPING is denied — must NOT be auto-allowed
+	input, _ := json.Marshal(map[string]string{"command": "git commit -m 'test'"})
+	result := CheckToolPermission(model.PhaseDeveloping, "Bash", input, agentID, activeAgents)
+	assert.True(t, result.Denied, "git commit should be denied in DEVELOPING")
+	assert.False(t, result.Allowed, "denied command should not be auto-allowed")
+}
+
+func TestCheckToolPermission_WfClientAutoAllowedInPlanning(t *testing.T) {
+	agentID, activeAgents := teamLeadArgs()
+	// wf-client (by path suffix) should always be allowed in PLANNING
+	input, _ := json.Marshal(map[string]string{"command": "/some/path/bin/wf-client transition wf-id --to RESPAWN --reason \"test\""})
+	result := CheckToolPermission(model.PhasePlanning, "Bash", input, agentID, activeAgents)
+	assert.False(t, result.Denied, "wf-client command should not be denied in PLANNING")
+}
+
+func TestCheckToolPermission_WfClientShortNameAllowedInPlanning(t *testing.T) {
+	agentID, activeAgents := teamLeadArgs()
+	input, _ := json.Marshal(map[string]string{"command": "wf-client status wf-id"})
+	result := CheckToolPermission(model.PhasePlanning, "Bash", input, agentID, activeAgents)
+	assert.False(t, result.Denied, "wf-client (short name) should not be denied in PLANNING")
+}

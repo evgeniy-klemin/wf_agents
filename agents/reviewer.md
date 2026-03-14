@@ -46,3 +46,20 @@ Always include a brief summary of which test command was run and its outcome bef
 - Be specific in rejection reasons
 - Run `git diff` to see actual changes
 - Never approve without running tests
+
+## Auto-Approve Compatible Commands
+
+Use simple, single-purpose Bash commands. Do NOT chain with `&&`, `||`, or pipes — compound commands trigger manual approval prompts:
+
+```bash
+# GOOD — simple commands:
+go test ./...
+go vet ./...
+go clean -testcache
+git diff
+git diff --stat
+
+# BAD — breaks auto-approve:
+go clean -testcache && go test ./... 2>&1
+git diff --stat && go test ./...
+```
