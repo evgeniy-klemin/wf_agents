@@ -920,7 +920,7 @@ func TestWorkflowCompletesAfterCompleteTransition(t *testing.T) {
 }
 
 func TestRespawnGuardActiveAgents(t *testing.T) {
-	// Test the RESPAWN → DEVELOPING guard: must deny when subagents still active.
+	// Test the RESPAWN → DEVELOPING guard: must deny when teammates still active.
 	// We verify the guard condition inline since handleTransition needs a workflow context.
 	t.Run("deny with active agents", func(t *testing.T) {
 		activeAgents := []string{"dev-agent-1", "dev-agent-2"}
@@ -933,9 +933,9 @@ func TestRespawnGuardActiveAgents(t *testing.T) {
 		var activeAgents []string
 		assert.Equal(t, 0, len(activeAgents), "should allow when no active agents")
 	})
-	t.Run("SubagentStop removes from list", func(t *testing.T) {
+	t.Run("TeammateStop removes from list", func(t *testing.T) {
 		agents := []string{"dev-1", "rev-1"}
-		// Simulate SubagentStop for dev-1
+		// Simulate TeammateStop (SubagentStop event) for dev-1
 		filtered := agents[:0]
 		for _, a := range agents {
 			if a != "dev-1" {

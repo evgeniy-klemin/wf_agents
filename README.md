@@ -135,9 +135,8 @@ cmd/
 internal/
   model/           Phase, events, workflow types
   workflow/        State machine, guards, event sourcing
-templates/         Legacy CLAUDE.md template (pre-plugin)
 hooks/             hooks.json — plugin hook configuration
-agents/            Subagent definitions (developer, reviewer, feature-team-lead)
+agents/            Agent definitions (developer, reviewer, feature-team-lead)
 states/            Phase instructions (*.md) — loaded at runtime by hook-handler
 commands/          Slash commands (start-feature-team, workflow, status)
 .claude-plugin/    Plugin manifest

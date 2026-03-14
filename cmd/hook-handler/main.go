@@ -113,7 +113,7 @@ func main() {
 				fmt.Sprintf("auto: %s in %s", input.HookEventName, phase))
 		}
 	} else if input.HookEventName != "SessionStart" && input.HookEventName != "TeammateIdle" {
-		// Any active event (tool use, user prompt, subagent, etc.) → auto-unblock
+		// Any active event (tool use, user prompt, teammate, etc.) → auto-unblock
 		status := queryStatus(ctx, c, workflowID)
 		if status.Phase == model.PhaseBlocked && status.PreBlockedPhase != "" {
 			autoTransition(ctx, c, workflowID, input.SessionID, status.PreBlockedPhase,
@@ -368,7 +368,7 @@ func phaseInstructions(phase model.Phase) string {
 		"CONTEXT RECOVERY: If context was compressed or you lost your role instructions, " +
 		"re-read your full protocol: " + agentFile + "\n\n"
 
-	// Enforcement-only preamble for phases where subagents act
+	// Enforcement-only preamble for phases where teammates act
 	enforcementPreamble := "If a tool call is denied, DO NOT retry — follow the denial reason.\n\n"
 
 	// Keep simple one-liners hardcoded — no file needed.

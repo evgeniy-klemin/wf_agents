@@ -196,7 +196,7 @@ func isClaudeInfraFile(toolInput json.RawMessage) bool {
 }
 
 // CheckToolPermission checks whether a tool is allowed given the phase, tool name,
-// agent ID, and the current set of active agents.
+// agent ID, and the current set of active teammates.
 // This centralizes ALL permission logic alongside transition guards.
 func CheckToolPermission(
 	phase model.Phase,
@@ -205,7 +205,7 @@ func CheckToolPermission(
 	agentID string,
 	activeAgents []string,
 ) ToolPermissionResult {
-	isTeamLead := !IsSubagent(agentID, activeAgents)
+	isTeamLead := !IsTeammate(agentID, activeAgents)
 
 	// Team Lead cannot edit PROJECT files directly — but CAN write plan/memory files
 	// (Claude Code infra: plan mode and memory system). Must delegate project file changes
@@ -250,9 +250,9 @@ func CheckToolPermission(
 	return ToolPermissionResult{Denied: false}
 }
 
-// IsSubagent returns true if agentID is non-empty and present in the activeAgents list.
+// IsTeammate returns true if agentID is non-empty and present in the activeAgents list.
 // If agentID is empty or not in the list, the caller is assumed to be the Team Lead (main agent).
-func IsSubagent(agentID string, activeAgents []string) bool {
+func IsTeammate(agentID string, activeAgents []string) bool {
 	if agentID == "" {
 		return false
 	}

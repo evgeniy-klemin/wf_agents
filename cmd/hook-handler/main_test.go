@@ -1,7 +1,7 @@
 package main
 
-// Tool permission and subagent detection tests have moved to internal/workflow/tool_permissions_test.go.
-// They now test the exported CheckToolPermission and IsSubagent functions directly.
+// Tool permission and teammate detection tests have moved to internal/workflow/tool_permissions_test.go.
+// They now test the exported CheckToolPermission and IsTeammate functions directly.
 //
 // This file is intentionally left with only a package declaration so the package still compiles.
 // Add hook-handler integration tests here if needed.
@@ -23,9 +23,9 @@ import (
 // TestDenyOutputFormat here. The deny behavior (exit code 2, plain-text reason on stdout)
 // was verified via live testing — the Edit tool was blocked with exit code 2 as expected.
 //
-// The logic that decides WHAT to deny (which tools are forbidden in which phase, subagent
+// The logic that decides WHAT to deny (which tools are forbidden in which phase, teammate
 // detection, etc.) is thoroughly tested in internal/workflow/tool_permissions_test.go via
-// the exported CheckToolPermission and IsSubagent functions.
+// the exported CheckToolPermission and IsTeammate functions.
 
 // TestSessionStartOutputHasContinueTrue verifies that the SessionStart hookOutput
 // serialized to JSON DOES include "continue": true so Claude keeps running.

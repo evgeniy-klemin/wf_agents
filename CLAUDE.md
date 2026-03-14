@@ -6,7 +6,7 @@
 ```
 .claude-plugin/plugin.json   Plugin manifest
 hooks/hooks.json              Hook configuration (all events → bin/hook-handler)
-agents/                       Subagent definitions with YAML frontmatter
+agents/                       Agent definitions with YAML frontmatter
 commands/                     Slash commands
 states/                       Phase instructions (*.md) — read from disk by hook-handler
 ```

@@ -9,37 +9,37 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// --- IsSubagent tests ---
+// --- IsTeammate tests ---
 
-func TestIsSubagent_EmptyAgentID(t *testing.T) {
-	assert.False(t, IsSubagent("", []string{"agent-1", "agent-2"}),
-		"empty agent_id should never be treated as subagent (it is Team Lead)")
+func TestIsTeammate_EmptyAgentID(t *testing.T) {
+	assert.False(t, IsTeammate("", []string{"agent-1", "agent-2"}),
+		"empty agent_id should never be treated as teammate (it is Team Lead)")
 }
 
-func TestIsSubagent_AgentInList(t *testing.T) {
-	assert.True(t, IsSubagent("agent-abc", []string{"agent-abc", "agent-xyz"}))
+func TestIsTeammate_AgentInList(t *testing.T) {
+	assert.True(t, IsTeammate("agent-abc", []string{"agent-abc", "agent-xyz"}))
 }
 
-func TestIsSubagent_AgentNotInList(t *testing.T) {
-	assert.False(t, IsSubagent("agent-unknown", []string{"agent-abc", "agent-xyz"}))
+func TestIsTeammate_AgentNotInList(t *testing.T) {
+	assert.False(t, IsTeammate("agent-unknown", []string{"agent-abc", "agent-xyz"}))
 }
 
-func TestIsSubagent_EmptyList(t *testing.T) {
-	assert.False(t, IsSubagent("agent-abc", []string{}))
+func TestIsTeammate_EmptyList(t *testing.T) {
+	assert.False(t, IsTeammate("agent-abc", []string{}))
 }
 
-func TestIsSubagent_NilList(t *testing.T) {
-	assert.False(t, IsSubagent("agent-abc", nil))
+func TestIsTeammate_NilList(t *testing.T) {
+	assert.False(t, IsTeammate("agent-abc", nil))
 }
 
-// teamLeadArgs returns agentID and activeAgents for a Team Lead caller (main agent, not a subagent).
+// teamLeadArgs returns agentID and activeAgents for a Team Lead caller (main agent, not a teammate).
 func teamLeadArgs() (string, []string) {
 	// Empty agentID means the caller is not in any active-agents list → treated as Team Lead.
 	return "", nil
 }
 
-// subagentArgs returns agentID and activeAgents for a subagent caller.
-func subagentArgs() (string, []string) {
+// teammateArgs returns agentID and activeAgents for a teammate caller.
+func teammateArgs() (string, []string) {
 	return "agent-123", []string{"agent-123"}
 }
 
@@ -91,30 +91,30 @@ func TestCheckToolPermission_TeamLeadDeniedEditAllPhases(t *testing.T) {
 	}
 }
 
-func TestCheckToolPermission_SubagentAllowedEditInDeveloping(t *testing.T) {
-	agentID, activeAgents := subagentArgs()
+func TestCheckToolPermission_TeammateAllowedEditInDeveloping(t *testing.T) {
+	agentID, activeAgents := teammateArgs()
 	result := CheckToolPermission(model.PhaseDeveloping, "Edit", nil, agentID, activeAgents)
-	assert.False(t, result.Denied, "Developer (subagent) should be allowed to Edit in DEVELOPING")
+	assert.False(t, result.Denied, "Developer (teammate) should be allowed to Edit in DEVELOPING")
 }
 
-func TestCheckToolPermission_SubagentAllowedWriteInDeveloping(t *testing.T) {
-	agentID, activeAgents := subagentArgs()
+func TestCheckToolPermission_TeammateAllowedWriteInDeveloping(t *testing.T) {
+	agentID, activeAgents := teammateArgs()
 	result := CheckToolPermission(model.PhaseDeveloping, "Write", nil, agentID, activeAgents)
-	assert.False(t, result.Denied, "Developer (subagent) should be allowed to Write in DEVELOPING")
+	assert.False(t, result.Denied, "Developer (teammate) should be allowed to Write in DEVELOPING")
 }
 
 func TestCheckToolPermission_ExistingRespawnWriteDenied(t *testing.T) {
 	// Existing rule: RESPAWN denies writes regardless of role
-	agentID, activeAgents := subagentArgs()
+	agentID, activeAgents := teammateArgs()
 	result := CheckToolPermission(model.PhaseRespawn, "Edit", nil, agentID, activeAgents)
-	assert.True(t, result.Denied, "Edit should be denied in RESPAWN even for subagent")
+	assert.True(t, result.Denied, "Edit should be denied in RESPAWN even for teammate")
 }
 
 func TestCheckToolPermission_ExistingPlanningWriteDenied(t *testing.T) {
 	// Existing rule: PLANNING denies writes
-	agentID, activeAgents := subagentArgs()
+	agentID, activeAgents := teammateArgs()
 	result := CheckToolPermission(model.PhasePlanning, "Write", nil, agentID, activeAgents)
-	assert.True(t, result.Denied, "Write should be denied in PLANNING even for subagent")
+	assert.True(t, result.Denied, "Write should be denied in PLANNING even for teammate")
 }
 
 func TestCheckToolPermission_ExistingPlanningWriteDenied_TeamLeadAlsoDenied(t *testing.T) {
@@ -129,14 +129,14 @@ func TestCheckToolPermission_ExistingPlanningWriteDenied_TeamLeadAlsoDenied(t *t
 // --- Regression: existing git blocking still works ---
 
 func TestCheckToolPermission_GitCommitDeniedOutsideCommitting(t *testing.T) {
-	agentID, activeAgents := subagentArgs()
+	agentID, activeAgents := teammateArgs()
 	input, _ := json.Marshal(map[string]string{"command": "git commit -m 'test'"})
 	result := CheckToolPermission(model.PhaseDeveloping, "Bash", input, agentID, activeAgents)
 	assert.True(t, result.Denied)
 }
 
 func TestCheckToolPermission_GitCommitAllowedInCommitting(t *testing.T) {
-	agentID, activeAgents := subagentArgs()
+	agentID, activeAgents := teammateArgs()
 	input, _ := json.Marshal(map[string]string{"command": "git commit -m 'test'"})
 	result := CheckToolPermission(model.PhaseCommitting, "Bash", input, agentID, activeAgents)
 	assert.False(t, result.Denied)
@@ -145,7 +145,7 @@ func TestCheckToolPermission_GitCommitAllowedInCommitting(t *testing.T) {
 // --- Item 5: checkBashPermission fail-closed tests ---
 
 func TestCheckToolPermission_BashEmptyInputDenied(t *testing.T) {
-	agentID, activeAgents := subagentArgs()
+	agentID, activeAgents := teammateArgs()
 	// nil input → unmarshal fails → fail-closed
 	result := CheckToolPermission(model.PhaseDeveloping, "Bash", nil, agentID, activeAgents)
 	assert.True(t, result.Denied)
@@ -153,7 +153,7 @@ func TestCheckToolPermission_BashEmptyInputDenied(t *testing.T) {
 }
 
 func TestCheckToolPermission_BashEmptyCommandDenied(t *testing.T) {
-	agentID, activeAgents := subagentArgs()
+	agentID, activeAgents := teammateArgs()
 	input, _ := json.Marshal(map[string]string{"command": ""})
 	result := CheckToolPermission(model.PhaseDeveloping, "Bash", input, agentID, activeAgents)
 	assert.True(t, result.Denied)
@@ -195,7 +195,7 @@ func TestCheckToolPermission_ReadOnlyToolsAutoAllowed(t *testing.T) {
 }
 
 func TestCheckToolPermission_SafeBashAutoAllowed(t *testing.T) {
-	agentID, activeAgents := subagentArgs()
+	agentID, activeAgents := teammateArgs()
 	safeCmds := []string{
 		"go test ./...",
 		"go vet ./...",
@@ -212,18 +212,18 @@ func TestCheckToolPermission_SafeBashAutoAllowed(t *testing.T) {
 	}
 }
 
-func TestCheckToolPermission_UnsafeBashAutoAllowedForSubagent(t *testing.T) {
-	agentID, activeAgents := subagentArgs()
+func TestCheckToolPermission_UnsafeBashAutoAllowedForTeammate(t *testing.T) {
+	agentID, activeAgents := teammateArgs()
 	// rm -rf / is not in the safe list, but in DEVELOPING it's not denied (only git is blocked).
-	// Subagents get auto-approved for any non-denied Bash command (permission bypass).
+	// Teammates get auto-approved for any non-denied Bash command (permission bypass).
 	input, _ := json.Marshal(map[string]string{"command": "rm -rf /"})
 	result := CheckToolPermission(model.PhaseDeveloping, "Bash", input, agentID, activeAgents)
 	assert.False(t, result.Denied, "rm -rf / is not denied in DEVELOPING (only git commands are blocked)")
-	assert.True(t, result.Allowed, "rm -rf / should be auto-approved for subagents (permission bypass)")
+	assert.True(t, result.Allowed, "rm -rf / should be auto-approved for teammates (permission bypass)")
 }
 
 func TestCheckToolPermission_DeniedNotAutoAllowed(t *testing.T) {
-	agentID, activeAgents := subagentArgs()
+	agentID, activeAgents := teammateArgs()
 	// git commit in DEVELOPING is denied — must NOT be auto-allowed
 	input, _ := json.Marshal(map[string]string{"command": "git commit -m 'test'"})
 	result := CheckToolPermission(model.PhaseDeveloping, "Bash", input, agentID, activeAgents)
@@ -246,20 +246,20 @@ func TestCheckToolPermission_WfClientShortNameAllowedInPlanning(t *testing.T) {
 	assert.False(t, result.Denied, "wf-client (short name) should not be denied in PLANNING")
 }
 
-// --- Subagent auto-allow for file-writing tools ---
+// --- Teammate auto-allow for file-writing tools ---
 
-func TestCheckToolPermission_SubagentEditAutoAllowedInDeveloping(t *testing.T) {
-	agentID, activeAgents := subagentArgs()
+func TestCheckToolPermission_TeammateEditAutoAllowedInDeveloping(t *testing.T) {
+	agentID, activeAgents := teammateArgs()
 	result := CheckToolPermission(model.PhaseDeveloping, "Edit", nil, agentID, activeAgents)
-	assert.False(t, result.Denied, "subagent Edit should not be denied in DEVELOPING")
-	assert.True(t, result.Allowed, "subagent Edit should be auto-allowed (Allowed: true) in DEVELOPING")
+	assert.False(t, result.Denied, "teammate Edit should not be denied in DEVELOPING")
+	assert.True(t, result.Allowed, "teammate Edit should be auto-allowed (Allowed: true) in DEVELOPING")
 }
 
-func TestCheckToolPermission_SubagentWriteAutoAllowedInDeveloping(t *testing.T) {
-	agentID, activeAgents := subagentArgs()
+func TestCheckToolPermission_TeammateWriteAutoAllowedInDeveloping(t *testing.T) {
+	agentID, activeAgents := teammateArgs()
 	result := CheckToolPermission(model.PhaseDeveloping, "Write", nil, agentID, activeAgents)
-	assert.False(t, result.Denied, "subagent Write should not be denied in DEVELOPING")
-	assert.True(t, result.Allowed, "subagent Write should be auto-allowed (Allowed: true) in DEVELOPING")
+	assert.False(t, result.Denied, "teammate Write should not be denied in DEVELOPING")
+	assert.True(t, result.Allowed, "teammate Write should be auto-allowed (Allowed: true) in DEVELOPING")
 }
 
 func TestCheckToolPermission_TeamLeadBashNotAutoAllowed(t *testing.T) {
@@ -273,32 +273,32 @@ func TestCheckToolPermission_TeamLeadBashNotAutoAllowed(t *testing.T) {
 
 // --- Auto-approve narrow list tests ---
 
-func TestCheckToolPermission_CurlAutoAllowedForSubagent(t *testing.T) {
-	agentID, activeAgents := subagentArgs()
+func TestCheckToolPermission_CurlAutoAllowedForTeammate(t *testing.T) {
+	agentID, activeAgents := teammateArgs()
 	// curl is in safeBashPrefixes (PLANNING whitelist) but NOT in autoApproveBashPrefixes.
-	// However, subagents get auto-approved for any non-denied Bash command (same as non-Bash tools).
+	// However, teammates get auto-approved for any non-denied Bash command (same as non-Bash tools).
 	input, _ := json.Marshal(map[string]string{"command": "curl https://example.com"})
 	result := CheckToolPermission(model.PhaseDeveloping, "Bash", input, agentID, activeAgents)
 	assert.False(t, result.Denied, "curl is not denied in DEVELOPING (only git commands are blocked)")
-	assert.True(t, result.Allowed, "curl should be auto-approved for subagents (bypass permission prompt)")
+	assert.True(t, result.Allowed, "curl should be auto-approved for teammates (bypass permission prompt)")
 }
 
 func TestCheckToolPermission_GitDiffAutoAllowed(t *testing.T) {
-	agentID, activeAgents := subagentArgs()
+	agentID, activeAgents := teammateArgs()
 	input, _ := json.Marshal(map[string]string{"command": "git diff"})
 	result := CheckToolPermission(model.PhaseDeveloping, "Bash", input, agentID, activeAgents)
 	assert.False(t, result.Denied, "git diff should not be denied in DEVELOPING")
 	assert.True(t, result.Allowed, "git diff should be auto-approved (truly read-only)")
 }
 
-func TestCheckToolPermission_GitConfigAutoAllowedForSubagent(t *testing.T) {
-	agentID, activeAgents := subagentArgs()
+func TestCheckToolPermission_GitConfigAutoAllowedForTeammate(t *testing.T) {
+	agentID, activeAgents := teammateArgs()
 	// git config can write but is not in the forbidden list, so it's not denied.
-	// Subagents get auto-approved for any non-denied Bash command.
+	// Teammates get auto-approved for any non-denied Bash command.
 	input, _ := json.Marshal(map[string]string{"command": "git config user.name"})
 	result := CheckToolPermission(model.PhaseDeveloping, "Bash", input, agentID, activeAgents)
 	assert.False(t, result.Denied, "git config is not denied in DEVELOPING (not a forbidden git command)")
-	assert.True(t, result.Allowed, "git config should be auto-approved for subagents (bypass permission prompt)")
+	assert.True(t, result.Allowed, "git config should be auto-approved for teammates (bypass permission prompt)")
 }
 
 // --- isClaudeInfraFile tests ---
@@ -374,14 +374,14 @@ func TestCheckToolPermission_PlanningAllowedWriteToMemoryFile(t *testing.T) {
 }
 
 func TestCheckToolPermission_PlanningStillDeniedWriteToProjectFile(t *testing.T) {
-	agentID, activeAgents := subagentArgs()
+	agentID, activeAgents := teammateArgs()
 	input, _ := json.Marshal(map[string]string{"file_path": "/Users/alice/projects/myrepo/cmd/client/main.go"})
 	result := CheckToolPermission(model.PhasePlanning, "Write", input, agentID, activeAgents)
 	assert.True(t, result.Denied, "Write to project file should still be denied in PLANNING")
 }
 
 func TestCheckToolPermission_RespawnStillDeniedWriteToProjectFile(t *testing.T) {
-	agentID, activeAgents := subagentArgs()
+	agentID, activeAgents := teammateArgs()
 	input, _ := json.Marshal(map[string]string{"file_path": "/Users/alice/projects/myrepo/internal/workflow/guards.go"})
 	result := CheckToolPermission(model.PhaseRespawn, "Write", input, agentID, activeAgents)
 	assert.True(t, result.Denied, "Write to project file should still be denied in RESPAWN")
@@ -434,7 +434,7 @@ func TestSplitBashCommands_RedirectionNotSplit(t *testing.T) {
 
 func TestCheckToolPermission_AndAndGitLogAutoApproved(t *testing.T) {
 	// "pwd && git log --oneline" in REVIEWING should be auto-approved (both segments safe)
-	agentID, activeAgents := subagentArgs()
+	agentID, activeAgents := teammateArgs()
 	input, _ := json.Marshal(map[string]string{"command": "pwd && git log --oneline"})
 	result := CheckToolPermission(model.PhaseReviewing, "Bash", input, agentID, activeAgents)
 	assert.False(t, result.Denied, "pwd && git log --oneline should not be denied in REVIEWING")
@@ -443,7 +443,7 @@ func TestCheckToolPermission_AndAndGitLogAutoApproved(t *testing.T) {
 
 func TestCheckToolPermission_AndAndGitCommitDenied(t *testing.T) {
 	// "pwd && git commit -m 'x'" in REVIEWING should be denied (git commit forbidden)
-	agentID, activeAgents := subagentArgs()
+	agentID, activeAgents := teammateArgs()
 	input, _ := json.Marshal(map[string]string{"command": "pwd && git commit -m \"x\""})
 	result := CheckToolPermission(model.PhaseReviewing, "Bash", input, agentID, activeAgents)
 	assert.True(t, result.Denied, "pwd && git commit -m 'x' should be denied in REVIEWING — git commit not allowed")
@@ -451,7 +451,7 @@ func TestCheckToolPermission_AndAndGitCommitDenied(t *testing.T) {
 
 func TestCheckToolPermission_GitLogRedirectionAutoApproved(t *testing.T) {
 	// "git log --oneline 2>&1" in REVIEWING should be auto-approved (no split at &1)
-	agentID, activeAgents := subagentArgs()
+	agentID, activeAgents := teammateArgs()
 	input, _ := json.Marshal(map[string]string{"command": "git log --oneline 2>&1"})
 	result := CheckToolPermission(model.PhaseReviewing, "Bash", input, agentID, activeAgents)
 	assert.False(t, result.Denied, "git log --oneline 2>&1 should not be denied in REVIEWING")
@@ -460,7 +460,7 @@ func TestCheckToolPermission_GitLogRedirectionAutoApproved(t *testing.T) {
 
 func TestCheckToolPermission_EchoAndGitPushDenied(t *testing.T) {
 	// "echo hello && git push" in DEVELOPING should be denied (git push caught through &&)
-	agentID, activeAgents := subagentArgs()
+	agentID, activeAgents := teammateArgs()
 	input, _ := json.Marshal(map[string]string{"command": "echo hello && git push"})
 	result := CheckToolPermission(model.PhaseDeveloping, "Bash", input, agentID, activeAgents)
 	assert.True(t, result.Denied, "echo hello && git push should be denied in DEVELOPING — git push not allowed")
@@ -470,7 +470,7 @@ func TestCheckToolPermission_EchoAndGitPushDenied(t *testing.T) {
 
 func TestCheckToolPermission_GofmtAutoApprovedInDeveloping(t *testing.T) {
 	// "gofmt ./..." in DEVELOPING should be auto-approved
-	agentID, activeAgents := subagentArgs()
+	agentID, activeAgents := teammateArgs()
 	input, _ := json.Marshal(map[string]string{"command": "gofmt ./..."})
 	result := CheckToolPermission(model.PhaseDeveloping, "Bash", input, agentID, activeAgents)
 	assert.False(t, result.Denied, "gofmt ./... should not be denied in DEVELOPING")
@@ -487,7 +487,7 @@ func TestCheckToolPermission_GofmtDeniedInPlanning(t *testing.T) {
 
 func TestCheckToolPermission_GofmtDeniedInFeedback(t *testing.T) {
 	// "gofmt" in FEEDBACK should be denied — only allowed in DEVELOPING/REVIEWING
-	agentID, activeAgents := subagentArgs()
+	agentID, activeAgents := teammateArgs()
 	input, _ := json.Marshal(map[string]string{"command": "gofmt -w ./..."})
 	result := CheckToolPermission(model.PhaseFeedback, "Bash", input, agentID, activeAgents)
 	assert.True(t, result.Denied, "gofmt should be denied in FEEDBACK (file-modifying command)")
@@ -496,7 +496,7 @@ func TestCheckToolPermission_GofmtDeniedInFeedback(t *testing.T) {
 
 func TestCheckToolPermission_GofmtDeniedInCommitting(t *testing.T) {
 	// "gofmt" in COMMITTING should be denied — only allowed in DEVELOPING/REVIEWING
-	agentID, activeAgents := subagentArgs()
+	agentID, activeAgents := teammateArgs()
 	input, _ := json.Marshal(map[string]string{"command": "gofmt ./..."})
 	result := CheckToolPermission(model.PhaseCommitting, "Bash", input, agentID, activeAgents)
 	assert.True(t, result.Denied, "gofmt should be denied in COMMITTING (file-modifying command)")
