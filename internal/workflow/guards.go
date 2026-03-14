@@ -3,6 +3,7 @@ package workflow
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/eklemin/wf-agents/internal/model"
@@ -269,6 +270,7 @@ var safeBashPrefixes = []string{
 	"env", "printenv", "set", "export",
 	"date", "uname", "whoami", "hostname",
 	"true", "false", "test", "[",
+	"wf-client",
 }
 
 // checkBashPermission enforces bash command restrictions per phase.
@@ -318,7 +320,7 @@ func checkBashPermission(phase model.Phase, toolInput json.RawMessage) ToolPermi
 		// Track whether every segment is in the safe prefix list (for auto-allow).
 		// Safe git read-only commands (git diff, git status, etc.) are also auto-allowed.
 		isGitSafe := (strings.HasPrefix(seg, "git ") || seg == "git") && isAllowedGitInPlanning(seg)
-		if !isSafeBashCommand(seg) && !isWfClientCommand(seg) && !isGitSafe {
+		if !isSafeBashCommand(seg) && !isGitSafe {
 			allSegmentsSafe = false
 		}
 	}
@@ -329,28 +331,12 @@ func checkBashPermission(phase model.Phase, toolInput json.RawMessage) ToolPermi
 	return ToolPermissionResult{Denied: false}
 }
 
-// isWfClientCommand returns true if the command's first word is or ends with "wf-client".
-// Handles both bare "wf-client" and absolute paths like "/path/to/bin/wf-client".
-func isWfClientCommand(seg string) bool {
-	firstWord := seg
-	if idx := strings.IndexAny(seg, " \t"); idx >= 0 {
-		firstWord = seg[:idx]
-	}
-	return firstWord == "wf-client" || strings.HasSuffix(firstWord, "/wf-client")
-}
-
 // checkPlanningBash uses a whitelist: only safe read-only commands in PLANNING.
 func checkPlanningBash(cmd string) ToolPermissionResult {
 	// Handle pipes/chains: check each sub-command
 	for _, segment := range splitBashCommands(cmd) {
 		seg := strings.TrimSpace(segment)
 		if seg == "" {
-			continue
-		}
-
-		// wf-client is always safe — it only talks to Temporal.
-		// Match by path suffix (e.g., /path/to/bin/wf-client) or bare name prefix.
-		if isWfClientCommand(seg) {
 			continue
 		}
 
@@ -417,10 +403,28 @@ func isAllowedGitInPlanning(cmd string) bool {
 }
 
 // isSafeBashCommand checks if a command matches any safe prefix for PLANNING.
+// It first tries matching the command as-is, then strips path components from
+// the first word so that "/usr/bin/ls -la" matches prefix "ls" and
+// "/path/to/bin/wf-client status" matches prefix "wf-client".
 func isSafeBashCommand(cmd string) bool {
+	// First try matching as-is
 	for _, prefix := range safeBashPrefixes {
 		if matchesBashPrefix(cmd, prefix) {
 			return true
+		}
+	}
+	// If first word contains a path, try matching by basename
+	firstWord, rest, _ := strings.Cut(cmd, " ")
+	if strings.Contains(firstWord, "/") {
+		base := filepath.Base(firstWord)
+		cmdWithBase := base
+		if rest != "" {
+			cmdWithBase = base + " " + rest
+		}
+		for _, prefix := range safeBashPrefixes {
+			if matchesBashPrefix(cmdWithBase, prefix) {
+				return true
+			}
 		}
 	}
 	return false

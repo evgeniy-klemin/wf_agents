@@ -232,7 +232,7 @@ func TestCheckToolPermission_DeniedNotAutoAllowed(t *testing.T) {
 
 func TestCheckToolPermission_WfClientAutoAllowedInPlanning(t *testing.T) {
 	agentID, activeAgents := teamLeadArgs()
-	// wf-client (by path suffix) should always be allowed in PLANNING
+	// wf-client (by basename extraction) should always be allowed in PLANNING
 	input, _ := json.Marshal(map[string]string{"command": "/some/path/bin/wf-client transition wf-id --to RESPAWN --reason \"test\""})
 	result := CheckToolPermission(model.PhasePlanning, "Bash", input, agentID, activeAgents)
 	assert.False(t, result.Denied, "wf-client command should not be denied in PLANNING")
@@ -243,4 +243,18 @@ func TestCheckToolPermission_WfClientShortNameAllowedInPlanning(t *testing.T) {
 	input, _ := json.Marshal(map[string]string{"command": "wf-client status wf-id"})
 	result := CheckToolPermission(model.PhasePlanning, "Bash", input, agentID, activeAgents)
 	assert.False(t, result.Denied, "wf-client (short name) should not be denied in PLANNING")
+}
+
+// --- isSafeBashCommand path-stripping tests ---
+
+func TestIsSafeBashCommand_WithPath(t *testing.T) {
+	// /usr/bin/ls -la should match "ls" prefix via basename extraction
+	assert.True(t, isSafeBashCommand("/usr/bin/ls -la"),
+		"/usr/bin/ls -la should match safe prefix 'ls' via basename extraction")
+}
+
+func TestIsSafeBashCommand_WithAbsolutePathWfClient(t *testing.T) {
+	// /path/to/bin/wf-client status foo should match "wf-client" prefix via basename extraction
+	assert.True(t, isSafeBashCommand("/path/to/bin/wf-client status foo"),
+		"/path/to/bin/wf-client status foo should match safe prefix 'wf-client' via basename extraction")
 }
