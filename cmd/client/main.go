@@ -207,6 +207,10 @@ func cmdTransition(ctx context.Context, c client.Client, args []string) {
 
 	if result.Allowed {
 		fmt.Printf("TRANSITION ALLOWED: %s → %s\n", result.From, result.To)
+		if result.To == model.PhaseComplete {
+			sessionID := strings.TrimPrefix(workflowID, "coding-session-")
+			removeSessionMarker(sessionID)
+		}
 	} else {
 		fmt.Fprintf(os.Stderr, "TRANSITION DENIED: %s → %s\nReason: %s\n", result.From, result.To, result.Reason)
 		os.Exit(1)
@@ -267,6 +271,8 @@ func cmdComplete(ctx context.Context, c client.Client, args []string) {
 
 	if result.Allowed {
 		fmt.Printf("COMPLETE: %s → %s\n", result.From, result.To)
+		sessionID := strings.TrimPrefix(workflowID, "coding-session-")
+		removeSessionMarker(sessionID)
 	} else {
 		fmt.Fprintf(os.Stderr, "COMPLETE DENIED: %s → %s\nReason: %s\n", result.From, result.To, result.Reason)
 		os.Exit(1)
@@ -395,6 +401,15 @@ func createSessionMarker(sessionID string) {
 	marker := filepath.Join(dir, sessionID)
 	if err := os.WriteFile(marker, []byte(sessionID), 0o644); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not create session marker: %v\n", err)
+	}
+}
+
+// removeSessionMarker deletes the marker file for the given session so that
+// hook-handler becomes a no-op after the workflow reaches COMPLETE.
+func removeSessionMarker(sessionID string) {
+	marker := filepath.Join(os.TempDir(), "wf-agents-sessions", sessionID)
+	if err := os.Remove(marker); err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "Warning: could not remove session marker: %v\n", err)
 	}
 }
 
