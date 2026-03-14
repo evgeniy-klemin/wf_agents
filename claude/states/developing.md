@@ -8,10 +8,11 @@ IF YOU ARE THE DEVELOPER: Implement via TDD — tests first, then code, then ref
   Do NOT use pipes, subshells, or multi-command chains — they block auto-approve.
   Do NOT run git add, git commit, or git push — leave changes uncommitted on disk.
   The REVIEWING guard requires a dirty working tree (uncommitted changes).
+  Work ONLY on the assigned iteration task. Do NOT expand scope beyond what was given.
 
 CHECKLIST:
 - [ ] Load developer agent: .claude/agents/developer.md (project) or {{PLUGIN_ROOT}}/agents/developer.md (plugin default)
-- [ ] Spawn Developer subagent with: agent instructions, plan, iteration number, prior rejection feedback
+- [ ] Spawn Developer subagent with: agent instructions, current iteration task ONLY (not full plan), iteration number, prior rejection feedback
 - [ ] Developer writes failing tests
 - [ ] Developer implements to pass tests
 - [ ] Developer runs all tests (simple commands only)

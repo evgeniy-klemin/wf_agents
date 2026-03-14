@@ -122,6 +122,7 @@ ${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to RESPAWN --reaso
 
 Kill existing Developer/Reviewer subagents and spawn fresh ones with clean context:
 - This deliberately clears accumulated context window noise from prior iterations
+- Determine the current iteration task from your plan — this is the ONLY task the Developer will receive
 - Prepare the current iteration task context
 - Only pass the plan and current iteration info to new agents
 - **File writes are BLOCKED in this phase** — only agent management
@@ -139,8 +140,9 @@ Load agent instructions with project-local override:
 
 Spawn a Developer subagent via the Agent tool. The prompt MUST include:
 - The agent instructions loaded above
-- Your implementation plan
+- The current iteration task ONLY (not the full plan — the Developer must focus on one task at a time)
 - The current iteration number and any feedback from prior rejections
+- A brief summary of the overall goal (one sentence) for context
 
 When the Developer finishes, transition:
 ```bash
