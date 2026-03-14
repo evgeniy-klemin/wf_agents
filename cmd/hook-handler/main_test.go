@@ -64,3 +64,32 @@ func TestAllowWithContextOutputNoContinueField(t *testing.T) {
 		t.Errorf("allow-with-context output must NOT contain \"continue\" field, got: %s", raw)
 	}
 }
+
+// TestAutoAllowOutputHasPermissionDecisionAllow verifies that when Allowed is true, the JSON output
+// contains permissionDecision: "allow" so Claude Code bypasses the permission prompt.
+func TestAutoAllowOutputHasPermissionDecisionAllow(t *testing.T) {
+	out := hookOutput{
+		HookSpecificOutput: &hookSpecificOutput{
+			HookEventName:            "PreToolUse",
+			PermissionDecision:       "allow",
+			PermissionDecisionReason: "Safe command auto-approved by workflow",
+			AdditionalContext:        "[Workflow Phase: DEVELOPING] phase instructions",
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(out); err != nil {
+		t.Fatalf("failed to encode hookOutput: %v", err)
+	}
+
+	raw := buf.String()
+	if !strings.Contains(raw, `"permissionDecision":"allow"`) {
+		t.Errorf("auto-allow output must contain permissionDecision:\"allow\", got: %s", raw)
+	}
+	if !strings.Contains(raw, `"permissionDecisionReason"`) {
+		t.Errorf("auto-allow output must contain permissionDecisionReason, got: %s", raw)
+	}
+	if strings.Contains(raw, `"continue"`) {
+		t.Errorf("auto-allow output must NOT contain \"continue\" field, got: %s", raw)
+	}
+}
