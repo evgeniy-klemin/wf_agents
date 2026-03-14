@@ -283,6 +283,12 @@ var autoApproveBashPrefixes = []string{
 	"npm test", "npm run lint", "cargo test", "cargo check",
 	"python -m pytest", "pytest",
 	"wf-client",
+	// Read-only shell utilities safe to auto-approve in any phase
+	"ls", "cat", "head", "tail", "wc", "file",
+	"grep", "rg", "awk", "sort", "uniq", "diff",
+	"echo", "printf", "true", "false", "test", "[",
+	"pwd",
+	"jq", "yq", "gofmt",
 }
 
 func isAutoApproveBashCommand(cmd string) bool {
@@ -351,7 +357,7 @@ var safeBashPrefixes = []string{
 	"npm test", "npm run lint", "npx", "yarn test",
 	"make", "cargo test", "cargo check", "cargo clippy",
 	"python -m pytest", "pytest", "python -c",
-	"jq", "yq", "curl", "wget",
+	"jq", "yq", "curl", "wget", "gofmt",
 	"env", "printenv", "set", "export",
 	"date", "uname", "whoami", "hostname",
 	"true", "false", "test", "[",
@@ -537,12 +543,12 @@ func splitBashCommands(cmd string) []string {
 			if i+1 < len(cmd) && (cmd[i+1] == '|' || cmd[i+1] == '&') {
 				i++
 			}
-		case !inSingle && !inDouble && ch == '&':
+		case !inSingle && !inDouble && ch == '&' && i+1 < len(cmd) && cmd[i+1] == '&':
+			// Only split on "&&" (logical AND). Single "&" (background) and
+			// redirections like "2>&1" are NOT split.
 			parts = append(parts, current.String())
 			current.Reset()
-			if i+1 < len(cmd) && cmd[i+1] == '&' {
-				i++
-			}
+			i++ // skip second &
 		default:
 			current.WriteByte(ch)
 		}
