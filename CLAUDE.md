@@ -8,6 +8,7 @@
 hooks/hooks.json              Hook configuration (all events → bin/hook-handler)
 agents/                       Subagent definitions with YAML frontmatter
 commands/                     Slash commands
+claude/states/                Phase instructions (*.md) — read from disk by hook-handler
 ```
 
 ### Go backend
@@ -47,7 +48,7 @@ go test ./internal/model/ -v       # state machine tests
 - Transitions use `UpdateWorkflow` (synchronous allow/deny), not signals
 - `WaitForStage: client.WorkflowUpdateStageCompleted` required in UpdateWorkflow options
 - Task description set via `set-task` signal on first `UserPromptSubmit`
-- Phase instructions injected as `additionalContext` on every PreToolUse
+- Phase instructions loaded from `claude/states/*.md` and injected as `additionalContext` on every PreToolUse
 - Bash commands chained with `&&`, `||`, `|`, `;` are split and each segment checked independently in guards
 
 ## Important conventions
