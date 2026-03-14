@@ -3,6 +3,8 @@ PHASE: DEVELOPING — Developer teammate implements via TDD.
 Do NOT write code yourself. Delegate to the Developer teammate.
 
 CHECKLIST:
+- [ ] Create the team (first iteration only — skip if team already exists from a prior cycle):
+      TeamCreate(team_name: "feature-team-<session-id>", description: "Feature team for <task>")
 - [ ] Spawn fresh Developer and Reviewer teammates (both in same message):
       Agent(subagent_type: "wf-agents:developer", team_name: "feature-team-<session-id>", name: "developer-<N>")
       Agent(subagent_type: "wf-agents:reviewer", team_name: "feature-team-<session-id>", name: "reviewer-<N>")

@@ -165,6 +165,9 @@ ${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to DEVELOPING --re
 
 Announce: `🔨 LEAD: DEVELOPING (Iteration N)`
 
+**First iteration only** — create the team before spawning teammates (subsequent iterations the team already exists):
+  TeamCreate(team_name: "feature-team-<session-id>", description: "Feature team for <task>")
+
 Spawn fresh Developer and Reviewer teammates (both in same message):
   Agent(subagent_type: "wf-agents:developer", team_name: "feature-team-<session-id>", name: "developer-<N>")
   Agent(subagent_type: "wf-agents:reviewer", team_name: "feature-team-<session-id>", name: "reviewer-<N>")

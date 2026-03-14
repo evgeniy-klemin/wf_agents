@@ -90,12 +90,35 @@ func main() {
 
 	// --- Auto-BLOCKED / auto-unblock logic (before per-event handling) ---
 	//
-	// "Blocking" events: Stop, Notification → transition TO BLOCKED
+	// "Blocking" events: Notification → always transition TO BLOCKED
+	// Stop → only blocking if it comes from the Team Lead (empty AgentID or not in activeAgents).
+	//   Teammates (non-empty AgentID in activeAgents) finishing their turn is normal — they idle
+	//   while Lead and other teammates continue working. Only Team Lead's Stop means "waiting for input".
 	// TeammateIdle is handled separately (phase-aware) in its case below.
 	// All other events from Claude Code → transition BACK from BLOCKED
-	// Stop = Claude finished turn, waiting for user input
-	// Notification = system notification (e.g., teammate needs attention)
-	isBlockingEvent := input.HookEventName == "Stop" || input.HookEventName == "Notification"
+	isBlockingEvent := input.HookEventName == "Notification"
+	if input.HookEventName == "Stop" {
+		// Stop is blocking only if it comes from the Team Lead (not a teammate).
+		// Team Lead has empty AgentID; teammates have non-empty AgentID in activeAgents.
+		if input.AgentID == "" {
+			isBlockingEvent = true
+		} else {
+			// Check if this agent is a known teammate (present in activeAgents).
+			status := queryStatus(ctx, c, workflowID)
+			isTeammate := false
+			for _, id := range status.ActiveAgents {
+				if id == input.AgentID {
+					isTeammate = true
+					break
+				}
+			}
+			if !isTeammate {
+				// Unknown agent or unrecognized ID — treat as blocking (safe default).
+				isBlockingEvent = true
+			}
+			// If teammate — isBlockingEvent stays false; no auto-BLOCKED on teammate Stop.
+		}
+	}
 
 	if isBlockingEvent {
 		phase := queryPhase(ctx, c, workflowID)
