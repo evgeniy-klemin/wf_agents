@@ -475,10 +475,28 @@ func TestCheckToolPermission_GofmtAutoApprovedInDeveloping(t *testing.T) {
 	assert.True(t, result.Allowed, "gofmt ./... should be auto-approved in DEVELOPING")
 }
 
-func TestCheckToolPermission_GofmtAllowedInPlanning(t *testing.T) {
-	// "gofmt" in PLANNING should be allowed (in safeBashPrefixes)
+func TestCheckToolPermission_GofmtDeniedInPlanning(t *testing.T) {
+	// "gofmt" in PLANNING should be denied — gofmt -w modifies files and is not allowed outside DEVELOPING/REVIEWING
 	agentID, activeAgents := teamLeadArgs()
 	input, _ := json.Marshal(map[string]string{"command": "gofmt -l ./..."})
 	result := CheckToolPermission(model.PhasePlanning, "Bash", input, agentID, activeAgents)
-	assert.False(t, result.Denied, "gofmt -l ./... should be allowed in PLANNING")
+	assert.True(t, result.Denied, "gofmt should be denied in PLANNING (file-modifying command)")
+}
+
+func TestCheckToolPermission_GofmtDeniedInFeedback(t *testing.T) {
+	// "gofmt" in FEEDBACK should be denied — only allowed in DEVELOPING/REVIEWING
+	agentID, activeAgents := subagentArgs()
+	input, _ := json.Marshal(map[string]string{"command": "gofmt -w ./..."})
+	result := CheckToolPermission(model.PhaseFeedback, "Bash", input, agentID, activeAgents)
+	assert.True(t, result.Denied, "gofmt should be denied in FEEDBACK (file-modifying command)")
+	assert.Contains(t, result.Reason, "gofmt is only allowed in DEVELOPING and REVIEWING phases")
+}
+
+func TestCheckToolPermission_GofmtDeniedInCommitting(t *testing.T) {
+	// "gofmt" in COMMITTING should be denied — only allowed in DEVELOPING/REVIEWING
+	agentID, activeAgents := subagentArgs()
+	input, _ := json.Marshal(map[string]string{"command": "gofmt ./..."})
+	result := CheckToolPermission(model.PhaseCommitting, "Bash", input, agentID, activeAgents)
+	assert.True(t, result.Denied, "gofmt should be denied in COMMITTING (file-modifying command)")
+	assert.Contains(t, result.Reason, "gofmt is only allowed in DEVELOPING and REVIEWING phases")
 }

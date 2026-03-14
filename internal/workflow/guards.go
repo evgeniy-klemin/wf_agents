@@ -357,7 +357,7 @@ var safeBashPrefixes = []string{
 	"npm test", "npm run lint", "npx", "yarn test",
 	"make", "cargo test", "cargo check", "cargo clippy",
 	"python -m pytest", "pytest", "python -c",
-	"jq", "yq", "curl", "wget", "gofmt",
+	"jq", "yq", "curl", "wget",
 	"env", "printenv", "set", "export",
 	"date", "uname", "whoami", "hostname",
 	"true", "false", "test", "[",
@@ -405,6 +405,15 @@ func checkBashPermission(phase model.Phase, toolInput json.RawMessage) ToolPermi
 						Denied: true,
 						Reason: fmt.Sprintf("%q is not allowed in %s phase. %s", forbidden, phase, PhaseHint(phase)),
 					}
+				}
+			}
+		}
+		// File-modifying commands restricted to DEVELOPING/REVIEWING
+		if phase != model.PhaseDeveloping && phase != model.PhaseReviewing {
+			if matchesBashPrefix(seg, "gofmt") {
+				return ToolPermissionResult{
+					Denied: true,
+					Reason: fmt.Sprintf("gofmt is only allowed in DEVELOPING and REVIEWING phases, current phase: %s", phase),
 				}
 			}
 		}
