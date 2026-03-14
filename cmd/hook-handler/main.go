@@ -350,7 +350,7 @@ func queryPhase(ctx context.Context, c client.Client, workflowID string) model.P
 // phaseInstructions returns comprehensive enforcement instructions for the current phase.
 // Injected as additionalContext on every PreToolUse — this is the PRIMARY mechanism
 // that keeps Claude on track (since plugin CLAUDE.md is project docs, not workflow rules).
-// For most phases, content is loaded from claude/states/<phase>.md under CLAUDE_PLUGIN_ROOT
+// For most phases, content is loaded from states/<phase>.md under CLAUDE_PLUGIN_ROOT
 // and placeholders ({{WF_CLIENT}}, {{PLUGIN_ROOT}}, {{AGENT_FILE}}) are substituted.
 // COMPLETE and BLOCKED are kept as hardcoded one-liners.
 func phaseInstructions(phase model.Phase) string {
@@ -403,7 +403,7 @@ When unblocked: transition ONLY to the pre-blocked phase.`, wfc)
 		return fmt.Sprintf("PHASE: %s", phase)
 	}
 
-	stateFile := filepath.Join(pluginRoot, "claude", "states", cfg.filename)
+	stateFile := filepath.Join(pluginRoot, "states", cfg.filename)
 	raw, err := os.ReadFile(stateFile)
 	if err != nil {
 		return fmt.Sprintf("PHASE: %s", phase)

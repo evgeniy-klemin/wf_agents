@@ -73,16 +73,16 @@ func TestAllowWithContextOutputNoContinueField(t *testing.T) {
 // TestPhaseInstructionsNonEmpty verifies that phaseInstructions returns non-empty content
 // for all phases, and that no {{...}} placeholders remain unresolved.
 func TestPhaseInstructionsNonEmpty(t *testing.T) {
-	// Find the project root by locating the claude/states directory.
+	// Find the project root by locating the states directory.
 	// The test binary runs from the package directory, so we go up two levels.
 	projectRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatalf("cannot determine project root: %v", err)
 	}
 	// Verify the states directory exists at the expected location.
-	statesDir := filepath.Join(projectRoot, "claude", "states")
+	statesDir := filepath.Join(projectRoot, "states")
 	if _, err := os.Stat(statesDir); err != nil {
-		t.Fatalf("claude/states directory not found at %s: %v", statesDir, err)
+		t.Fatalf("states directory not found at %s: %v", statesDir, err)
 	}
 
 	// Set CLAUDE_PLUGIN_ROOT so phaseInstructions can locate the state files.
