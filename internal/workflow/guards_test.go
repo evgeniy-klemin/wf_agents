@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/eklemin/wf-agents/internal/model"
@@ -308,4 +309,55 @@ func TestIsAllowedGitInPlanning_Pull(t *testing.T) {
 
 func TestIsAllowedGitInPlanning_Fetch(t *testing.T) {
 	assert.True(t, isAllowedGitInPlanning("git fetch origin main"), "git fetch with args should be allowed in PLANNING")
+}
+
+// TestSubagentBashAutoApprove verifies that subagents get Bash commands auto-approved
+// when the command is not denied, even if the command is not in the auto-approve list.
+func TestSubagentBashAutoApprove(t *testing.T) {
+	activeAgents := []string{"developer-agent-1"}
+	subagentID := "developer-agent-1"
+	teamLeadID := "" // empty = Team Lead
+
+	makeInput := func(cmd string) []byte {
+		b, _ := json.Marshal(map[string]string{"command": cmd})
+		return b
+	}
+
+	// Test 1: subagent Bash command NOT in auto-approve list (make build) gets Allowed: true
+	t.Run("subagent non-auto-approve bash gets auto-approved", func(t *testing.T) {
+		result := CheckToolPermission(
+			model.PhaseDeveloping,
+			"Bash",
+			makeInput("make build"),
+			subagentID,
+			activeAgents,
+		)
+		assert.False(t, result.Denied, "make build should not be denied for subagent")
+		assert.True(t, result.Allowed, "make build should be auto-approved (Allowed=true) for subagent")
+	})
+
+	// Test 2: Team Lead Bash command NOT in auto-approve list does NOT get auto-approved
+	t.Run("team lead non-auto-approve bash not auto-approved", func(t *testing.T) {
+		result := CheckToolPermission(
+			model.PhaseDeveloping,
+			"Bash",
+			makeInput("make build"),
+			teamLeadID,
+			activeAgents,
+		)
+		assert.False(t, result.Denied, "make build should not be denied for Team Lead")
+		assert.False(t, result.Allowed, "make build should NOT be auto-approved for Team Lead")
+	})
+
+	// Test 3: denied Bash command (git commit) is still denied for subagents
+	t.Run("denied bash command still denied for subagent", func(t *testing.T) {
+		result := CheckToolPermission(
+			model.PhaseDeveloping,
+			"Bash",
+			makeInput("git commit -m 'test'"),
+			subagentID,
+			activeAgents,
+		)
+		assert.True(t, result.Denied, "git commit should be denied for subagent in DEVELOPING phase")
+	})
 }
