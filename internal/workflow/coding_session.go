@@ -299,6 +299,10 @@ func (s *sessionState) computeCurrentIterPhaseDurations(now time.Time) map[strin
 		if !ok || to != string(model.PhaseRespawn) {
 			continue
 		}
+		// Skip BLOCKED→RESPAWN transitions — those are unblocks, not new iteration boundaries.
+		if ev.Detail["from"] == string(model.PhaseBlocked) {
+			continue
+		}
 		iterCount++
 		lastRespawnIdx = i
 	}
@@ -308,7 +312,7 @@ func (s *sessionState) computeCurrentIterPhaseDurations(now time.Time) map[strin
 		lastRespawnIdx = -1
 	}
 
-	// Accumulate durations starting from lastRespawnIdx+1
+	// Accumulate durations from the last RESPAWN boundary (inclusive) onward.
 	durations := make(map[string]float64)
 	var currentPhase string
 	var phaseStart time.Time

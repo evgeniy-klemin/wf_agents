@@ -73,10 +73,11 @@ func TestStatusCurrentPhaseSecsIsCurrentPhaseOnly(t *testing.T) {
 
 	// CurrentPhaseSecs should equal the COMPLETE phase duration since that's current
 	completeDur, ok := status.PhaseDurationSecs["COMPLETE"]
-	if ok {
-		assert.InDelta(t, status.CurrentPhaseSecs, completeDur, 0.001,
-			"CurrentPhaseSecs should match COMPLETE phase duration in PhaseDurationSecs")
+	if !ok {
+		t.Fatal("PhaseDurationSecs missing COMPLETE key")
 	}
+	assert.InDelta(t, status.CurrentPhaseSecs, completeDur, 0.001,
+		"CurrentPhaseSecs should match COMPLETE phase duration in PhaseDurationSecs")
 }
 
 func setupEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
@@ -637,9 +638,10 @@ func TestCurrentIterPhaseDurations_MultiIteration(t *testing.T) {
 	assert.False(t, planningInIter, "PLANNING should not appear in current iter durations (happened before iter 2 RESPAWN)")
 }
 
-// TestCurrentIterPhaseDurations_NoRespawn verifies that when there is no RESPAWN yet
-// (still in PLANNING), CurrentIterPhaseSecs equals PhaseDurationSecs.
-func TestCurrentIterPhaseDurations_NoRespawn(t *testing.T) {
+// TestCurrentIterPhaseDurations_FirstIterationOnly verifies that when there is only
+// a single iteration (no boundary RESPAWN), CurrentIterPhaseSecs covers all phases
+// including PLANNING (i.e., accumulation starts from the beginning).
+func TestCurrentIterPhaseDurations_FirstIterationOnly(t *testing.T) {
 	// We can only query after workflow completes in test env, so use a minimal path.
 	env := setupEnv(t)
 

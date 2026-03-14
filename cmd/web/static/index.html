@@ -594,8 +594,16 @@ function renderPhaseHistory(timeline, sessionEndTime) {
 
 // ---- Diagram ----
 function renderDiagram(status, preBlockedPhase, timeline, sessionEndTime) {
-  // Use server-side durations if available, fallback to client-side computation
-  const phaseDurations = status.phase_duration_secs || computePhaseDurations(timeline || { events: [] }, sessionEndTime);
+  // Use server-side durations if available, fallback to client-side computation.
+  // computePhaseDurations returns ms, but the rest of the code treats values as seconds,
+  // so convert the fallback to seconds.
+  const serverDurations = status.phase_duration_secs;
+  const phaseDurations = serverDurations || (() => {
+    const clientMs = computePhaseDurations(timeline || { events: [] }, sessionEndTime);
+    const clientSecs = {};
+    for (const [k, v] of Object.entries(clientMs)) { clientSecs[k] = v / 1000; }
+    return clientSecs;
+  })();
   const iterDurations = status.current_iter_phase_secs || {};
   const hasMultipleIters = (status.iteration || 1) > 1;
 

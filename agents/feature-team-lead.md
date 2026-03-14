@@ -207,7 +207,7 @@ ${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to FEEDBACK --reas
 
 **Step 1: Initialize comment tracking**
 
-Record `LAST_POLL_TIME` as the current UTC timestamp. This is used to detect new comments (including replies in existing threads).
+Initialize `SEEN_COMMENT_IDS` as an empty set. This is used to track which comments have already been processed (by ID), so new comments are reliably detected across every poll cycle.
 
 **Step 2: Poll loop — ALL THREE checks are MANDATORY on every cycle**
 
@@ -223,18 +223,20 @@ gh pr view --json reviewDecision,state
 ```
 If `reviewDecision: APPROVED` or `state: MERGED` → go to Step 5.
 
-**2b.** Check inline review comments and thread replies (this is the ONLY way to see code review comments):
+**2b.** Fetch ALL inline review comments and filter out already-seen ones:
 ```bash
 gh api repos/{owner}/{repo}/pulls/{number}/comments \
-  --jq '[.[] | select(.created_at > "LAST_POLL_TIME") | {id, path, line, body, in_reply_to_id, created_at}]'
+  --jq '[.[] | {id, path, line, body, in_reply_to_id, created_at}]'
 ```
+Compare returned IDs against `SEEN_COMMENT_IDS` set. Any new IDs = new comments.
 
-**2c.** Check PR-level (issue-style) comments:
+**2c.** Fetch ALL PR-level comments and filter out already-seen ones:
 ```bash
-gh pr view --json comments --jq '[.comments[] | select(.createdAt > "LAST_POLL_TIME")]'
+gh pr view --json comments --jq '[.comments[] | {id: .id, body: .body, createdAt: .createdAt}]'
 ```
+Compare returned IDs against `SEEN_COMMENT_IDS` set. Any new IDs = new comments.
 
-Update `LAST_POLL_TIME` after each cycle. If 2b or 2c returned new comments → go to Step 3. Otherwise → repeat from `sleep 60`.
+Add new comment IDs to `SEEN_COMMENT_IDS` after each cycle. If 2b or 2c returned new comments → go to Step 3. Otherwise → repeat from `sleep 60`.
 
 **WARNING:** `gh pr view --json comments` (2c) only returns PR-level comments, NOT inline code review comments or thread replies. Step 2b is MANDATORY — without it you will miss all inline review feedback.
 
