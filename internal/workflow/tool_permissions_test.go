@@ -16,20 +16,26 @@ func TestIsTeammate_EmptyAgentID(t *testing.T) {
 		"empty agent_id should never be treated as teammate (it is Team Lead)")
 }
 
+// IsTeammate now returns true for any non-empty agentID (Agent Teams teammates
+// don't always appear in activeAgents before their first PreToolUse fires).
 func TestIsTeammate_AgentInList(t *testing.T) {
 	assert.True(t, IsTeammate("agent-abc", []string{"agent-abc", "agent-xyz"}))
 }
 
 func TestIsTeammate_AgentNotInList(t *testing.T) {
-	assert.False(t, IsTeammate("agent-unknown", []string{"agent-abc", "agent-xyz"}))
+	// After simplification: any non-empty agentID is treated as a teammate,
+	// even if not yet in the activeAgents list (will be auto-registered).
+	assert.True(t, IsTeammate("agent-unknown", []string{"agent-abc", "agent-xyz"}))
 }
 
 func TestIsTeammate_EmptyList(t *testing.T) {
-	assert.False(t, IsTeammate("agent-abc", []string{}))
+	// Any non-empty agentID → teammate, even if list is empty.
+	assert.True(t, IsTeammate("agent-abc", []string{}))
 }
 
 func TestIsTeammate_NilList(t *testing.T) {
-	assert.False(t, IsTeammate("agent-abc", nil))
+	// Any non-empty agentID → teammate, even if list is nil.
+	assert.True(t, IsTeammate("agent-abc", nil))
 }
 
 // teamLeadArgs returns agentID and activeAgents for a Team Lead caller (main agent, not a teammate).

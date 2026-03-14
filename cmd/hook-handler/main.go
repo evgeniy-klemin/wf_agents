@@ -33,6 +33,8 @@ type claudeHookInput struct {
 	Model          string          `json:"model,omitempty"`
 	LastMessage    string          `json:"last_assistant_message,omitempty"`
 	Error          string          `json:"error,omitempty"`
+	TeammateName   string          `json:"teammate_name,omitempty"`
+	TeamName       string          `json:"team_name,omitempty"`
 }
 
 // hookOutput is the JSON structure that Claude Code expects on stdout (exit 0).
@@ -204,6 +206,8 @@ func main() {
 	case "TeammateIdle":
 		detail["agent_id"] = input.AgentID
 		detail["agent_type"] = input.AgentType
+		detail["teammate_name"] = input.TeammateName
+		detail["team_name"] = input.TeamName
 		sendHookEvent(ctx, c, workflowID, model.SignalHookEvent{
 			HookType:  "TeammateIdle",
 			SessionID: input.SessionID,
@@ -211,15 +215,10 @@ func main() {
 		})
 
 		// Determine who is idle and enforce appropriate constraints.
+		// If teammate_name is non-empty (or agent_id is non-empty), this is a teammate going idle.
+		// If both are empty, assume it is the Team Lead.
 		phase := queryPhase(ctx, c, workflowID)
-		status := queryStatus(ctx, c, workflowID)
-		isTeammate := false
-		for _, id := range status.ActiveAgents {
-			if id == input.AgentID {
-				isTeammate = true
-				break
-			}
-		}
+		isTeammate := input.TeammateName != "" || input.AgentID != ""
 
 		if !isTeammate {
 			// This is the Team Lead going idle.
@@ -228,7 +227,7 @@ func main() {
 				fmt.Fprintf(os.Stderr, "Lead cannot go idle in %s. Transition to BLOCKED or COMPLETE, or continue working.\n", phase)
 				os.Exit(2)
 			}
-		} else if input.AgentType != "" && strings.Contains(strings.ToLower(input.AgentType), "developer") {
+		} else if strings.Contains(strings.ToLower(input.TeammateName), "developer") {
 			// Developer going idle.
 			if phase == model.PhaseDeveloping {
 				fmt.Fprintf(os.Stderr, "Developer cannot go idle in DEVELOPING without finishing work. Complete your task and message the Team Lead.\n")
@@ -412,6 +411,9 @@ func buildDetail(input claudeHookInput) map[string]string {
 	}
 	if input.Error != "" {
 		d["error"] = input.Error
+	}
+	if input.AgentID != "" {
+		d["agent_id"] = input.AgentID
 	}
 	return d
 }

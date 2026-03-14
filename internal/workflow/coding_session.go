@@ -265,6 +265,20 @@ func (s *sessionState) handleTransition(ctx workflow.Context, req model.SignalTr
 func (s *sessionState) handleHookEvent(ctx workflow.Context, evt model.SignalHookEvent) {
 	evtType := model.EventToolUse
 	switch evt.HookType {
+	case "PreToolUse":
+		// Auto-register teammates from PreToolUse (Agent Teams teammates don't fire SubagentStart)
+		if agentID, ok := evt.Detail["agent_id"]; ok && agentID != "" {
+			found := false
+			for _, a := range s.activeAgents {
+				if a == agentID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				s.activeAgents = append(s.activeAgents, agentID)
+			}
+		}
 	case "SubagentStart":
 		evtType = model.EventAgentSpawn
 		if agentID, ok := evt.Detail["agent_id"]; ok {

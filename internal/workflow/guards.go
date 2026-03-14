@@ -250,18 +250,12 @@ func CheckToolPermission(
 	return ToolPermissionResult{Denied: false}
 }
 
-// IsTeammate returns true if agentID is non-empty and present in the activeAgents list.
-// If agentID is empty or not in the list, the caller is assumed to be the Team Lead (main agent).
+// IsTeammate returns true if agentID is non-empty.
+// Agent Teams teammates may not have fired SubagentStart before PreToolUse, so
+// checking against activeAgents is unreliable. Any non-empty agentID is treated
+// as a teammate; an empty agentID means the main agent (Team Lead).
 func IsTeammate(agentID string, activeAgents []string) bool {
-	if agentID == "" {
-		return false
-	}
-	for _, id := range activeAgents {
-		if id == agentID {
-			return true
-		}
-	}
-	return false
+	return agentID != ""
 }
 
 // safeGitSubcommands are read-only git subcommands allowed in PLANNING.
