@@ -15,6 +15,7 @@ type WorkflowInput struct {
 type WorkflowStatus struct {
 	Phase                Phase              `json:"phase"`
 	Iteration            int                `json:"iteration"`
+	TotalIterations      int                `json:"total_iterations"`
 	ActiveAgents         []string           `json:"active_agents"`
 	EventCount           int                `json:"event_count"`
 	StartedAt            string             `json:"started_at"`

@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/eklemin/wf-agents/internal/model"
@@ -396,4 +397,106 @@ func TestIsSafeBashCommand_WithAbsolutePathWfClient(t *testing.T) {
 	// /path/to/bin/wf-client status foo should match "wf-client" prefix via basename extraction
 	assert.True(t, isSafeBashCommand("/path/to/bin/wf-client status foo"),
 		"/path/to/bin/wf-client status foo should match safe prefix 'wf-client' via basename extraction")
+}
+
+// --- splitBashCommands: && splitting and 2>&1 non-split ---
+
+func TestSplitBashCommands_DoubleAmpersand(t *testing.T) {
+	// "cmd1 && cmd2 && cmd3" should split into exactly 3 segments
+	parts := splitBashCommands("cmd1 && cmd2 && cmd3")
+	var nonempty []string
+	for _, p := range parts {
+		if s := strings.TrimSpace(p); s != "" {
+			nonempty = append(nonempty, s)
+		}
+	}
+	assert.Equal(t, 3, len(nonempty), "cmd1 && cmd2 && cmd3 should split into 3 segments, got: %v", nonempty)
+	assert.Equal(t, "cmd1", nonempty[0])
+	assert.Equal(t, "cmd2", nonempty[1])
+	assert.Equal(t, "cmd3", nonempty[2])
+}
+
+func TestSplitBashCommands_RedirectionNotSplit(t *testing.T) {
+	// "git log --oneline 2>&1" should NOT split at &1 — only && should split
+	parts := splitBashCommands("git log --oneline 2>&1")
+	var nonempty []string
+	for _, p := range parts {
+		if s := strings.TrimSpace(p); s != "" {
+			nonempty = append(nonempty, s)
+		}
+	}
+	assert.Equal(t, 1, len(nonempty), "2>&1 should NOT cause a split, got: %v", nonempty)
+}
+
+// --- && splitting security: chained forbidden git commands are caught ---
+
+func TestCheckToolPermission_AndAndGitLogAutoApproved(t *testing.T) {
+	// "pwd && git log --oneline" in REVIEWING should be auto-approved (both segments safe)
+	agentID, activeAgents := subagentArgs()
+	input, _ := json.Marshal(map[string]string{"command": "pwd && git log --oneline"})
+	result := CheckToolPermission(model.PhaseReviewing, "Bash", input, agentID, activeAgents)
+	assert.False(t, result.Denied, "pwd && git log --oneline should not be denied in REVIEWING")
+	assert.True(t, result.Allowed, "pwd && git log --oneline should be auto-approved in REVIEWING")
+}
+
+func TestCheckToolPermission_AndAndGitCommitDenied(t *testing.T) {
+	// "pwd && git commit -m 'x'" in REVIEWING should be denied (git commit forbidden)
+	agentID, activeAgents := subagentArgs()
+	input, _ := json.Marshal(map[string]string{"command": "pwd && git commit -m \"x\""})
+	result := CheckToolPermission(model.PhaseReviewing, "Bash", input, agentID, activeAgents)
+	assert.True(t, result.Denied, "pwd && git commit -m 'x' should be denied in REVIEWING — git commit not allowed")
+}
+
+func TestCheckToolPermission_GitLogRedirectionAutoApproved(t *testing.T) {
+	// "git log --oneline 2>&1" in REVIEWING should be auto-approved (no split at &1)
+	agentID, activeAgents := subagentArgs()
+	input, _ := json.Marshal(map[string]string{"command": "git log --oneline 2>&1"})
+	result := CheckToolPermission(model.PhaseReviewing, "Bash", input, agentID, activeAgents)
+	assert.False(t, result.Denied, "git log --oneline 2>&1 should not be denied in REVIEWING")
+	assert.True(t, result.Allowed, "git log --oneline 2>&1 should be auto-approved in REVIEWING")
+}
+
+func TestCheckToolPermission_EchoAndGitPushDenied(t *testing.T) {
+	// "echo hello && git push" in DEVELOPING should be denied (git push caught through &&)
+	agentID, activeAgents := subagentArgs()
+	input, _ := json.Marshal(map[string]string{"command": "echo hello && git push"})
+	result := CheckToolPermission(model.PhaseDeveloping, "Bash", input, agentID, activeAgents)
+	assert.True(t, result.Denied, "echo hello && git push should be denied in DEVELOPING — git push not allowed")
+}
+
+// --- gofmt in autoApproveBashPrefixes ---
+
+func TestCheckToolPermission_GofmtAutoApprovedInDeveloping(t *testing.T) {
+	// "gofmt ./..." in DEVELOPING should be auto-approved
+	agentID, activeAgents := subagentArgs()
+	input, _ := json.Marshal(map[string]string{"command": "gofmt ./..."})
+	result := CheckToolPermission(model.PhaseDeveloping, "Bash", input, agentID, activeAgents)
+	assert.False(t, result.Denied, "gofmt ./... should not be denied in DEVELOPING")
+	assert.True(t, result.Allowed, "gofmt ./... should be auto-approved in DEVELOPING")
+}
+
+func TestCheckToolPermission_GofmtDeniedInPlanning(t *testing.T) {
+	// "gofmt" in PLANNING should be denied — gofmt -w modifies files and is not allowed outside DEVELOPING/REVIEWING
+	agentID, activeAgents := teamLeadArgs()
+	input, _ := json.Marshal(map[string]string{"command": "gofmt -l ./..."})
+	result := CheckToolPermission(model.PhasePlanning, "Bash", input, agentID, activeAgents)
+	assert.True(t, result.Denied, "gofmt should be denied in PLANNING (file-modifying command)")
+}
+
+func TestCheckToolPermission_GofmtDeniedInFeedback(t *testing.T) {
+	// "gofmt" in FEEDBACK should be denied — only allowed in DEVELOPING/REVIEWING
+	agentID, activeAgents := subagentArgs()
+	input, _ := json.Marshal(map[string]string{"command": "gofmt -w ./..."})
+	result := CheckToolPermission(model.PhaseFeedback, "Bash", input, agentID, activeAgents)
+	assert.True(t, result.Denied, "gofmt should be denied in FEEDBACK (file-modifying command)")
+	assert.Contains(t, result.Reason, "gofmt is only allowed in DEVELOPING and REVIEWING phases")
+}
+
+func TestCheckToolPermission_GofmtDeniedInCommitting(t *testing.T) {
+	// "gofmt" in COMMITTING should be denied — only allowed in DEVELOPING/REVIEWING
+	agentID, activeAgents := subagentArgs()
+	input, _ := json.Marshal(map[string]string{"command": "gofmt ./..."})
+	result := CheckToolPermission(model.PhaseCommitting, "Bash", input, agentID, activeAgents)
+	assert.True(t, result.Denied, "gofmt should be denied in COMMITTING (file-modifying command)")
+	assert.Contains(t, result.Reason, "gofmt is only allowed in DEVELOPING and REVIEWING phases")
 }

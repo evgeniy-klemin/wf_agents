@@ -50,6 +50,8 @@ func main() {
 		cmdJournal(ctx, c, os.Args[2:])
 	case "complete":
 		cmdComplete(ctx, c, os.Args[2:])
+	case "reset-iterations":
+		cmdResetIterations(ctx, c, os.Args[2:])
 	case "list":
 		cmdList(ctx, c)
 	default:
@@ -63,12 +65,13 @@ func printUsage() {
 	fmt.Println(`Usage: wf-client <command> [args]
 
 Commands:
-  start      --session <id> --task <desc> [--repo <path>] [--max-iter <n>]
-  status     <workflow-id>
-  timeline   <workflow-id>
-  transition <workflow-id> --to <PHASE> [--reason <text>]
-  journal    <workflow-id> --message <text>
-  complete   <workflow-id>
+  start             --session <id> --task <desc> [--repo <path>] [--max-iter <n>]
+  status            <workflow-id>
+  timeline          <workflow-id>
+  transition        <workflow-id> --to <PHASE> [--reason <text>]
+  journal           <workflow-id> --message <text>
+  complete          <workflow-id>
+  reset-iterations  <workflow-id>
   list`)
 }
 
@@ -302,6 +305,22 @@ func cmdComplete(ctx context.Context, c client.Client, args []string) {
 		fmt.Fprintf(os.Stderr, "COMPLETE DENIED: %s → %s\nReason: %s\n", result.From, result.To, result.Reason)
 		os.Exit(1)
 	}
+}
+
+func cmdResetIterations(ctx context.Context, c client.Client, args []string) {
+	if len(args) < 1 {
+		log.Fatal("workflow-id required")
+	}
+	workflowID := resolveWorkflowID(args[0])
+
+	sessionID := strings.TrimPrefix(workflowID, "coding-session-")
+	err := c.SignalWorkflow(ctx, workflowID, "", wf.SignalResetIterations, sessionID)
+	if err != nil {
+		log.Fatalf("Signal failed: %v", err)
+	}
+	fmt.Printf("Iteration counter reset signal sent to %s\n", workflowID)
+	fmt.Println("The resettable iteration counter will be set to 1 on the next workflow task.")
+	fmt.Println("Total iterations counter is unchanged. You may now retry the RESPAWN transition.")
 }
 
 func cmdList(ctx context.Context, c client.Client) {

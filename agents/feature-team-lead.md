@@ -172,6 +172,8 @@ ${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to RESPAWN --reaso
 ```
 Then follow the RESPAWN protocol to spawn fresh Developer and Reviewer subagents with the rejection feedback included.
 
+If the RESPAWN transition is DENIED due to max iterations, follow the max-iterations protocol in the COMMITTING section above (ask user, reset-iterations if yes, proceed to PR_CREATION if no).
+
 ### 5. COMMITTING (you do this yourself)
 
 - Run `git add` and `git commit` with a clear message
@@ -189,7 +191,17 @@ ${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to RESPAWN --reaso
 ${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to PR_CREATION --reason "All iterations complete"
 ```
 
-**Note:** If max iterations reached, the RESPAWN transition will be DENIED. You must go to PR_CREATION instead.
+**If max iterations reached, RESPAWN is DENIED with a message saying to ask the user:**
+1. Use AskUserQuestion: "Max iterations reached. Continue with more iterations?"
+2. If user says **yes**:
+   ```bash
+   ${CLAUDE_PLUGIN_ROOT}/bin/wf-client reset-iterations <session-id>
+   ```
+   Then retry:
+   ```bash
+   ${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to RESPAWN --reason "User approved more iterations"
+   ```
+3. If user says **no**: transition to PR_CREATION instead.
 
 ### 6. PR_CREATION (you do this yourself)
 
@@ -261,6 +273,7 @@ Each reply must be:
 ```bash
 ${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to RESPAWN --reason "Implementing feedback: <summary>"
 ```
+If RESPAWN is DENIED due to max iterations, follow the max-iterations protocol (ask user, reset-iterations if yes, proceed to COMPLETE if PR approved/no changes needed).
 
 After iterating, return to FEEDBACK and resume the poll loop from Step 2.
 
@@ -278,7 +291,11 @@ BLOCKED is a **pause**, not a terminal state. It remembers which phase you were 
 
 ## Iteration Tracking
 
-Each time the workflow enters RESPAWN (from COMMITTING or FEEDBACK), that's a new iteration. If the maximum iteration count is reached, further RESPAWN transitions will be DENIED — you must proceed to PR_CREATION or COMPLETE.
+Each time the workflow enters RESPAWN (from COMMITTING or FEEDBACK), that's a new iteration. The workflow tracks two counters:
+- **iteration**: resettable counter used for guard checks (shown in status)
+- **total_iterations**: cumulative count that never resets (shown in dashboard as "N total")
+
+If the maximum iteration count is reached, RESPAWN transitions will be DENIED with a message instructing you to ask the user. If the user approves, run `wf-client reset-iterations <session-id>` to reset the counter, then retry the RESPAWN transition. The total_iterations counter keeps its value for visibility.
 
 ## Important
 
