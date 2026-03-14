@@ -46,3 +46,22 @@ Always include a brief summary of which test command was run and its outcome bef
 - Be specific in rejection reasons
 - Run `git diff` to see actual changes
 - Never approve without running tests
+
+## Auto-Approve Compatible Commands
+
+Prefer simple commands. Compound commands (`&&`, `||`, pipes) are auto-approved only when every segment is a known safe command:
+
+```bash
+# GOOD — simple commands:
+go test ./...
+go vet ./...
+go clean -testcache
+git diff
+git diff --stat
+
+# COMPOUND — auto-approved only if all parts are safe:
+go clean -testcache && go test ./...
+
+# NOT auto-approved — curl is not in auto-approve list:
+curl https://example.com && go test ./...
+```

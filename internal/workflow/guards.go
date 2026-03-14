@@ -3,6 +3,7 @@ package workflow
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/eklemin/wf-agents/internal/model"
@@ -53,7 +54,10 @@ func guardNoActiveAgents(s *sessionState, _ map[string]string) string {
 	if len(s.activeAgents) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("cannot leave RESPAWN with %d active subagent(s) — kill old agents before spawning new ones", len(s.activeAgents))
+	return fmt.Sprintf(
+		"cannot leave RESPAWN with %d active subagent(s) — kill old agents before spawning new ones",
+		len(s.activeAgents),
+	)
 }
 
 // guardPRChecksPassed requires evidence["pr_checks_pass"] == "true".
@@ -150,8 +154,9 @@ func validateTransition(s *sessionState, from, to model.Phase, evidence map[stri
 
 // ToolPermissionResult indicates whether a tool use is allowed.
 type ToolPermissionResult struct {
-	Denied bool
-	Reason string
+	Denied  bool
+	Allowed bool // explicitly auto-approve (bypass permission prompt)
+	Reason  string
 }
 
 // fileWritingTools are tools that modify files.
@@ -178,7 +183,13 @@ var readOnlyTools = map[string]bool{
 // CheckToolPermission checks whether a tool is allowed given the phase, tool name,
 // agent ID, and the current set of active agents.
 // This centralizes ALL permission logic alongside transition guards.
-func CheckToolPermission(phase model.Phase, toolName string, toolInput json.RawMessage, agentID string, activeAgents []string) ToolPermissionResult {
+func CheckToolPermission(
+	phase model.Phase,
+	toolName string,
+	toolInput json.RawMessage,
+	agentID string,
+	activeAgents []string,
+) ToolPermissionResult {
 	isTeamLead := !IsSubagent(agentID, activeAgents)
 
 	// Team Lead cannot edit files directly — must delegate to Developer subagent.
@@ -190,9 +201,9 @@ func CheckToolPermission(phase model.Phase, toolName string, toolInput json.RawM
 		}
 	}
 
-	// Read-only tools are always allowed
+	// Read-only tools are always allowed — explicitly auto-approve to bypass permission prompts
 	if readOnlyTools[toolName] {
-		return ToolPermissionResult{Denied: false}
+		return ToolPermissionResult{Denied: false, Allowed: true}
 	}
 
 	// PLANNING and RESPAWN: all file writes are forbidden (read-only phases)
@@ -208,6 +219,10 @@ func CheckToolPermission(phase model.Phase, toolName string, toolInput json.RawM
 		return checkBashPermission(phase, toolInput)
 	}
 
+	// If we get here, the tool is allowed. Auto-approve for subagents to bypass permission prompts.
+	if !isTeamLead {
+		return ToolPermissionResult{Denied: false, Allowed: true}
+	}
 	return ToolPermissionResult{Denied: false}
 }
 
@@ -242,6 +257,69 @@ var safeGitStashSubcommands = map[string]bool{
 	"list": true, "show": true,
 }
 
+// autoApproveBashPrefixes is a narrow list of commands safe to auto-approve
+// (bypass permission prompts) in any phase. Much smaller than safeBashPrefixes
+// which is used for PLANNING whitelist only.
+var autoApproveBashPrefixes = []string{
+	"go test", "go vet", "go build", "go list", "go mod", "go clean",
+	"npm test", "npm run lint", "cargo test", "cargo check",
+	"python -m pytest", "pytest",
+	"wf-client",
+}
+
+func isAutoApproveBashCommand(cmd string) bool {
+	for _, prefix := range autoApproveBashPrefixes {
+		if matchesBashPrefix(cmd, prefix) {
+			return true
+		}
+	}
+	// Also try basename matching for absolute paths
+	firstWord, rest, _ := strings.Cut(cmd, " ")
+	if strings.Contains(firstWord, "/") {
+		base := filepath.Base(firstWord)
+		cmdWithBase := base
+		if rest != "" {
+			cmdWithBase = base + " " + rest
+		}
+		for _, prefix := range autoApproveBashPrefixes {
+			if matchesBashPrefix(cmdWithBase, prefix) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// autoApproveGitSubcommands are git subcommands safe to auto-approve (truly read-only).
+var autoApproveGitSubcommands = map[string]bool{
+	"status": true, "log": true, "diff": true, "show": true,
+	"branch": true, "remote": true, "tag": true,
+	"rev-parse": true, "ls-files": true, "ls-tree": true,
+	"blame": true, "shortlog": true,
+}
+
+func isAutoApproveGitCommand(seg string) bool {
+	if !strings.HasPrefix(seg, "git ") {
+		return false
+	}
+	parts := strings.Fields(seg)
+	if len(parts) < 2 {
+		return false
+	}
+	// Skip flags to find subcommand
+	idx := 1
+	for idx < len(parts) && strings.HasPrefix(parts[idx], "-") {
+		idx++
+		if idx < len(parts) && (parts[idx-1] == "-C" || parts[idx-1] == "-c") {
+			idx++
+		}
+	}
+	if idx >= len(parts) {
+		return false
+	}
+	return autoApproveGitSubcommands[parts[idx]]
+}
+
 // safeBashPrefixes are read-only bash commands allowed in PLANNING.
 var safeBashPrefixes = []string{
 	"ls", "cat", "head", "tail", "less", "more", "wc", "file",
@@ -259,6 +337,7 @@ var safeBashPrefixes = []string{
 	"env", "printenv", "set", "export",
 	"date", "uname", "whoami", "hostname",
 	"true", "false", "test", "[",
+	"wf-client",
 }
 
 // checkBashPermission enforces bash command restrictions per phase.
@@ -282,6 +361,7 @@ func checkBashPermission(phase model.Phase, toolInput json.RawMessage) ToolPermi
 	// Other phases: blacklist approach — block specific git commands.
 	// Split on pipes/chains so "git add . && git commit" is caught.
 	exemptions := gitExemptions[phase]
+	allSegmentsSafe := true
 	for _, segment := range splitBashCommands(cmd) {
 		seg := strings.TrimSpace(segment)
 		if seg == "" {
@@ -304,8 +384,17 @@ func checkBashPermission(phase model.Phase, toolInput json.RawMessage) ToolPermi
 				}
 			}
 		}
+		// Track whether every segment is in the auto-approve list (for auto-allow).
+		// Only truly read-only git commands are auto-approved; git config etc. are not.
+		isGitReadOnly := isAutoApproveGitCommand(seg)
+		if !isAutoApproveBashCommand(seg) && !isGitReadOnly {
+			allSegmentsSafe = false
+		}
 	}
 
+	if allSegmentsSafe {
+		return ToolPermissionResult{Denied: false, Allowed: true}
+	}
 	return ToolPermissionResult{Denied: false}
 }
 
@@ -322,7 +411,10 @@ func checkPlanningBash(cmd string) ToolPermissionResult {
 			if !isAllowedGitInPlanning(seg) {
 				return ToolPermissionResult{
 					Denied: true,
-					Reason: fmt.Sprintf("git command %q is not allowed in PLANNING phase — only read-only git operations permitted. Transition to RESPAWN first.", seg),
+					Reason: fmt.Sprintf(
+						"git command %q is not allowed in PLANNING phase — only read-only git operations permitted. Transition to RESPAWN first.",
+						seg,
+					),
 				}
 			}
 			continue
@@ -334,7 +426,10 @@ func checkPlanningBash(cmd string) ToolPermissionResult {
 
 		return ToolPermissionResult{
 			Denied: true,
-			Reason: fmt.Sprintf("Command %q is not in the allowed list for PLANNING phase — no repository modifications allowed. Transition to RESPAWN to begin development.", truncateCmd(seg, 60)),
+			Reason: fmt.Sprintf(
+				"Command %q is not in the allowed list for PLANNING phase — no repository modifications allowed. Transition to RESPAWN to begin development.",
+				truncateCmd(seg, 60),
+			),
 		}
 	}
 
@@ -352,7 +447,8 @@ func isAllowedGitInPlanning(cmd string) bool {
 	for idx < len(parts) && strings.HasPrefix(parts[idx], "-") {
 		idx++
 		// Skip flag value for flags that take arguments
-		if idx < len(parts) && (parts[idx-1] == "-C" || parts[idx-1] == "-c" || parts[idx-1] == "--git-dir" || parts[idx-1] == "--work-tree") {
+		if idx < len(parts) &&
+			(parts[idx-1] == "-C" || parts[idx-1] == "-c" || parts[idx-1] == "--git-dir" || parts[idx-1] == "--work-tree") {
 			idx++
 		}
 	}
@@ -374,10 +470,28 @@ func isAllowedGitInPlanning(cmd string) bool {
 }
 
 // isSafeBashCommand checks if a command matches any safe prefix for PLANNING.
+// It first tries matching the command as-is, then strips path components from
+// the first word so that "/usr/bin/ls -la" matches prefix "ls" and
+// "/path/to/bin/wf-client status" matches prefix "wf-client".
 func isSafeBashCommand(cmd string) bool {
+	// First try matching as-is
 	for _, prefix := range safeBashPrefixes {
 		if matchesBashPrefix(cmd, prefix) {
 			return true
+		}
+	}
+	// If first word contains a path, try matching by basename
+	firstWord, rest, _ := strings.Cut(cmd, " ")
+	if strings.Contains(firstWord, "/") {
+		base := filepath.Base(firstWord)
+		cmdWithBase := base
+		if rest != "" {
+			cmdWithBase = base + " " + rest
+		}
+		for _, prefix := range safeBashPrefixes {
+			if matchesBashPrefix(cmdWithBase, prefix) {
+				return true
+			}
 		}
 	}
 	return false

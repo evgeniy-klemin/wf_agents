@@ -148,6 +148,29 @@ func main() {
 			os.Exit(2)
 		}
 
+		if decision.Allowed {
+			// Auto-approve: bypass Claude Code permission prompt
+			sendHookEvent(ctx, c, workflowID, model.SignalHookEvent{
+				HookType:  "PreToolUse",
+				SessionID: input.SessionID,
+				Tool:      input.ToolName,
+				Detail:    detail,
+			})
+			currentStatus := queryStatus(ctx, c, workflowID)
+			currentPhase := currentStatus.Phase
+			instructions := phaseInstructions(currentPhase)
+			out := hookOutput{
+				HookSpecificOutput: &hookSpecificOutput{
+					HookEventName:            "PreToolUse",
+					PermissionDecision:       "allow",
+					PermissionDecisionReason: "Safe command auto-approved by workflow",
+					AdditionalContext:        fmt.Sprintf("[Workflow Phase: %s] %s", currentPhase, instructions),
+				},
+			}
+			json.NewEncoder(os.Stdout).Encode(out)
+			os.Exit(0)
+		}
+
 		// Tool allowed — send event + inject context
 		sendHookEvent(ctx, c, workflowID, model.SignalHookEvent{
 			HookType:  "PreToolUse",
@@ -265,6 +288,39 @@ func main() {
 		if input.Prompt != "" {
 			setTask(ctx, c, workflowID, input.Prompt)
 		}
+
+	case "PermissionRequest":
+		// Auto-allow safe commands when Claude Code would prompt the user
+		prStatus := queryStatus(ctx, c, workflowID)
+		prDecision := wf.CheckToolPermission(prStatus.Phase, input.ToolName, input.ToolInput, input.AgentID, prStatus.ActiveAgents)
+
+		if prDecision.Allowed {
+			detail["auto_allowed"] = "true"
+			sendHookEvent(ctx, c, workflowID, model.SignalHookEvent{
+				HookType:  "PermissionRequest",
+				SessionID: input.SessionID,
+				Tool:      input.ToolName,
+				Detail:    detail,
+			})
+			out := map[string]interface{}{
+				"hookSpecificOutput": map[string]interface{}{
+					"hookEventName": "PermissionRequest",
+					"decision": map[string]interface{}{
+						"behavior": "allow",
+					},
+				},
+			}
+			json.NewEncoder(os.Stdout).Encode(out)
+			os.Exit(0)
+		}
+
+		// Not auto-allowed — log to Temporal and let Claude Code show the permission prompt
+		sendHookEvent(ctx, c, workflowID, model.SignalHookEvent{
+			HookType:  "PermissionRequest",
+			SessionID: input.SessionID,
+			Tool:      input.ToolName,
+			Detail:    detail,
+		})
 
 	default:
 		sendHookEvent(ctx, c, workflowID, model.SignalHookEvent{
