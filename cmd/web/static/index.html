@@ -135,6 +135,7 @@
 <script>
 // ---- State ----
 let selectedWorkflowID = null;
+let selectedRunID = null; // disambiguates multiple runs with the same workflow ID
 let workflowsCache = []; // cached list from last loadWorkflows
 let currentFilter = 'all';
 let refreshTimer = null;
@@ -211,10 +212,11 @@ async function apiPost(path) {
   return resp.json();
 }
 
-async function terminateWorkflow(wfID) {
+async function terminateWorkflow(wfID, runID) {
   if (!confirm(`Terminate workflow ${wfID}? This will stop the Temporal workflow and cannot be undone.`)) return;
   try {
-    await apiPost(`/api/terminate/${encodeURIComponent(wfID)}`);
+    const runParam = runID ? `?run_id=${encodeURIComponent(runID)}` : '';
+    await apiPost(`/api/terminate/${encodeURIComponent(wfID)}${runParam}`);
     await refreshAll();
   } catch (e) {
     alert('Failed to terminate: ' + e.message);
@@ -255,7 +257,7 @@ async function loadWorkflows() {
             ? 'bg-accent/20 border border-accent/30'
             : 'hover:bg-surface-lighter border border-transparent'
         }" data-id="${w.workflow_id}">
-        <button onclick="selectWorkflow('${w.workflow_id}')" class="w-full text-left px-3 py-2.5">
+        <button onclick="selectWorkflow('${w.workflow_id}', '${w.run_id}')" class="w-full text-left px-3 py-2.5">
           <div class="flex items-center justify-between">
             <span class="text-sm font-medium text-gray-200 truncate">${w.task ? esc(truncate(w.task, 35)) : w.session_id}</span>
             <span class="flex-shrink-0 w-2 h-2 rounded-full ${dotColor}"></span>
@@ -270,7 +272,7 @@ async function loadWorkflows() {
           </div>
         </button>
         ${stuck && w.status === 'RUNNING' ? `<div class="px-3 pb-2">
-          <button onclick="event.stopPropagation();terminateWorkflow('${w.workflow_id}')"
+          <button onclick="event.stopPropagation();terminateWorkflow('${w.workflow_id}', '${w.run_id}')"
             class="w-full px-2 py-1 text-xs font-medium text-orange-300 bg-orange-900/30 hover:bg-orange-900/50 border border-orange-700/40 rounded transition-colors">
             Terminate stuck session
           </button>
@@ -297,8 +299,9 @@ function setConnectionStatus(ok) {
 }
 
 // ---- Workflow Selection ----
-async function selectWorkflow(wfID) {
+async function selectWorkflow(wfID, runID) {
   selectedWorkflowID = wfID;
+  selectedRunID = runID || null;
   document.getElementById('empty-state').classList.add('hidden');
   document.getElementById('workflow-view').classList.remove('hidden');
 
@@ -311,14 +314,15 @@ async function selectWorkflow(wfID) {
     }
   });
 
-  await loadWorkflowDetail(wfID);
+  await loadWorkflowDetail(wfID, runID);
 }
 
-async function loadWorkflowDetail(wfID) {
+async function loadWorkflowDetail(wfID, runID) {
   try {
+    const runParam = runID ? `?run_id=${encodeURIComponent(runID)}` : '';
     const [status, timeline] = await Promise.all([
-      apiGet(`/api/workflows/${encodeURIComponent(wfID)}/status`),
-      apiGet(`/api/workflows/${encodeURIComponent(wfID)}/timeline`),
+      apiGet(`/api/workflows/${encodeURIComponent(wfID)}/status${runParam}`),
+      apiGet(`/api/workflows/${encodeURIComponent(wfID)}/timeline${runParam}`),
     ]);
 
     // Determine session end time: for finished sessions use last_updated_at, otherwise now
@@ -376,7 +380,7 @@ function renderStatusBar(wfID, status, timeline, sessionEndTime) {
         <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
         <strong>Stuck</strong> (idle ${formatDuration(idleMs)})
       </span>
-      <button onclick="terminateWorkflow('${wfID}')"
+      <button onclick="terminateWorkflow('${wfID}', selectedRunID)"
         class="px-2 py-0.5 text-xs font-medium text-orange-300 bg-orange-900/30 hover:bg-orange-900/50 border border-orange-700/40 rounded transition-colors">
         Terminate
       </button>`
@@ -939,7 +943,7 @@ function filterEvents(type) {
     }
   });
   // Re-render if we have data
-  if (selectedWorkflowID) loadWorkflowDetail(selectedWorkflowID);
+  if (selectedWorkflowID) loadWorkflowDetail(selectedWorkflowID, selectedRunID);
 }
 
 // ---- Duration formatting ----
@@ -975,7 +979,7 @@ function timeAgo(iso) {
 // ---- Refresh ----
 async function refreshAll() {
   await loadWorkflows();
-  if (selectedWorkflowID) await loadWorkflowDetail(selectedWorkflowID);
+  if (selectedWorkflowID) await loadWorkflowDetail(selectedWorkflowID, selectedRunID);
 }
 
 // Auto-refresh every 3 seconds

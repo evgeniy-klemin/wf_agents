@@ -54,6 +54,7 @@ type server struct {
 // workflowListItem is a summary for the workflow list.
 type workflowListItem struct {
 	WorkflowID    string `json:"workflow_id"`
+	RunID         string `json:"run_id"`
 	SessionID     string `json:"session_id"`
 	Status        string `json:"status"`
 	Phase         string `json:"phase,omitempty"`
@@ -108,6 +109,7 @@ func (s *server) handleListWorkflows(w http.ResponseWriter, r *http.Request) {
 
 		item := workflowListItem{
 			WorkflowID: wfID,
+			RunID:      wfe.Execution.RunId,
 			SessionID:  sessionID,
 			Status:     status,
 			Task:       task,
@@ -145,13 +147,14 @@ func (s *server) handleWorkflowDetail(w http.ResponseWriter, r *http.Request) {
 
 	workflowID := resolveWorkflowID(parts[0])
 	action := parts[1]
+	runID := r.URL.Query().Get("run_id")
 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
 	switch action {
 	case "status":
-		resp, err := s.temporal.QueryWorkflow(ctx, workflowID, "", wf.QueryStatus)
+		resp, err := s.temporal.QueryWorkflow(ctx, workflowID, runID, wf.QueryStatus)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Query failed: %v", err), http.StatusInternalServerError)
 			return
@@ -164,7 +167,7 @@ func (s *server) handleWorkflowDetail(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, status)
 
 	case "timeline":
-		resp, err := s.temporal.QueryWorkflow(ctx, workflowID, "", wf.QueryTimeline)
+		resp, err := s.temporal.QueryWorkflow(ctx, workflowID, runID, wf.QueryTimeline)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Query failed: %v", err), http.StatusInternalServerError)
 			return
@@ -192,11 +195,12 @@ func (s *server) handleTerminate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "workflow ID required", http.StatusBadRequest)
 		return
 	}
+	runID := r.URL.Query().Get("run_id")
 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	err := s.temporal.TerminateWorkflow(ctx, wfID, "", "terminated via dashboard (stuck session)")
+	err := s.temporal.TerminateWorkflow(ctx, wfID, runID, "terminated via dashboard")
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to terminate: %v", err), http.StatusInternalServerError)
 		return
