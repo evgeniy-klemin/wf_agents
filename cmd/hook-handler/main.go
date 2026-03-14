@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -59,9 +60,40 @@ func main() {
 	log.SetFlags(0)
 	log.SetOutput(os.Stderr)
 
+	// Read raw stdin for diagnostics, then decode
+	rawInput, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		log.Fatalf("Failed to read stdin: %v", err)
+	}
+
 	var input claudeHookInput
-	if err := json.NewDecoder(os.Stdin).Decode(&input); err != nil {
+	if err := json.Unmarshal(rawInput, &input); err != nil {
 		log.Fatalf("Failed to parse hook input: %v", err)
+	}
+
+	// Dump raw hook input to log file for diagnostics
+	logDir := filepath.Join(os.TempDir(), "wf-agents-hook-logs")
+	_ = os.MkdirAll(logDir, 0755)
+	logFile := filepath.Join(logDir, fmt.Sprintf("%s-%s.json", input.HookEventName, input.SessionID))
+	_ = os.WriteFile(logFile, rawInput, 0644)
+
+	// Capture any fields not in our struct
+	var rawFields map[string]json.RawMessage
+	_ = json.Unmarshal(rawInput, &rawFields)
+	// Log unknown fields to stderr for discovery
+	knownFields := map[string]bool{
+		"session_id": true, "hook_event_name": true, "cwd": true,
+		"permission_mode": true, "transcript_path": true,
+		"tool_name": true, "tool_input": true, "tool_response": true,
+		"tool_use_id": true, "agent_id": true, "agent_type": true,
+		"prompt": true, "source": true, "model": true,
+		"last_assistant_message": true, "error": true,
+		"teammate_name": true, "team_name": true,
+	}
+	for k := range rawFields {
+		if !knownFields[k] {
+			fmt.Fprintf(os.Stderr, "UNKNOWN FIELD in %s: %s = %s\n", input.HookEventName, k, string(rawFields[k]))
+		}
 	}
 
 	if input.SessionID == "" {
@@ -414,6 +446,21 @@ func buildDetail(input claudeHookInput) map[string]string {
 	}
 	if input.AgentID != "" {
 		d["agent_id"] = input.AgentID
+	}
+	if input.AgentType != "" {
+		d["agent_type"] = input.AgentType
+	}
+	if input.Source != "" {
+		d["source"] = input.Source
+	}
+	if input.Model != "" {
+		d["model"] = input.Model
+	}
+	if input.TeammateName != "" {
+		d["teammate_name"] = input.TeammateName
+	}
+	if input.TeamName != "" {
+		d["team_name"] = input.TeamName
 	}
 	return d
 }
