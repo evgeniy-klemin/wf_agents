@@ -48,8 +48,9 @@ func TestRemoveSessionMarker_NoErrorWhenFileAbsent(t *testing.T) {
 	removeSessionMarker(sessionID)
 }
 
-// TestStartWorkflowOptions_ReusePolicy verifies that buildStartOptions returns
-// StartWorkflowOptions with WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE set.
+// TestStartWorkflowOptions_ReusePolicy verifies that buildStartOptions
+// allows workflow ID reuse only after the previous execution has closed,
+// preventing parallel workflows with the same ID.
 func TestStartWorkflowOptions_ReusePolicy(t *testing.T) {
 	opts := buildStartOptions("coding-session-test", "coding-session")
 	want := enumspb.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE

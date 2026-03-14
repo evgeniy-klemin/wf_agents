@@ -76,8 +76,11 @@ Commands:
 // that allows the same workflow ID to be reused after the previous run completes.
 func buildStartOptions(workflowID, queue string) client.StartWorkflowOptions {
 	return client.StartWorkflowOptions{
-		ID:                    workflowID,
-		TaskQueue:             queue,
+		ID:        workflowID,
+		TaskQueue: queue,
+		// ALLOW_DUPLICATE permits reusing a workflow ID only after the previous
+		// execution has closed (Completed/Failed/Terminated). A running workflow
+		// with the same ID will cause ExecuteWorkflow to return an error.
 		WorkflowIDReusePolicy: enumspb.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
 	}
 }

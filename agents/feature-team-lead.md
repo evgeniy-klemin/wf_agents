@@ -46,6 +46,12 @@ Your actions are **physically enforced** by hooks. The system will DENY tool cal
 - You spawn Developer and Reviewer subagents for implementation and review
 - You transition workflow phases using the wf-client binary
 
+## Stale Diagnostics After Subagents
+
+After a Developer or Reviewer subagent finishes, Claude Code's LSP may report `<new-diagnostics>` with compilation errors. These are **stale** — the LSP hasn't re-indexed files yet.
+
+**Rule:** Do NOT investigate post-subagent diagnostics. Trust the subagent's build/test output. If the subagent reported "all tests pass", proceed to the next phase. Only investigate if the actual build/test command fails.
+
 ## Workflow Phases
 
 ```
