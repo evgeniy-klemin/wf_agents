@@ -44,6 +44,7 @@ func CodingSessionWorkflow(ctx workflow.Context, input model.WorkflowInput) (mod
 	if state.maxIter == 0 {
 		state.maxIter = 5
 	}
+	state.doneCh = workflow.NewChannel(ctx)
 
 	state.addEvent(ctx, model.EventTransition, input.SessionID, map[string]string{
 		"to":     string(model.PhasePlanning),
@@ -132,6 +133,13 @@ func CodingSessionWorkflow(ctx workflow.Context, input model.WorkflowInput) (mod
 			logger.Info("Iteration counter reset", "old_iteration", old, "total_iterations", state.totalIterations)
 		})
 
+		// doneCh unblocks the selector when a terminal phase is reached via Update handler
+		sel.AddReceive(state.doneCh, func(ch workflow.ReceiveChannel, more bool) {
+			var v bool
+			ch.Receive(ctx, &v)
+			// Loop condition will now re-evaluate and exit
+		})
+
 		// Drain legacy signals (ignore them — transitions must use UpdateWorkflow)
 		sel.AddReceive(legacyTransitionCh, func(ch workflow.ReceiveChannel, more bool) {
 			var req model.SignalTransition
@@ -169,6 +177,7 @@ type sessionState struct {
 	phaseEnteredAt  time.Time
 	task            string
 	maxIter         int
+	doneCh          workflow.Channel // internal channel to unblock selector when terminal state is reached
 }
 
 func (s *sessionState) addEvent(ctx workflow.Context, evtType model.EventType, sessionID string, detail map[string]string) {
@@ -245,6 +254,10 @@ func (s *sessionState) handleTransition(ctx workflow.Context, req model.SignalTr
 		"iteration":        fmt.Sprintf("%d", s.iteration),
 		"total_iterations": fmt.Sprintf("%d", s.totalIterations),
 	})
+
+	if req.To.IsTerminal() {
+		s.doneCh.Send(ctx, true)
+	}
 
 	return result
 }

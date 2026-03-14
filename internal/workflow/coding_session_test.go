@@ -880,6 +880,45 @@ func TestGuardMaxIterMessageMentionsReset(t *testing.T) {
 	t.Fatal("should have found a denial event")
 }
 
+// TestWorkflowCompletesAfterCompleteTransition verifies that the workflow loop
+// exits and the workflow returns successfully after a COMPLETE transition.
+// This is a focused regression test for the bug where sel.Select blocked
+// indefinitely after the Update handler set the phase to COMPLETE.
+func TestWorkflowCompletesAfterCompleteTransition(t *testing.T) {
+	env := setupEnv(t)
+
+	// Minimal path to COMPLETE
+	registerTransitions(env, t, []model.Phase{
+		model.PhaseRespawn,
+		model.PhaseDeveloping,
+		model.PhaseReviewing,
+		model.PhaseCommitting,
+		model.PhasePRCreation,
+		model.PhaseFeedback,
+		model.PhaseComplete,
+	})
+
+	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
+		SessionID: "test", TaskDescription: "test task", MaxIterations: 5,
+	})
+
+	require.True(t, env.IsWorkflowCompleted(), "workflow should be completed after COMPLETE transition")
+	require.NoError(t, env.GetWorkflowError(), "workflow should return no error")
+
+	var timeline model.WorkflowTimeline
+	require.NoError(t, env.GetWorkflowResult(&timeline))
+
+	// Verify the last transition event is COMPLETE
+	var lastTransition model.WorkflowEvent
+	for _, e := range timeline.Events {
+		if e.Type == model.EventTransition {
+			lastTransition = e
+		}
+	}
+	assert.Equal(t, string(model.PhaseComplete), lastTransition.Detail["to"],
+		"last transition should be to COMPLETE")
+}
+
 func TestRespawnGuardActiveAgents(t *testing.T) {
 	// Test the RESPAWN → DEVELOPING guard: must deny when subagents still active.
 	// We verify the guard condition inline since handleTransition needs a workflow context.
