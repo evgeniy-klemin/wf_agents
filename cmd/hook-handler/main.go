@@ -88,62 +88,6 @@ func main() {
 
 	detail := buildDetail(input)
 
-	// --- Auto-BLOCKED / auto-unblock logic (before per-event handling) ---
-	//
-	// "Blocking" events: Notification → always transition TO BLOCKED
-	// Stop → only blocking if it comes from the Team Lead (empty AgentID or not in activeAgents).
-	//   Teammates (non-empty AgentID in activeAgents) finishing their turn is normal — they idle
-	//   while Lead and other teammates continue working. Only Team Lead's Stop means "waiting for input".
-	// TeammateIdle is handled separately (phase-aware) in its case below.
-	// All other events from Claude Code → transition BACK from BLOCKED
-	isBlockingEvent := input.HookEventName == "Notification"
-	if input.HookEventName == "Stop" {
-		// Stop is blocking only if it comes from the Team Lead (not a teammate).
-		// Team Lead has empty AgentID; teammates have non-empty AgentID in activeAgents.
-		if input.AgentID == "" {
-			isBlockingEvent = true
-		} else {
-			// Check if this agent is a known teammate (present in activeAgents).
-			status := queryStatus(ctx, c, workflowID)
-			isTeammate := false
-			for _, id := range status.ActiveAgents {
-				if id == input.AgentID {
-					isTeammate = true
-					break
-				}
-			}
-			if !isTeammate {
-				// Unknown agent or unrecognized ID — treat as blocking (safe default).
-				isBlockingEvent = true
-			}
-			// If teammate — isBlockingEvent stays false; no auto-BLOCKED on teammate Stop.
-		}
-	}
-
-	if isBlockingEvent {
-		phase := queryPhase(ctx, c, workflowID)
-		autoBlockPhases := map[model.Phase]bool{
-			model.PhasePlanning:   true,
-			model.PhaseDeveloping: true,
-			model.PhaseReviewing:  true,
-			model.PhaseCommitting: true,
-			model.PhaseRespawn:    true,
-			model.PhasePRCreation: true,
-			model.PhaseFeedback:   true,
-		}
-		if autoBlockPhases[phase] {
-			autoTransition(ctx, c, workflowID, input.SessionID, model.PhaseBlocked,
-				fmt.Sprintf("auto: %s in %s", input.HookEventName, phase))
-		}
-	} else if input.HookEventName != "SessionStart" && input.HookEventName != "TeammateIdle" {
-		// Any active event (tool use, user prompt, teammate, etc.) → auto-unblock
-		status := queryStatus(ctx, c, workflowID)
-		if status.Phase == model.PhaseBlocked && status.PreBlockedPhase != "" {
-			autoTransition(ctx, c, workflowID, input.SessionID, status.PreBlockedPhase,
-				fmt.Sprintf("auto: %s received, returning to %s", input.HookEventName, status.PreBlockedPhase))
-		}
-	}
-
 	switch input.HookEventName {
 	case "PreToolUse":
 		status := queryStatus(ctx, c, workflowID)
@@ -266,20 +210,32 @@ func main() {
 			Detail:    detail,
 		})
 
-		// In Agent Teams, teammates idle intentionally during active work phases
-		// (e.g., Developer done, waiting for next instruction from Team Lead).
-		// Only auto-BLOCKED if idle in a phase where no teammate should be idle.
+		// Determine who is idle and enforce appropriate constraints.
 		phase := queryPhase(ctx, c, workflowID)
-		teammateIdleExpected := map[model.Phase]bool{
-			model.PhaseDeveloping: true,
-			model.PhaseReviewing:  true,
-			model.PhaseCommitting: true,
-			model.PhasePRCreation: true,
+		status := queryStatus(ctx, c, workflowID)
+		isTeammate := false
+		for _, id := range status.ActiveAgents {
+			if id == input.AgentID {
+				isTeammate = true
+				break
+			}
 		}
-		if !teammateIdleExpected[phase] {
-			autoTransition(ctx, c, workflowID, input.SessionID, model.PhaseBlocked,
-				fmt.Sprintf("auto: TeammateIdle in %s", phase))
+
+		if !isTeammate {
+			// This is the Team Lead going idle.
+			// Lead can only idle in BLOCKED or COMPLETE.
+			if phase != model.PhaseBlocked && phase != model.PhaseComplete {
+				fmt.Fprintf(os.Stderr, "Lead cannot go idle in %s. Transition to BLOCKED or COMPLETE, or continue working.\n", phase)
+				os.Exit(2)
+			}
+		} else if input.AgentType != "" && strings.Contains(strings.ToLower(input.AgentType), "developer") {
+			// Developer going idle.
+			if phase == model.PhaseDeveloping {
+				fmt.Fprintf(os.Stderr, "Developer cannot go idle in DEVELOPING without finishing work. Complete your task and message the Team Lead.\n")
+				os.Exit(2)
+			}
 		}
+		// Reviewer idle: always allowed (no exit 2).
 
 	case "Stop":
 		sendHookEvent(ctx, c, workflowID, model.SignalHookEvent{
@@ -373,9 +329,8 @@ func queryPhase(ctx context.Context, c client.Client, workflowID string) model.P
 // phaseInstructions returns comprehensive enforcement instructions for the current phase.
 // Injected as additionalContext on every PreToolUse — this is the PRIMARY mechanism
 // that keeps Claude on track (since plugin CLAUDE.md is project docs, not workflow rules).
-// For most phases, content is loaded from states/<phase>.md under CLAUDE_PLUGIN_ROOT
-// and placeholders ({{WF_CLIENT}}, {{PLUGIN_ROOT}}, {{AGENT_FILE}}) are substituted.
-// COMPLETE and BLOCKED are kept as hardcoded one-liners.
+// Content is loaded from states/<phase>.md under CLAUDE_PLUGIN_ROOT and placeholders
+// ({{WF_CLIENT}}, {{PLUGIN_ROOT}}, {{AGENT_FILE}}) are substituted.
 func phaseInstructions(phase model.Phase) string {
 	wfc := wfClientBin()
 
@@ -394,18 +349,6 @@ func phaseInstructions(phase model.Phase) string {
 	// Enforcement-only preamble for phases where teammates act
 	enforcementPreamble := "If a tool call is denied, DO NOT retry — follow the denial reason.\n\n"
 
-	// Keep simple one-liners hardcoded — no file needed.
-	switch phase {
-	case model.PhaseComplete:
-		return "PHASE: COMPLETE. Workflow finished. No further actions needed."
-	case model.PhaseBlocked:
-		return fmt.Sprintf(`PHASE: BLOCKED — Paused, waiting for human intervention.
-
-DO NOT proceed. DO NOT attempt transitions except back to the pre-blocked phase.
-Check: %s status <id> to see pre_blocked_phase.
-When unblocked: transition ONLY to the pre-blocked phase.`, wfc)
-	}
-
 	// Map each phase to its state file name and the appropriate preamble.
 	type phaseConfig struct {
 		filename string
@@ -419,6 +362,8 @@ When unblocked: transition ONLY to the pre-blocked phase.`, wfc)
 		model.PhaseCommitting: {"committing.md", teamLeadPreamble},
 		model.PhasePRCreation: {"pr_creation.md", teamLeadPreamble},
 		model.PhaseFeedback:   {"feedback.md", teamLeadPreamble},
+		model.PhaseBlocked:    {"blocked.md", teamLeadPreamble},
+		model.PhaseComplete:   {"complete.md", teamLeadPreamble},
 	}
 
 	cfg, ok := configs[phase]
@@ -469,36 +414,6 @@ func buildDetail(input claudeHookInput) map[string]string {
 		d["error"] = input.Error
 	}
 	return d
-}
-
-// autoTransition performs a workflow transition via UpdateWorkflow (same path as wf-client).
-// Errors are logged but not fatal — the workflow continues even if auto-transition fails.
-func autoTransition(ctx context.Context, c client.Client, workflowID, sessionID string, to model.Phase, reason string) {
-	req := model.SignalTransition{
-		To:        to,
-		SessionID: sessionID,
-		Reason:    reason,
-	}
-	handle, err := c.UpdateWorkflow(ctx, client.UpdateWorkflowOptions{
-		WorkflowID:   workflowID,
-		UpdateName:   wf.UpdateTransition,
-		Args:         []interface{}{req},
-		WaitForStage: client.WorkflowUpdateStageCompleted,
-	})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: auto-transition to %s failed: %v\n", to, err)
-		return
-	}
-	var result model.TransitionResult
-	if err := handle.Get(ctx, &result); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: auto-transition result error: %v\n", err)
-		return
-	}
-	if result.Allowed {
-		fmt.Fprintf(os.Stderr, "Auto-transition: %s → %s (%s)\n", result.From, result.To, reason)
-	} else {
-		fmt.Fprintf(os.Stderr, "Warning: auto-transition denied: %s → %s: %s\n", result.From, result.To, result.Reason)
-	}
 }
 
 // queryStatus fetches full workflow status (phase + pre_blocked_phase) via Temporal query.
