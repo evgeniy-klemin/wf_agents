@@ -250,6 +250,7 @@ var safeGitSubcommands = map[string]bool{
 	"blame": true, "shortlog": true,
 	"config": true, "help": true, "version": true,
 	"checkout": true, // allowed in PLANNING for branch creation
+	"pull": true, "fetch": true,
 }
 
 // safeGitStashSubcommands are the stash sub-operations that are read-only.

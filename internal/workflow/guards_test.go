@@ -301,3 +301,11 @@ func TestValidateTransition(t *testing.T) {
 		})
 	}
 }
+
+func TestIsAllowedGitInPlanning_Pull(t *testing.T) {
+	assert.True(t, isAllowedGitInPlanning("git pull"), "git pull should be allowed in PLANNING")
+}
+
+func TestIsAllowedGitInPlanning_Fetch(t *testing.T) {
+	assert.True(t, isAllowedGitInPlanning("git fetch origin main"), "git fetch with args should be allowed in PLANNING")
+}

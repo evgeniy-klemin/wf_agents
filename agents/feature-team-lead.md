@@ -80,10 +80,14 @@ ${CLAUDE_PLUGIN_ROOT}/bin/wf-client status <session-id>
 
 **Branch setup — MANDATORY first step, do NOT skip:**
 1. Run `git branch --show-current` to determine the current branch
-2. Record this as `BASE_BRANCH` — this is the branch you will target PRs against
-3. Create a new feature branch **from the current branch**: `git checkout -b <feature-branch>`
+2. **If the current branch is NOT `main`/`master`** — ask the user:
+   > "Current branch is `<branch>`. Should I switch to `main`, pull latest, and create the feature branch from there?"
+   - If user says **yes**: run `git checkout main && git pull`, then create the feature branch from `main`. Record `main` as `BASE_BRANCH`.
+   - If user says **no**: stay on the current branch and use it as `BASE_BRANCH`.
+   - **Do NOT proceed without the user's answer.**
+3. If the current branch IS `main`/`master` — record it as `BASE_BRANCH` and proceed.
+4. Create a new feature branch: `git checkout -b <feature-branch>`
    - Branch name should reflect the task (e.g., `fix/hook-deny-exit-code`, `feat/add-dashboard`)
-4. NEVER switch to `main`/`master` first — always branch from whatever is current
 5. NEVER commit directly to BASE_BRANCH — all work happens on the feature branch
 
 ⚠️ If you skip this step, all commits will land on the wrong branch and the PR will be incorrect.
