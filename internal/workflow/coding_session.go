@@ -266,17 +266,83 @@ func (s *sessionState) handleHookEvent(ctx workflow.Context, evt model.SignalHoo
 
 func (s *sessionState) status(now time.Time) model.WorkflowStatus {
 	return model.WorkflowStatus{
-		Phase:             s.phase,
-		Iteration:         s.iteration,
-		ActiveAgents:      s.activeAgents,
-		EventCount:        len(s.events),
-		StartedAt:         s.startedAt.Format(time.RFC3339),
-		LastUpdatedAt:     s.lastUpdated.Format(time.RFC3339),
-		Task:              s.task,
-		PreBlockedPhase:   s.preBlockedPhase,
-		CurrentPhaseSecs:  now.Sub(s.phaseEnteredAt).Seconds(),
-		PhaseDurationSecs: s.computePhaseDurations(now),
+		Phase:                s.phase,
+		Iteration:            s.iteration,
+		ActiveAgents:         s.activeAgents,
+		EventCount:           len(s.events),
+		StartedAt:            s.startedAt.Format(time.RFC3339),
+		LastUpdatedAt:        s.lastUpdated.Format(time.RFC3339),
+		Task:                 s.task,
+		PreBlockedPhase:      s.preBlockedPhase,
+		CurrentPhaseSecs:     now.Sub(s.phaseEnteredAt).Seconds(),
+		PhaseDurationSecs:    s.computePhaseDurations(now),
+		CurrentIterPhaseSecs: s.computeCurrentIterPhaseDurations(now),
 	}
+}
+
+// computeCurrentIterPhaseDurations computes per-phase seconds spent only in the
+// current iteration — i.e., since the last RESPAWN event (or from the beginning
+// if this is iteration 1 / no RESPAWN has occurred yet).
+func (s *sessionState) computeCurrentIterPhaseDurations(now time.Time) map[string]float64 {
+	// Find index of the last RESPAWN transition that started a new iteration.
+	// The very first RESPAWN (from PLANNING) is included; subsequent RESPAWNs
+	// mark the boundary of a new iteration. We want to start accumulating from
+	// the most recent RESPAWN that is NOT the very first one (iter > 1), OR
+	// from the beginning when still in iteration 1.
+	lastRespawnIdx := -1
+	iterCount := 0
+	for i, ev := range s.events {
+		if ev.Type != model.EventTransition {
+			continue
+		}
+		to, ok := ev.Detail["to"]
+		if !ok || to != string(model.PhaseRespawn) {
+			continue
+		}
+		iterCount++
+		lastRespawnIdx = i
+	}
+
+	// If we're in iteration 1 (at most one RESPAWN seen), start from beginning.
+	if iterCount <= 1 {
+		lastRespawnIdx = -1
+	}
+
+	// Accumulate durations starting from lastRespawnIdx+1
+	durations := make(map[string]float64)
+	var currentPhase string
+	var phaseStart time.Time
+
+	startFrom := lastRespawnIdx // we begin at the RESPAWN event itself (inclusive)
+	if startFrom < 0 {
+		startFrom = -1 // all events
+	}
+
+	for i, ev := range s.events {
+		if i <= startFrom && startFrom >= 0 && i != startFrom {
+			continue
+		}
+		if ev.Type != model.EventTransition {
+			continue
+		}
+		to, hasTo := ev.Detail["to"]
+		if !hasTo {
+			continue
+		}
+		// Close the previous phase
+		if currentPhase != "" && !phaseStart.IsZero() {
+			durations[currentPhase] += ev.Timestamp.Sub(phaseStart).Seconds()
+		}
+		currentPhase = to
+		phaseStart = ev.Timestamp
+	}
+
+	// Close the current (open) phase using now
+	if currentPhase != "" && !phaseStart.IsZero() {
+		durations[currentPhase] += now.Sub(phaseStart).Seconds()
+	}
+
+	return durations
 }
 
 // computePhaseDurations iterates through transition events to compute cumulative

@@ -594,7 +594,11 @@ function renderPhaseHistory(timeline, sessionEndTime) {
 
 // ---- Diagram ----
 function renderDiagram(status, preBlockedPhase, timeline, sessionEndTime) {
-  const phaseDurations = computePhaseDurations(timeline || { events: [] }, sessionEndTime);
+  // Use server-side durations if available, fallback to client-side computation
+  const phaseDurations = status.phase_duration_secs || computePhaseDurations(timeline || { events: [] }, sessionEndTime);
+  const iterDurations = status.current_iter_phase_secs || {};
+  const hasMultipleIters = (status.iteration || 1) > 1;
+
   const svg = document.getElementById('workflow-diagram');
   const currentPhase = status.phase;
   const isBlocked = currentPhase === 'BLOCKED';
@@ -608,8 +612,8 @@ function renderDiagram(status, preBlockedPhase, timeline, sessionEndTime) {
     currentIdx = mainOrder.indexOf(preBlockedPhase);
   }
 
-  // Node positions
-  const nodeW = 130, nodeH = 64;
+  // Node positions — use taller nodes when showing two duration lines
+  const nodeW = 130, nodeH = hasMultipleIters ? 72 : 64;
   const startX = 30, startY = 50;
   const gapX = 25;
   const totalW = PHASES.length * (nodeW + gapX) - gapX + startX * 2;
@@ -711,21 +715,26 @@ function renderDiagram(status, preBlockedPhase, timeline, sessionEndTime) {
     const isCurrent = isThisBlocked || phase.id === currentPhase;
     const isPast = currentIdx > i && !isCurrent;
     const isFuture = !isCurrent && !isPast;
-    const dur = (phaseDurations[phase.id] || 0) + (isThisBlocked ? (phaseDurations['BLOCKED'] || 0) : 0) || undefined;
+    const totalDurSecs = (phaseDurations[phase.id] || 0) + (isThisBlocked ? (phaseDurations['BLOCKED'] || 0) : 0) || undefined;
+    const iterDurSecs = (iterDurations[phase.id] || 0) + (isThisBlocked ? (iterDurations['BLOCKED'] || 0) : 0) || undefined;
 
-    html += renderNode(pos.x, pos.y, nodeW, nodeH, phase, pc, isCurrent, isPast, isFuture, dur, isThisBlocked);
+    html += renderNode(pos.x, pos.y, nodeW, nodeH, phase, pc, isCurrent, isPast, isFuture, totalDurSecs, iterDurSecs, hasMultipleIters, isThisBlocked);
   });
 
   svg.innerHTML = html;
 }
 
-function renderNode(x, y, w, h, phase, colors, isCurrent, isPast, isFuture, durationMs, isBlocked) {
+function renderNode(x, y, w, h, phase, colors, isCurrent, isPast, isFuture, totalDurSecs, iterDurSecs, hasMultipleIters, isBlocked) {
   const opacity = isFuture ? 0.4 : 1;
   const blockedColors = PHASE_COLORS.BLOCKED;
   const ringColor = isBlocked ? blockedColors.ring : colors.ring;
   const fillColor = isBlocked ? blockedColors.bg : (isCurrent ? colors.bg : (isPast ? colors.bg + 'aa' : '#1e293b'));
   const strokeColor = isBlocked ? blockedColors.ring : (isCurrent ? colors.ring : (isPast ? colors.ring + '88' : '#334155'));
   const textColor = isCurrent || isPast ? (isBlocked ? blockedColors.text : colors.text) : '#64748b';
+
+  // Determine what duration lines to show
+  const showDur = totalDurSecs && (isCurrent || isPast);
+  const showTwoLines = showDur && hasMultipleIters && iterDurSecs;
 
   let html = '';
 
@@ -764,17 +773,26 @@ function renderNode(x, y, w, h, phase, colors, isCurrent, isPast, isFuture, dura
     </svg>
   </g>`;
 
-  // Label
-  const labelY = durationMs && (isCurrent || isPast) ? y + h - 16 : y + h - 12;
+  // Label — shift up if two duration lines will be shown
+  const labelY = showTwoLines ? y + h - 22 : (showDur ? y + h - 16 : y + h - 12);
   html += `<text x="${x + w / 2}" y="${labelY}" text-anchor="middle"
     fill="${textColor}" font-size="11" font-weight="${isCurrent ? '600' : '500'}"
     font-family="ui-sans-serif, system-ui, sans-serif" opacity="${opacity}">${isBlocked ? phase.label + ' (paused)' : phase.label}</text>`;
 
-  // Duration below label
-  if (durationMs && (isCurrent || isPast)) {
+  // Duration lines below label
+  if (showTwoLines) {
+    // Line 1: current iteration duration
+    html += `<text x="${x + w / 2}" y="${y + h - 12}" text-anchor="middle"
+      fill="${textColor}" font-size="9" opacity="0.85"
+      font-family="ui-monospace, monospace">${formatDuration(iterDurSecs * 1000)}</text>`;
+    // Line 2: total duration with sigma symbol
+    html += `<text x="${x + w / 2}" y="${y + h - 2}" text-anchor="middle"
+      fill="${textColor}" font-size="9" opacity="0.55"
+      font-family="ui-monospace, monospace">\u03A3\u2009${formatDuration(totalDurSecs * 1000)}</text>`;
+  } else if (showDur) {
     html += `<text x="${x + w / 2}" y="${y + h - 4}" text-anchor="middle"
       fill="${textColor}" font-size="9" opacity="0.7"
-      font-family="ui-monospace, monospace">${formatDuration(durationMs)}</text>`;
+      font-family="ui-monospace, monospace">${formatDuration(totalDurSecs * 1000)}</text>`;
   }
 
   return html;

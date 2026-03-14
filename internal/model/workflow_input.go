@@ -21,8 +21,9 @@ type WorkflowStatus struct {
 	LastUpdatedAt     string             `json:"last_updated_at"`
 	Task              string             `json:"task"`
 	PreBlockedPhase   Phase              `json:"pre_blocked_phase,omitempty"`
-	CurrentPhaseSecs  float64            `json:"current_phase_secs"`
-	PhaseDurationSecs map[string]float64 `json:"phase_duration_secs,omitempty"`
+	CurrentPhaseSecs     float64            `json:"current_phase_secs"`
+	PhaseDurationSecs    map[string]float64 `json:"phase_duration_secs,omitempty"`
+	CurrentIterPhaseSecs map[string]float64 `json:"current_iter_phase_secs,omitempty"`
 }
 
 // WorkflowTimeline is returned by the "timeline" query.
