@@ -11,6 +11,7 @@ Claude Code runs autonomously. wf-agents is the observer and enforcer:
 - **State machine** tracks the current phase (Planning → Developing → Reviewing → ...)
 - **Guards** validate transition preconditions (clean tree, CI passed, PR approved)
 - **Web dashboard** displays all sessions in real time
+- **Agent Teams** — teammates (Developer, Reviewer) are independent Claude Code sessions, not one-shot subagents. Each has its own context window and runs until idle, then hands off control.
 
 Inspired by [NTCoding/autonomous-claude-agent-team](https://github.com/NTCoding/autonomous-claude-agent-team).
 
@@ -29,11 +30,11 @@ Any phase → BLOCKED (pause) → returns to original phase
 | Phase | Actor | What happens |
 |-------|-------|-------------|
 | **PLANNING** | Team Lead | Analyze task, create plan, set up branch. Read-only — writes are blocked |
-| **RESPAWN** | Team Lead | Kill old agents, spawn fresh ones with clean context |
-| **DEVELOPING** | Developer agent | TDD: tests → code → refactor |
-| **REVIEWING** | Reviewer agent | git diff, checklist, tests, linting → APPROVED/REJECTED |
-| **COMMITTING** | Team Lead | git commit + push. Decide: more iterations or PR |
-| **PR_CREATION** | Team Lead | `gh pr create --draft`, wait for CI |
+| **RESPAWN** | Team Lead | Shut down old teammates, prepare iteration context |
+| **DEVELOPING** | Developer teammate | TDD: tests → code → refactor. Teammates spawned here via TeamCreate + Agent |
+| **REVIEWING** | Reviewer teammate | git diff, checklist, tests, linting → APPROVED/REJECTED |
+| **COMMITTING** | Developer teammate (on Lead's instruction) | git commit + push. Lead decides: more iterations or PR |
+| **PR_CREATION** | Developer teammate (on Lead's instruction) | `gh pr create --draft`, wait for CI |
 | **FEEDBACK** | Team Lead | Validate PR comments, reply to each explicitly |
 | **COMPLETE** | — | Terminal state |
 | **BLOCKED** | — | Pause, waiting for user input |
@@ -41,6 +42,9 @@ Any phase → BLOCKED (pause) → returns to original phase
 ## Quick Start
 
 ```bash
+# 0. Enable Agent Teams (in Claude Code settings.json)
+# "env": { "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1" }
+
 # 1. Infrastructure
 docker compose up -d              # Temporal Server + UI
 
@@ -83,7 +87,9 @@ Edit/Write/NotebookEdit are blocked. Only agent management and reads allowed.
 Soft limit (default 5). When max reached, guard denies RESPAWN with instructions to ask the user. If user confirms: `wf-client reset-iterations <id>` resets the guard counter. `totalIterations` preserved for dashboard display.
 
 ### Auto-BLOCKED
-- `Stop` / `Notification` / `TeammateIdle` → automatic transition to BLOCKED
+- `Stop` from Team Lead → automatic transition to BLOCKED (Stop from teammates is ignored — they finished their turn)
+- `Notification` → automatic transition to BLOCKED
+- `TeammateIdle` → phase-aware: no-op in DEVELOPING/REVIEWING/COMMITTING/PR_CREATION, automatic transition to BLOCKED in other phases
 - Any active event (tool use, user prompt) → automatic unblock
 
 ## Guards (transition preconditions)
@@ -94,7 +100,7 @@ Soft limit (default 5). When max reached, guard denies RESPAWN with instructions
 | DEVELOPING → REVIEWING | `working_tree_clean = false` (changes exist) |
 | PR_CREATION → FEEDBACK | `pr_checks_pass = true` |
 | FEEDBACK → COMPLETE | `pr_approved = true` OR `pr_merged = true` |
-| RESPAWN → DEVELOPING | `activeAgents == 0` (old agents stopped) |
+| RESPAWN → DEVELOPING | `activeAgents == 0` (old teammates shut down) |
 
 ## CLI
 
