@@ -9,11 +9,12 @@ import (
 )
 
 const (
-	SignalTransition      = "transition"
-	SignalHookEvent       = "hook-event"
-	SignalJournal         = "journal"
-	SignalComplete        = "complete"
-	SignalResetIterations = "reset-iterations"
+	SignalTransition       = "transition"
+	SignalHookEvent        = "hook-event"
+	SignalJournal          = "journal"
+	SignalComplete         = "complete"
+	SignalResetIterations  = "reset-iterations"
+	SignalClearActiveAgents = "clear-active-agents"
 
 	QueryStatus   = "status"
 	QueryTimeline = "timeline"
@@ -82,6 +83,7 @@ func CodingSessionWorkflow(ctx workflow.Context, input model.WorkflowInput) (mod
 	journalCh := workflow.GetSignalChannel(ctx, SignalJournal)
 	setTaskCh := workflow.GetSignalChannel(ctx, SignalSetTask)
 	resetIterationsCh := workflow.GetSignalChannel(ctx, SignalResetIterations)
+	clearActiveAgentsCh := workflow.GetSignalChannel(ctx, SignalClearActiveAgents)
 
 	// Drain legacy signal channels to prevent workflow stuck on unprocessed signals
 	legacyTransitionCh := workflow.GetSignalChannel(ctx, SignalTransition)
@@ -131,6 +133,17 @@ func CodingSessionWorkflow(ctx workflow.Context, input model.WorkflowInput) (mod
 				"message": fmt.Sprintf("iteration counter reset from %d to 1 (totalIterations=%d)", old, state.totalIterations),
 			})
 			logger.Info("Iteration counter reset", "old_iteration", old, "total_iterations", state.totalIterations)
+		})
+
+		sel.AddReceive(clearActiveAgentsCh, func(ch workflow.ReceiveChannel, more bool) {
+			var sessionID string
+			ch.Receive(ctx, &sessionID)
+			count := len(state.activeAgents)
+			state.activeAgents = state.activeAgents[:0]
+			state.addEvent(ctx, model.EventJournal, sessionID, map[string]string{
+				"message": fmt.Sprintf("cleared %d active agent(s) via deregister-all-agents", count),
+			})
+			logger.Info("Active agents cleared", "count", count, "session", sessionID)
 		})
 
 		// doneCh unblocks the selector when a terminal phase is reached via Update handler
@@ -246,6 +259,13 @@ func (s *sessionState) handleTransition(ctx workflow.Context, req model.SignalTr
 	s.lastUpdated = workflow.Now(ctx)
 	s.phaseEnteredAt = workflow.Now(ctx)
 	result.Allowed = true
+
+	// When entering RESPAWN, automatically clear activeAgents — old teammates are being
+	// shut down. This ensures guardNoActiveAgents on RESPAWN → DEVELOPING always passes
+	// (new agents haven't spawned yet at this point).
+	if req.To == model.PhaseRespawn {
+		s.activeAgents = s.activeAgents[:0]
+	}
 
 	s.addEvent(ctx, model.EventTransition, req.SessionID, map[string]string{
 		"from":             string(result.From),

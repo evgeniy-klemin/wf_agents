@@ -52,6 +52,10 @@ func main() {
 		cmdComplete(ctx, c, os.Args[2:])
 	case "reset-iterations":
 		cmdResetIterations(ctx, c, os.Args[2:])
+	case "deregister-agent":
+		cmdDeregisterAgent(ctx, c, os.Args[2:])
+	case "deregister-all-agents":
+		cmdDeregisterAllAgents(ctx, c, os.Args[2:])
 	case "list":
 		cmdList(ctx, c)
 	default:
@@ -65,13 +69,15 @@ func printUsage() {
 	fmt.Println(`Usage: wf-client <command> [args]
 
 Commands:
-  start             --session <id> --task <desc> [--repo <path>] [--max-iter <n>]
-  status            <workflow-id>
-  timeline          <workflow-id>
-  transition        <workflow-id> --to <PHASE> [--reason <text>]
-  journal           <workflow-id> --message <text>
-  complete          <workflow-id>
-  reset-iterations  <workflow-id>
+  start                 --session <id> --task <desc> [--repo <path>] [--max-iter <n>]
+  status                <workflow-id>
+  timeline              <workflow-id>
+  transition            <workflow-id> --to <PHASE> [--reason <text>]
+  journal               <workflow-id> --message <text>
+  complete              <workflow-id>
+  reset-iterations      <workflow-id>
+  deregister-agent      <workflow-id> --agent <agent-id>
+  deregister-all-agents <workflow-id>
   list`)
 }
 
@@ -329,6 +335,54 @@ func cmdResetIterations(ctx context.Context, c client.Client, args []string) {
 	fmt.Printf("Iteration counter reset signal sent to %s\n", workflowID)
 	fmt.Println("The resettable iteration counter will be set to 1 on the next workflow task.")
 	fmt.Println("Total iterations counter is unchanged. You may now retry the RESPAWN transition.")
+}
+
+// cmdDeregisterAgent removes a single agent from activeAgents by sending a SubagentStop
+// hook event. The workflow's handleHookEvent already handles SubagentStop by filtering
+// the agent out of activeAgents.
+func cmdDeregisterAgent(ctx context.Context, c client.Client, args []string) {
+	if len(args) < 1 {
+		log.Fatal("workflow-id required")
+	}
+	workflowID := resolveWorkflowID(args[0])
+
+	var agentID string
+	for i := 1; i < len(args)-1; i += 2 {
+		switch args[i] {
+		case "--agent":
+			agentID = args[i+1]
+		}
+	}
+	if agentID == "" {
+		log.Fatal("--agent <agent-id> is required")
+	}
+
+	sig := model.SignalHookEvent{
+		HookType:  "SubagentStop",
+		SessionID: "cli",
+		Detail: map[string]string{
+			"agent_id": agentID,
+		},
+	}
+	err := c.SignalWorkflow(ctx, workflowID, "", wf.SignalHookEvent, sig)
+	if err != nil {
+		log.Fatalf("Signal failed: %v", err)
+	}
+	fmt.Printf("Deregister signal sent for agent %q in workflow %s\n", agentID, workflowID)
+}
+
+// cmdDeregisterAllAgents clears ALL activeAgents by sending a clear-active-agents signal.
+func cmdDeregisterAllAgents(ctx context.Context, c client.Client, args []string) {
+	if len(args) < 1 {
+		log.Fatal("workflow-id required")
+	}
+	workflowID := resolveWorkflowID(args[0])
+
+	err := c.SignalWorkflow(ctx, workflowID, "", wf.SignalClearActiveAgents, "cli")
+	if err != nil {
+		log.Fatalf("Signal failed: %v", err)
+	}
+	fmt.Printf("All active agents cleared in workflow %s\n", workflowID)
 }
 
 func cmdList(ctx context.Context, c client.Client) {
