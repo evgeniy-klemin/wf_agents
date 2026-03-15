@@ -1083,32 +1083,42 @@ func TestRespawnGuardActiveAgents(t *testing.T) {
 	})
 }
 
-// TestRespawnClearsActiveAgents verifies that transitioning TO RESPAWN automatically
-// clears activeAgents, so that guardNoActiveAgents always passes on RESPAWN → DEVELOPING.
-func TestRespawnClearsActiveAgents(t *testing.T) {
-	t.Run("active agents cleared on RESPAWN entry via handleTransition unit test", func(t *testing.T) {
+// TestRespawnDoesNotAutoClearActiveAgents verifies that transitioning TO RESPAWN does NOT
+// automatically clear activeAgents. Teammates must shut down explicitly (sending Stop events),
+// which removes them from activeAgents naturally. The guard still blocks RESPAWN → DEVELOPING
+// if agents remain.
+func TestRespawnDoesNotAutoClearActiveAgents(t *testing.T) {
+	t.Run("activeAgents preserved after RESPAWN entry", func(t *testing.T) {
+		// Directly test sessionState — no workflow.Context needed.
 		s := &sessionState{
-			phase:        model.PhaseDeveloping,
+			phase:        model.PhaseRespawn,
 			activeAgents: []string{"dev-1", "dev-2", "rev-1"},
 			maxIter:      5,
 			iteration:    1,
 		}
 
-		// Simulate the RESPAWN entry that should clear activeAgents.
-		// Since handleTransition requires workflow.Context, we test the state mutation directly.
-		// The auto-clear is applied when phase == RESPAWN after the transition.
-		if model.PhaseRespawn == model.PhaseRespawn {
-			s.activeAgents = s.activeAgents[:0]
-		}
-
-		assert.Equal(t, 0, len(s.activeAgents),
-			"activeAgents should be cleared when entering RESPAWN")
+		// No auto-clear should have happened. Agents must still be present.
+		assert.Equal(t, 3, len(s.activeAgents),
+			"RESPAWN must NOT auto-clear activeAgents — teammates must shut down explicitly")
 	})
 
-	t.Run("guardNoActiveAgents passes after auto-clear", func(t *testing.T) {
+	t.Run("guardNoActiveAgents blocks RESPAWN→DEVELOPING when agents still active", func(t *testing.T) {
 		s := &sessionState{
 			phase:        model.PhaseRespawn,
-			activeAgents: []string{}, // already cleared on RESPAWN entry
+			activeAgents: []string{"dev-1"},
+			maxIter:      5,
+			iteration:    1,
+		}
+
+		reason := guardNoActiveAgents(s, nil)
+		assert.NotEmpty(t, reason,
+			"guardNoActiveAgents must deny RESPAWN→DEVELOPING when activeAgents is non-empty")
+	})
+
+	t.Run("guardNoActiveAgents passes when agents have stopped", func(t *testing.T) {
+		s := &sessionState{
+			phase:        model.PhaseRespawn,
+			activeAgents: []string{},
 			maxIter:      5,
 			iteration:    1,
 		}
@@ -1117,12 +1127,11 @@ func TestRespawnClearsActiveAgents(t *testing.T) {
 		assert.Empty(t, reason, "guardNoActiveAgents should pass when activeAgents is empty")
 	})
 
-	t.Run("review-reject loop with lingering agents passes RESPAWN", func(t *testing.T) {
-		// Simulate the scenario: agents active in DEVELOPING, then REVIEWING → RESPAWN.
-		// On RESPAWN entry, agents should be cleared, allowing RESPAWN → DEVELOPING.
+	t.Run("Stop event removes agent so RESPAWN→DEVELOPING is allowed", func(t *testing.T) {
+		// Simulate: agent registers in DEVELOPING, sends Stop, then RESPAWN → DEVELOPING succeeds.
 		env := setupEnv(t)
 
-		// Register a hook event to simulate a teammate registering in DEVELOPING
+		// Register the agent via PreToolUse, then simulate it stopping via SubagentStop.
 		env.RegisterDelayedCallback(func() {
 			env.SignalWorkflow(SignalHookEvent, model.SignalHookEvent{
 				HookType:  "PreToolUse",
@@ -1131,13 +1140,20 @@ func TestRespawnClearsActiveAgents(t *testing.T) {
 				Detail:    map[string]string{"agent_id": "dev-agent-1"},
 			})
 		}, 0)
+		env.RegisterDelayedCallback(func() {
+			env.SignalWorkflow(SignalHookEvent, model.SignalHookEvent{
+				HookType:  "SubagentStop",
+				SessionID: "test",
+				Detail:    map[string]string{"agent_id": "dev-agent-1"},
+			})
+		}, 0)
 
 		registerTransitions(env, t, []model.Phase{
 			model.PhaseRespawn,
 			model.PhaseDeveloping,
 			model.PhaseReviewing,
-			model.PhaseRespawn,     // Review reject — auto-clear agents on entry
-			model.PhaseDeveloping,  // guardNoActiveAgents must pass (agents cleared)
+			model.PhaseRespawn,    // Review reject — agent must stop explicitly (Stop event sent above)
+			model.PhaseDeveloping, // guardNoActiveAgents passes because agent stopped
 			model.PhaseReviewing,
 			model.PhaseCommitting,
 			model.PhasePRCreation,
@@ -1150,15 +1166,8 @@ func TestRespawnClearsActiveAgents(t *testing.T) {
 		})
 
 		require.True(t, env.IsWorkflowCompleted(),
-			"workflow should complete — agents auto-cleared on RESPAWN entry")
+			"workflow should complete after agent stops naturally")
 		require.NoError(t, env.GetWorkflowError())
-
-		val, err := env.QueryWorkflow(QueryStatus)
-		require.NoError(t, err)
-		var status model.WorkflowStatus
-		require.NoError(t, val.Get(&status))
-		assert.Equal(t, 0, len(status.ActiveAgents),
-			"activeAgents should be empty after RESPAWN auto-clear")
 	})
 }
 

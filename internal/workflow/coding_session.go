@@ -260,13 +260,6 @@ func (s *sessionState) handleTransition(ctx workflow.Context, req model.SignalTr
 	s.phaseEnteredAt = workflow.Now(ctx)
 	result.Allowed = true
 
-	// When entering RESPAWN, automatically clear activeAgents — old teammates are being
-	// shut down. This ensures guardNoActiveAgents on RESPAWN → DEVELOPING always passes
-	// (new agents haven't spawned yet at this point).
-	if req.To == model.PhaseRespawn {
-		s.activeAgents = s.activeAgents[:0]
-	}
-
 	s.addEvent(ctx, model.EventTransition, req.SessionID, map[string]string{
 		"from":             string(result.From),
 		"to":               string(req.To),
