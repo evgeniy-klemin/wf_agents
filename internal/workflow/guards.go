@@ -6,102 +6,35 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/eklemin/wf-agents/internal/config"
 	"github.com/eklemin/wf-agents/internal/model"
 )
 
-// transitionRule defines a valid transition with an optional guard function.
-// check returns a non-empty denial reason if the guard fails, or "" to allow.
-type transitionRule struct {
-	from  model.Phase
-	to    model.Phase
-	check func(s *sessionState, evidence map[string]string) string // nil = no guard
+// guardConfig is the loaded transition guard configuration.
+// Initialized once at startup from the embedded defaults.yaml.
+var guardConfig *config.Config
+
+func init() {
+	cfg, err := config.DefaultConfig()
+	if err != nil {
+		panic(fmt.Sprintf("failed to load guard config: %v", err))
+	}
+	guardConfig = cfg
 }
 
-// transitions is the unified table of all valid state machine transitions.
-// BLOCKED is handled specially by validateTransition and not listed here:
-// any non-terminal phase → BLOCKED is always allowed, BLOCKED → preBlockedPhase only.
-var transitions = []transitionRule{
-	{from: model.PhasePlanning, to: model.PhaseRespawn, check: nil},
-	{from: model.PhaseRespawn, to: model.PhaseDeveloping, check: guardNoActiveAgents},
-	{from: model.PhaseDeveloping, to: model.PhaseReviewing, check: guardDirtyTree},
-	{from: model.PhaseReviewing, to: model.PhaseCommitting, check: nil},
-	{from: model.PhaseReviewing, to: model.PhaseRespawn, check: guardMaxIter},
-	{from: model.PhaseCommitting, to: model.PhaseRespawn, check: guardCleanTreeAndMaxIter},
-	{from: model.PhaseCommitting, to: model.PhasePRCreation, check: guardCleanTree},
-	{from: model.PhasePRCreation, to: model.PhaseFeedback, check: guardPRChecksPassed},
-	{from: model.PhaseFeedback, to: model.PhaseComplete, check: guardPRApprovedOrMerged},
-	{from: model.PhaseFeedback, to: model.PhaseRespawn, check: guardMaxIter},
+// sessionCheckContext adapts sessionState + evidence to the config.CheckContext interface.
+type sessionCheckContext struct {
+	evidence    map[string]string
+	state       *sessionState
+	originPhase string
 }
 
-// guardCleanTree requires evidence["working_tree_clean"] == "true".
-func guardCleanTree(s *sessionState, evidence map[string]string) string {
-	if evidence["working_tree_clean"] == "true" {
-		return ""
-	}
-	return "working tree is not clean — commit or stash changes before leaving COMMITTING"
-}
-
-// guardDirtyTree requires evidence["working_tree_clean"] == "false".
-func guardDirtyTree(_ *sessionState, evidence map[string]string) string {
-	if evidence["working_tree_clean"] == "false" {
-		return ""
-	}
-	return "no uncommitted changes found — there must be changes to review"
-}
-
-// guardNoActiveAgents requires len(s.activeAgents) == 0.
-func guardNoActiveAgents(s *sessionState, _ map[string]string) string {
-	if len(s.activeAgents) == 0 {
-		return ""
-	}
-	return fmt.Sprintf(
-		"cannot leave RESPAWN with %d active teammate(s) — shut down old teammates before spawning new ones",
-		len(s.activeAgents),
-	)
-}
-
-// guardPRChecksPassed requires evidence["pr_checks_pass"] == "true".
-func guardPRChecksPassed(_ *sessionState, evidence map[string]string) string {
-	if evidence["pr_checks_pass"] == "true" {
-		return ""
-	}
-	return "PR checks have not passed — wait for CI to complete"
-}
-
-// guardPRApprovedOrMerged requires evidence["pr_approved"] == "true" OR evidence["pr_merged"] == "true".
-func guardPRApprovedOrMerged(_ *sessionState, evidence map[string]string) string {
-	if evidence["pr_approved"] == "true" || evidence["pr_merged"] == "true" {
-		return ""
-	}
-	return "PR has not been approved or merged — requires explicit human review approval or merge before completing"
-}
-
-// guardMaxIter checks that s.iteration+1 <= s.maxIter.
-// Internally resolves the origin phase (using preBlockedPhase if currently BLOCKED).
-// First entry from PLANNING doesn't count as an iteration so is always allowed.
-func guardMaxIter(s *sessionState, _ map[string]string) string {
-	// Determine origin phase (BLOCKED uses preBlockedPhase)
-	origin := s.phase
-	if origin == model.PhaseBlocked {
-		origin = s.preBlockedPhase
-	}
-	// First entry from PLANNING doesn't count as an iteration
-	if origin == model.PhasePlanning {
-		return ""
-	}
-	if s.iteration+1 > s.maxIter {
-		return fmt.Sprintf("max iterations (%d) reached. Ask the user whether to continue. If yes, run: wf-client reset-iterations <workflow-id>, then retry this transition.", s.maxIter)
-	}
-	return ""
-}
-
-// guardCleanTreeAndMaxIter combines guardCleanTree AND guardMaxIter.
-func guardCleanTreeAndMaxIter(s *sessionState, evidence map[string]string) string {
-	if reason := guardCleanTree(s, evidence); reason != "" {
-		return reason
-	}
-	return guardMaxIter(s, evidence)
-}
+func (c *sessionCheckContext) Evidence() map[string]string    { return c.evidence }
+func (c *sessionCheckContext) ActiveAgentCount() int          { return len(c.state.activeAgents) }
+func (c *sessionCheckContext) Iteration() int                 { return c.state.iteration }
+func (c *sessionCheckContext) MaxIterations() int             { return c.state.maxIter }
+func (c *sessionCheckContext) OriginPhase() string            { return c.originPhase }
+func (c *sessionCheckContext) CommandsRan() map[string]bool   { return nil }
 
 // validateTransition checks whether the transition from→to is allowed given the current
 // session state and evidence. Returns "" to allow, or a non-empty denial reason.
@@ -109,7 +42,7 @@ func guardCleanTreeAndMaxIter(s *sessionState, evidence map[string]string) strin
 // Special handling:
 //   - Any non-terminal phase → BLOCKED is always allowed (skip guard).
 //   - BLOCKED → preBlockedPhase is allowed (skip guard). Any other target is denied.
-//   - All other transitions are looked up in the transitions table.
+//   - All other transitions are looked up in the config-driven transitions table.
 func validateTransition(s *sessionState, from, to model.Phase, evidence map[string]string) string {
 	// BLOCKED can only return to preBlockedPhase (checked first to prevent BLOCKED → BLOCKED)
 	if from == model.PhaseBlocked {
@@ -127,17 +60,60 @@ func validateTransition(s *sessionState, from, to model.Phase, evidence map[stri
 		return ""
 	}
 
-	// Look up transition in table
-	for _, rule := range transitions {
-		if rule.from == from && rule.to == to {
-			if rule.check == nil {
-				return ""
-			}
-			return rule.check(s, evidence)
-		}
+	// Determine origin phase for max_iterations check (BLOCKED uses preBlockedPhase)
+	origin := s.phase
+	if origin == model.PhaseBlocked {
+		origin = s.preBlockedPhase
 	}
 
-	return fmt.Sprintf("transition %s → %s is not allowed", from, to)
+	fromStr, toStr := string(from), string(to)
+
+	// Validate that this transition exists in the state machine.
+	if !isValidTransition(from, to) {
+		return fmt.Sprintf("transition %s → %s is not allowed", from, to)
+	}
+
+	// Evaluate any guard rules from the config. Transitions absent from the
+	// config have no guard checks and are allowed unconditionally.
+	rules := config.FindGuards(guardConfig, fromStr, toStr)
+	if len(rules) == 0 {
+		return ""
+	}
+
+	ctx := &sessionCheckContext{
+		evidence:    evidence,
+		state:       s,
+		originPhase: string(origin),
+	}
+
+	for _, rule := range rules {
+		if reason := config.EvalChecks(rule.Checks, ctx); reason != "" {
+			return reason
+		}
+	}
+	return ""
+}
+
+// validTransitions is the set of allowed phase transitions in the state machine.
+// BLOCKED transitions are handled specially in validateTransition and not listed here.
+var validTransitions = map[model.Phase][]model.Phase{
+	model.PhasePlanning:   {model.PhaseRespawn},
+	model.PhaseRespawn:    {model.PhaseDeveloping},
+	model.PhaseDeveloping: {model.PhaseReviewing},
+	model.PhaseReviewing:  {model.PhaseCommitting, model.PhaseRespawn},
+	model.PhaseCommitting: {model.PhaseRespawn, model.PhasePRCreation},
+	model.PhasePRCreation: {model.PhaseFeedback},
+	model.PhaseFeedback:   {model.PhaseComplete, model.PhaseRespawn},
+}
+
+// isValidTransition returns true if from→to is a defined state machine transition.
+func isValidTransition(from, to model.Phase) bool {
+	for _, allowed := range validTransitions[from] {
+		if allowed == to {
+			return true
+		}
+	}
+	return false
 }
 
 // --- Tool permission enforcement ---

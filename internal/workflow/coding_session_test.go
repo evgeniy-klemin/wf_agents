@@ -973,7 +973,7 @@ func TestRespawnDoesNotAutoClearActiveAgents(t *testing.T) {
 			iteration:    1,
 		}
 
-		reason := guardNoActiveAgents(s, nil)
+		reason := validateTransition(s, model.PhaseRespawn, model.PhaseDeveloping, nil)
 		assert.NotEmpty(t, reason,
 			"guardNoActiveAgents must deny RESPAWN→DEVELOPING when activeAgents is non-empty")
 	})
@@ -986,7 +986,7 @@ func TestRespawnDoesNotAutoClearActiveAgents(t *testing.T) {
 			iteration:    1,
 		}
 
-		reason := guardNoActiveAgents(s, nil)
+		reason := validateTransition(s, model.PhaseRespawn, model.PhaseDeveloping, nil)
 		assert.Empty(t, reason, "guardNoActiveAgents should pass when activeAgents is empty")
 	})
 
