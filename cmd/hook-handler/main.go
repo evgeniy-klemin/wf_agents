@@ -702,11 +702,18 @@ func resolveAgentName(input claudeHookInput) string {
 	return input.AgentType
 }
 
+// workflowSignaler is a minimal interface for sending signals to a workflow.
+// It is satisfied by client.Client and allows test mocks without implementing
+// the full Temporal client interface.
+type workflowSignaler interface {
+	SignalWorkflow(ctx context.Context, workflowID string, runID string, signalName string, arg interface{}) error
+}
+
 // trackPreToolUse handles per-agent command tracking signals for PreToolUse events.
 // For file-change tools (Edit/Write/NotebookEdit), it sends InvalidateCommands for categories
 // with invalidate_on_file_change=true. For Bash tools, it matches the command against tracking
 // patterns and sends CommandRan signals for each matched category.
-func trackPreToolUse(ctx context.Context, c client.Client, workflowID string, input claudeHookInput) {
+func trackPreToolUse(ctx context.Context, c workflowSignaler, workflowID string, input claudeHookInput) {
 	agentName := input.TeammateName
 	if agentName == "" {
 		agentName = input.AgentType

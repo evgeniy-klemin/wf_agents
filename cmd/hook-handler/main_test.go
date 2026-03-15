@@ -8,6 +8,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -614,6 +615,345 @@ func TestRequestLogHasDirectionField(t *testing.T) {
 
 	if entry["direction"] != "request" {
 		t.Errorf("direction = %q, want \"request\"", entry["direction"])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// trackPreToolUse and evalTeammateIdleConfig integration tests
+// ---------------------------------------------------------------------------
+
+// capturedSignal records one call to SignalWorkflow.
+type capturedSignal struct {
+	workflowID string
+	signalName string
+	arg        interface{}
+}
+
+// mockSignaler implements workflowSignaler and records all SignalWorkflow calls.
+type mockSignaler struct {
+	signals []capturedSignal
+	err     error // if non-nil, returned by SignalWorkflow
+}
+
+func (m *mockSignaler) SignalWorkflow(_ context.Context, workflowID, _ string, signalName string, arg interface{}) error {
+	m.signals = append(m.signals, capturedSignal{workflowID: workflowID, signalName: signalName, arg: arg})
+	return m.err
+}
+
+// writeTempConfig writes a .wf-agents.yaml file to dir and returns the dir path.
+func writeTempConfig(t *testing.T, dir, yamlContent string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, ".wf-agents.yaml"), []byte(yamlContent), 0o644); err != nil {
+		t.Fatalf("writeTempConfig: %v", err)
+	}
+}
+
+// bashInput builds a JSON tool_input for a Bash command.
+func bashInput(t *testing.T, cmd string) json.RawMessage {
+	t.Helper()
+	b, err := json.Marshal(map[string]string{"command": cmd})
+	if err != nil {
+		t.Fatalf("bashInput: %v", err)
+	}
+	return b
+}
+
+// TestTrackPreToolUse_BashCommandRan verifies that a Bash "go vet ./..." with agent_type="developer-1"
+// sends a SignalCommandRan for the lint category (go vet is a default lint pattern).
+func TestTrackPreToolUse_BashCommandRan(t *testing.T) {
+	dir := t.TempDir()
+	mock := &mockSignaler{}
+	input := claudeHookInput{
+		SessionID:     "sess-1",
+		HookEventName: "PreToolUse",
+		AgentType:     "developer-1",
+		ToolName:      "Bash",
+		ToolInput:     bashInput(t, "go vet ./..."),
+		CWD:           dir,
+	}
+	trackPreToolUse(context.Background(), mock, "coding-session-abc", input)
+
+	if len(mock.signals) == 0 {
+		t.Fatal("expected at least one signal, got none")
+	}
+	var found bool
+	for _, s := range mock.signals {
+		if s.signalName == "command-ran" {
+			sig, ok := s.arg.(model.SignalCommandRan)
+			if !ok {
+				t.Fatalf("expected SignalCommandRan payload, got %T", s.arg)
+			}
+			if sig.AgentName != "developer-1" {
+				t.Errorf("AgentName = %q, want %q", sig.AgentName, "developer-1")
+			}
+			if sig.Category != "lint" {
+				t.Errorf("Category = %q, want %q", sig.Category, "lint")
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Error("no command-ran signal was sent for lint category")
+	}
+}
+
+// TestTrackPreToolUse_NoSignalWhenNoAgentIdentity verifies that when both TeammateName and
+// AgentType are empty, no signal is sent.
+func TestTrackPreToolUse_NoSignalWhenNoAgentIdentity(t *testing.T) {
+	dir := t.TempDir()
+	mock := &mockSignaler{}
+	input := claudeHookInput{
+		SessionID:    "sess-2",
+		HookEventName: "PreToolUse",
+		TeammateName: "",
+		AgentType:    "",
+		ToolName:     "Bash",
+		ToolInput:    bashInput(t, "make lint"),
+		CWD:          dir,
+	}
+	trackPreToolUse(context.Background(), mock, "coding-session-abc", input)
+	if len(mock.signals) != 0 {
+		t.Errorf("expected no signals, got %d", len(mock.signals))
+	}
+}
+
+// TestTrackPreToolUse_EditSendsInvalidateCommands verifies that an Edit tool use with
+// agent_type="developer-1" sends SignalInvalidateCommands for categories with
+// invalidate_on_file_change=true.
+func TestTrackPreToolUse_EditSendsInvalidateCommands(t *testing.T) {
+	dir := t.TempDir()
+	mock := &mockSignaler{}
+	input := claudeHookInput{
+		SessionID:    "sess-3",
+		HookEventName: "PreToolUse",
+		AgentType:    "developer-1",
+		ToolName:     "Edit",
+		CWD:          dir,
+	}
+	trackPreToolUse(context.Background(), mock, "coding-session-abc", input)
+
+	if len(mock.signals) == 0 {
+		t.Fatal("expected at least one signal, got none")
+	}
+	for _, s := range mock.signals {
+		if s.signalName == "invalidate-commands" {
+			sig, ok := s.arg.(model.SignalInvalidateCommands)
+			if !ok {
+				t.Fatalf("expected SignalInvalidateCommands payload, got %T", s.arg)
+			}
+			if sig.AgentName != "developer-1" {
+				t.Errorf("AgentName = %q, want %q", sig.AgentName, "developer-1")
+			}
+			if sig.Tool != "Edit" {
+				t.Errorf("Tool = %q, want %q", sig.Tool, "Edit")
+			}
+			if len(sig.Categories) == 0 {
+				t.Error("Categories must be non-empty")
+			}
+			return
+		}
+	}
+	t.Error("no invalidate-commands signal was sent")
+}
+
+// TestTrackPreToolUse_WriteSendsInvalidateCommands verifies the same invalidation for Write.
+func TestTrackPreToolUse_WriteSendsInvalidateCommands(t *testing.T) {
+	dir := t.TempDir()
+	mock := &mockSignaler{}
+	input := claudeHookInput{
+		SessionID:    "sess-4",
+		HookEventName: "PreToolUse",
+		AgentType:    "reviewer-1",
+		ToolName:     "Write",
+		CWD:          dir,
+	}
+	trackPreToolUse(context.Background(), mock, "coding-session-abc", input)
+
+	for _, s := range mock.signals {
+		if s.signalName == "invalidate-commands" {
+			sig, ok := s.arg.(model.SignalInvalidateCommands)
+			if !ok {
+				t.Fatalf("expected SignalInvalidateCommands payload, got %T", s.arg)
+			}
+			if sig.AgentName != "reviewer-1" {
+				t.Errorf("AgentName = %q, want %q", sig.AgentName, "reviewer-1")
+			}
+			return
+		}
+	}
+	t.Error("no invalidate-commands signal sent for Write tool")
+}
+
+// TestResolveAgentName_PrefersTeammateName verifies that TeammateName takes precedence over AgentType.
+func TestResolveAgentName_PrefersTeammateName(t *testing.T) {
+	input := claudeHookInput{
+		TeammateName: "developer-2",
+		AgentType:    "wf-agents:developer",
+	}
+	got := resolveAgentName(input)
+	if got != "developer-2" {
+		t.Errorf("resolveAgentName = %q, want %q", got, "developer-2")
+	}
+}
+
+// TestResolveAgentName_FallsBackToAgentType verifies AgentType is used when TeammateName is empty.
+func TestResolveAgentName_FallsBackToAgentType(t *testing.T) {
+	input := claudeHookInput{
+		TeammateName: "",
+		AgentType:    "developer-1",
+	}
+	got := resolveAgentName(input)
+	if got != "developer-1" {
+		t.Errorf("resolveAgentName = %q, want %q", got, "developer-1")
+	}
+}
+
+// TestMatchesBashPatternPrefix_ExactMatch verifies that a command exactly matching the pattern passes.
+func TestMatchesBashPatternPrefix_ExactMatch(t *testing.T) {
+	if !matchesBashPatternPrefix("make lint", "make lint") {
+		t.Error("exact match should return true")
+	}
+}
+
+// TestMatchesBashPatternPrefix_WithArgs verifies "make lint 2>&1" matches pattern "make lint".
+func TestMatchesBashPatternPrefix_WithArgs(t *testing.T) {
+	if !matchesBashPatternPrefix("make lint 2>&1", "make lint") {
+		t.Error("command with args should match pattern prefix")
+	}
+}
+
+// TestMatchesBashPatternPrefix_GoTest verifies "go test ./..." matches pattern "go test".
+func TestMatchesBashPatternPrefix_GoTest(t *testing.T) {
+	if !matchesBashPatternPrefix("go test ./...", "go test") {
+		t.Error("'go test ./...' should match 'go test'")
+	}
+}
+
+// TestMatchesBashPatternPrefix_NoSubstringMatch verifies that "govet" does NOT match "go vet"
+// (word boundary enforcement: next char must be space/tab/pipe/semicolon/ampersand/newline).
+func TestMatchesBashPatternPrefix_NoSubstringMatch(t *testing.T) {
+	if matchesBashPatternPrefix("govet ./...", "go vet") {
+		t.Error("'govet' must not match pattern 'go vet' — no word boundary")
+	}
+}
+
+// TestMatchesBashPatternPrefix_NoPartialWordMatch verifies "go testing" does NOT match "go test".
+func TestMatchesBashPatternPrefix_NoPartialWordMatch(t *testing.T) {
+	if matchesBashPatternPrefix("go testing ./...", "go test") {
+		t.Error("'go testing' must not match pattern 'go test' — 'i' is not a word boundary")
+	}
+}
+
+// TestTrackPreToolUse_SemicolonChainedCommand verifies that "echo hi; go test ./..." sends a
+// CommandRan signal for the test category (second segment matches "go test").
+func TestTrackPreToolUse_SemicolonChainedCommand(t *testing.T) {
+	dir := t.TempDir()
+	mock := &mockSignaler{}
+	input := claudeHookInput{
+		SessionID:     "sess-6",
+		HookEventName: "PreToolUse",
+		AgentType:     "developer-1",
+		ToolName:      "Bash",
+		ToolInput:     bashInput(t, "echo hi; go test ./..."),
+		CWD:           dir,
+	}
+	trackPreToolUse(context.Background(), mock, "coding-session-abc", input)
+
+	for _, s := range mock.signals {
+		if s.signalName == "command-ran" {
+			sig, ok := s.arg.(model.SignalCommandRan)
+			if !ok {
+				t.Fatalf("expected SignalCommandRan, got %T", s.arg)
+			}
+			if sig.Category == "test" {
+				return
+			}
+		}
+	}
+	t.Error("no command-ran signal for test category from semicolon-chained command")
+}
+
+// TestTrackPreToolUse_PipedCommand verifies that "go vet ./... | tee log.txt" sends a
+// CommandRan signal for the lint category (first segment matches "go vet").
+func TestTrackPreToolUse_PipedCommand(t *testing.T) {
+	dir := t.TempDir()
+	mock := &mockSignaler{}
+	input := claudeHookInput{
+		SessionID:     "sess-5",
+		HookEventName: "PreToolUse",
+		AgentType:     "developer-1",
+		ToolName:      "Bash",
+		ToolInput:     bashInput(t, "go vet ./... | tee log.txt"),
+		CWD:           dir,
+	}
+	trackPreToolUse(context.Background(), mock, "coding-session-abc", input)
+
+	for _, s := range mock.signals {
+		if s.signalName == "command-ran" {
+			sig, ok := s.arg.(model.SignalCommandRan)
+			if !ok {
+				t.Fatalf("expected SignalCommandRan, got %T", s.arg)
+			}
+			if sig.Category == "lint" {
+				return
+			}
+		}
+	}
+	t.Error("no command-ran signal for lint category from piped command")
+}
+
+// TestEvalTeammateIdleConfig_DeveloperBlockedInDeveloping verifies that a developer
+// going idle in DEVELOPING is denied (default config: role_check on "developer").
+func TestEvalTeammateIdleConfig_DeveloperBlockedInDeveloping(t *testing.T) {
+	dir := t.TempDir()
+	reason := evalTeammateIdleConfig(dir, "DEVELOPING", "developer-1", nil)
+	if reason == "" {
+		t.Error("expected denial reason for developer in DEVELOPING, got empty string")
+	}
+}
+
+// TestEvalTeammateIdleConfig_ReviewerAllowedInDeveloping verifies that a reviewer
+// going idle in DEVELOPING is NOT denied by the developer role_check.
+func TestEvalTeammateIdleConfig_ReviewerAllowedInDeveloping(t *testing.T) {
+	dir := t.TempDir()
+	reason := evalTeammateIdleConfig(dir, "DEVELOPING", "reviewer-1", nil)
+	if reason != "" {
+		t.Errorf("reviewer should be allowed to idle in DEVELOPING, got: %q", reason)
+	}
+}
+
+// TestEvalTeammateIdleConfig_WildcardPhaseAllowsIdle verifies that in phases not explicitly
+// matched (wildcard "*" rule has empty checks), idle is allowed.
+func TestEvalTeammateIdleConfig_WildcardPhaseAllowsIdle(t *testing.T) {
+	dir := t.TempDir()
+	reason := evalTeammateIdleConfig(dir, "REVIEWING", "developer-1", nil)
+	if reason != "" {
+		t.Errorf("all teammates should be allowed to idle in REVIEWING (wildcard), got: %q", reason)
+	}
+}
+
+// TestEvalTeammateIdleConfig_CustomConfig verifies that a project-level .wf-agents.yaml
+// config can add a command_ran check that denies idle when a command hasn't been run.
+func TestEvalTeammateIdleConfig_CustomConfig(t *testing.T) {
+	dir := t.TempDir()
+	writeTempConfig(t, dir, `
+teammate_idle:
+  - match: DEVELOPING
+    checks:
+      - type: command_ran
+        key: lint
+        message: "Must run lint before going idle in DEVELOPING"
+`)
+	// No commands ran — should be denied
+	reason := evalTeammateIdleConfig(dir, "DEVELOPING", "developer-1", map[string]bool{})
+	if reason == "" {
+		t.Error("expected denial because lint has not been run, got empty string")
+	}
+
+	// Lint ran — should be allowed
+	reason = evalTeammateIdleConfig(dir, "DEVELOPING", "developer-1", map[string]bool{"lint": true})
+	if reason != "" {
+		t.Errorf("expected no denial after lint ran, got: %q", reason)
 	}
 }
 
