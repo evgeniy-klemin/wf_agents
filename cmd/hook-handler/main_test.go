@@ -18,6 +18,128 @@ import (
 	"github.com/eklemin/wf-agents/internal/model"
 )
 
+// ---------------------------------------------------------------------------
+// resolveWorkflowID tests
+// ---------------------------------------------------------------------------
+
+// makeMarker is a test helper that writes a JSON marker to $TMPDIR/wf-agents-sessions/<name>.
+func makeMarker(t *testing.T, dir, filename string, fields map[string]string) {
+	t.Helper()
+	data, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatalf("makeMarker: marshal: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, filename), data, 0o644); err != nil {
+		t.Fatalf("makeMarker: write: %v", err)
+	}
+}
+
+// setupSessionsDir creates a temp directory and overrides os.TempDir to return it.
+// Because os.TempDir is not mockable, we use a different approach: we write directly
+// to the real $TMPDIR/wf-agents-sessions directory and clean up afterwards.
+func setupMarkerDir(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(os.TempDir(), "wf-agents-sessions")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("cannot create marker dir: %v", err)
+	}
+	return dir
+}
+
+// TestResolveWorkflowID_DirectMatch verifies that a lead session's marker is found directly.
+func TestResolveWorkflowID_DirectMatch(t *testing.T) {
+	dir := setupMarkerDir(t)
+	sessionID := "direct-match-session-test"
+	defer os.Remove(filepath.Join(dir, sessionID))
+
+	makeMarker(t, dir, sessionID, map[string]string{
+		"session_id":  sessionID,
+		"workflow_id": "coding-session-" + sessionID,
+		"cwd":         "/some/project",
+	})
+
+	got := resolveWorkflowID(sessionID, "/some/project")
+	want := "coding-session-" + sessionID
+	if got != want {
+		t.Errorf("resolveWorkflowID direct match = %q, want %q", got, want)
+	}
+}
+
+// TestResolveWorkflowID_LegacyPlainTextMarker verifies backward compatibility with
+// old plain-text markers (session_id as plain text, not JSON).
+func TestResolveWorkflowID_LegacyPlainTextMarker(t *testing.T) {
+	dir := setupMarkerDir(t)
+	sessionID := "legacy-plain-text-session"
+	marker := filepath.Join(dir, sessionID)
+	defer os.Remove(marker)
+
+	// Write a legacy plain-text marker (old format)
+	if err := os.WriteFile(marker, []byte(sessionID), 0o644); err != nil {
+		t.Fatalf("could not write legacy marker: %v", err)
+	}
+
+	got := resolveWorkflowID(sessionID, "/any/cwd")
+	want := "coding-session-" + sessionID
+	if got != want {
+		t.Errorf("resolveWorkflowID legacy marker = %q, want %q", got, want)
+	}
+}
+
+// TestResolveWorkflowID_CWDMatch verifies that a teammate session (no direct marker)
+// is resolved by scanning markers for a matching CWD.
+func TestResolveWorkflowID_CWDMatch(t *testing.T) {
+	dir := setupMarkerDir(t)
+	leadSessionID := "lead-session-for-cwd-test"
+	teammateSessionID := "teammate-cwd-match-session"
+	cwd := "/unique/cwd/for/cwd-match-test"
+
+	defer os.Remove(filepath.Join(dir, leadSessionID))
+	defer os.Remove(filepath.Join(dir, teammateSessionID)) // auto-created teammate marker
+
+	// Write lead session marker with a distinct CWD
+	makeMarker(t, dir, leadSessionID, map[string]string{
+		"session_id":  leadSessionID,
+		"workflow_id": "coding-session-" + leadSessionID,
+		"cwd":         cwd,
+	})
+
+	// Teammate has a different session_id but same CWD, no marker yet
+	got := resolveWorkflowID(teammateSessionID, cwd)
+	want := "coding-session-" + leadSessionID
+	if got != want {
+		t.Errorf("resolveWorkflowID CWD match = %q, want %q", got, want)
+	}
+
+	// A teammate marker should have been auto-created
+	teammateMarker := filepath.Join(dir, teammateSessionID)
+	data, err := os.ReadFile(teammateMarker)
+	if err != nil {
+		t.Fatalf("teammate marker was not auto-created: %v", err)
+	}
+	var m map[string]string
+	if json.Unmarshal(data, &m) != nil {
+		t.Fatalf("teammate marker is not valid JSON: %s", data)
+	}
+	if m["workflow_id"] != want {
+		t.Errorf("teammate marker workflow_id = %q, want %q", m["workflow_id"], want)
+	}
+	if m["parent"] != leadSessionID {
+		t.Errorf("teammate marker parent = %q, want %q", m["parent"], leadSessionID)
+	}
+	if m["cwd"] != cwd {
+		t.Errorf("teammate marker cwd = %q, want %q", m["cwd"], cwd)
+	}
+}
+
+// TestResolveWorkflowID_NoMatch verifies that an unrelated session returns empty string.
+func TestResolveWorkflowID_NoMatch(t *testing.T) {
+	// Use a session ID that will never have a marker
+	got := resolveWorkflowID("no-marker-session-xyz-never-exists", "/completely/unique/cwd/xyz-never")
+	if got != "" {
+		t.Errorf("resolveWorkflowID no match = %q, want empty string", got)
+	}
+}
+
 // The deny path in main.go calls os.Exit(2) after writing the reason to stdout/stderr.
 // os.Exit(2) cannot be tested in-process without subprocess scaffolding, so there is no
 // TestDenyOutputFormat here. The deny behavior (exit code 2, plain-text reason on stdout)

@@ -102,11 +102,10 @@ func main() {
 	}
 
 	// No active workflow for this session → hooks are no-ops
-	if !sessionMarkerExists(input.SessionID) {
+	workflowID := resolveWorkflowID(input.SessionID, input.CWD)
+	if workflowID == "" {
 		os.Exit(0)
 	}
-
-	workflowID := "coding-session-" + input.SessionID
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -417,12 +416,54 @@ func phaseInstructions(phase model.Phase) string {
 	return cfg.preamble + content
 }
 
-// sessionMarkerExists checks if wf-client start has been run for this session.
-// The marker file is created by wf-client start in $TMPDIR/wf-agents-sessions/<session-id>.
-func sessionMarkerExists(sessionID string) bool {
-	marker := filepath.Join(os.TempDir(), "wf-agents-sessions", sessionID)
-	_, err := os.Stat(marker)
-	return err == nil
+// resolveWorkflowID returns the workflow ID for the given session.
+// First checks if session_id itself has a marker (lead session).
+// If not, scans all markers to find one with matching CWD (teammate session).
+// Returns empty string if no workflow found.
+func resolveWorkflowID(sessionID, cwd string) string {
+	dir := filepath.Join(os.TempDir(), "wf-agents-sessions")
+
+	// Direct match — this is the lead session
+	marker := filepath.Join(dir, sessionID)
+	if data, err := os.ReadFile(marker); err == nil {
+		var m map[string]string
+		if json.Unmarshal(data, &m) == nil {
+			return m["workflow_id"]
+		}
+		// Legacy marker (plain text) — assume workflow_id format
+		return "coding-session-" + strings.TrimSpace(string(data))
+	}
+
+	// No direct match — scan for CWD match (teammate session)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	for _, entry := range entries {
+		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		var m map[string]string
+		if json.Unmarshal(data, &m) != nil {
+			continue
+		}
+		if m["cwd"] == cwd && cwd != "" {
+			// Found a workflow with same CWD — this teammate belongs to it.
+			// Create a marker for the teammate so future hooks resolve directly.
+			teammateMarker := filepath.Join(dir, sessionID)
+			teammateData, _ := json.Marshal(map[string]string{
+				"session_id":  sessionID,
+				"workflow_id": m["workflow_id"],
+				"cwd":         cwd,
+				"parent":      m["session_id"],
+			})
+			_ = os.WriteFile(teammateMarker, teammateData, 0o644)
+			return m["workflow_id"]
+		}
+	}
+
+	return ""
 }
 
 func buildDetail(input claudeHookInput) map[string]string {
