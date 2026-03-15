@@ -172,7 +172,8 @@ func main() {
 
 		// Per-agent command tracking: run before permission check so that tracking
 		// signals are sent regardless of which code path handles the allow/deny.
-		if input.TeammateName != "" {
+		// In PreToolUse, TeammateName is often empty; AgentType (e.g. "developer-1") is the fallback.
+		if input.TeammateName != "" || input.AgentType != "" {
 			trackPreToolUse(ctx, c, workflowID, input)
 		}
 
@@ -327,8 +328,9 @@ func main() {
 			}
 		} else {
 			// Teammate going idle — query per-agent command tracking then evaluate config-driven idle rules.
-			commandsRan := queryAgentCommands(ctx, c, workflowID, input.TeammateName)
-			if reason := evalTeammateIdleConfig(input.CWD, string(phase), input.TeammateName, commandsRan); reason != "" {
+			agentName := resolveAgentName(input)
+			commandsRan := queryAgentCommands(ctx, c, workflowID, agentName)
+			if reason := evalTeammateIdleConfig(input.CWD, string(phase), agentName, commandsRan); reason != "" {
 				fmt.Fprintf(os.Stderr, "%s\n", reason)
 				logResponse(input.SessionID, "TeammateIdle", 2, map[string]string{
 					"action": "keep_working",
@@ -690,11 +692,29 @@ func queryAgentCommands(ctx context.Context, c client.Client, workflowID, agentN
 	return result
 }
 
+// resolveAgentName returns the agent name to use for command tracking.
+// TeammateName is preferred; AgentType is the fallback (populated in PreToolUse when
+// TeammateName is empty, e.g. "developer-1").
+func resolveAgentName(input claudeHookInput) string {
+	if input.TeammateName != "" {
+		return input.TeammateName
+	}
+	return input.AgentType
+}
+
 // trackPreToolUse handles per-agent command tracking signals for PreToolUse events.
 // For file-change tools (Edit/Write/NotebookEdit), it sends InvalidateCommands for categories
 // with invalidate_on_file_change=true. For Bash tools, it matches the command against tracking
 // patterns and sends CommandRan signals for each matched category.
 func trackPreToolUse(ctx context.Context, c client.Client, workflowID string, input claudeHookInput) {
+	agentName := input.TeammateName
+	if agentName == "" {
+		agentName = input.AgentType
+	}
+	if agentName == "" {
+		return
+	}
+
 	cfg, err := config.LoadConfig(input.CWD)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load config for tracking: %v\n", err)
@@ -712,7 +732,7 @@ func trackPreToolUse(ctx context.Context, c client.Client, workflowID string, in
 		if len(toInvalidate) > 0 {
 			err := c.SignalWorkflow(ctx, workflowID, "", wf.SignalInvalidateCommands, model.SignalInvalidateCommands{
 				SessionID:  input.SessionID,
-				AgentName:  input.TeammateName,
+				AgentName:  agentName,
 				Categories: toInvalidate,
 				Tool:       input.ToolName,
 			})
@@ -741,7 +761,7 @@ func trackPreToolUse(ctx context.Context, c client.Client, workflowID string, in
 			if matchesAnyPattern(seg, cat.Patterns) {
 				err := c.SignalWorkflow(ctx, workflowID, "", wf.SignalCommandRan, model.SignalCommandRan{
 					SessionID: input.SessionID,
-					AgentName: input.TeammateName,
+					AgentName: agentName,
 					Category:  catName,
 					Command:   seg,
 				})
