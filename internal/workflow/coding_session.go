@@ -279,27 +279,6 @@ func (s *sessionState) handleTransition(ctx workflow.Context, req model.SignalTr
 func (s *sessionState) handleHookEvent(ctx workflow.Context, evt model.SignalHookEvent) {
 	evtType := model.EventToolUse
 	switch evt.HookType {
-	case "PreToolUse":
-		// Auto-register by agent_type (preferred) or agent_id (fallback).
-		// agent_type is stable across respawns (e.g., "developer-1"), unlike agent_id.
-		regKey := ""
-		if at, ok := evt.Detail["agent_type"]; ok && at != "" {
-			regKey = at
-		} else if ai, ok := evt.Detail["agent_id"]; ok && ai != "" {
-			regKey = ai
-		}
-		if regKey != "" {
-			found := false
-			for _, a := range s.activeAgents {
-				if a == regKey {
-					found = true
-					break
-				}
-			}
-			if !found {
-				s.activeAgents = append(s.activeAgents, regKey)
-			}
-		}
 	case "SubagentStart":
 		evtType = model.EventAgentSpawn
 		if agentType, ok := evt.Detail["agent_type"]; ok && agentType != "" {
