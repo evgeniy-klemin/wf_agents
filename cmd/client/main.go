@@ -52,8 +52,8 @@ func main() {
 		cmdComplete(ctx, c, os.Args[2:])
 	case "reset-iterations":
 		cmdResetIterations(ctx, c, os.Args[2:])
-	case "deregister-agent":
-		cmdDeregisterAgent(ctx, c, os.Args[2:])
+	case "deregister-agent", "shut-down":
+		cmdShutDown(ctx, c, os.Args[2:])
 	case "deregister-all-agents":
 		cmdDeregisterAllAgents(ctx, c, os.Args[2:])
 	case "list":
@@ -76,7 +76,7 @@ Commands:
   journal               <workflow-id> --message <text>
   complete              <workflow-id>
   reset-iterations      <workflow-id>
-  deregister-agent      <workflow-id> --agent <agent-id>
+  shut-down             <workflow-id> --agent <agent-type>
   deregister-all-agents <workflow-id>
   list`)
 }
@@ -337,38 +337,41 @@ func cmdResetIterations(ctx context.Context, c client.Client, args []string) {
 	fmt.Println("Total iterations counter is unchanged. You may now retry the RESPAWN transition.")
 }
 
-// cmdDeregisterAgent removes a single agent from activeAgents by sending a SubagentStop
-// hook event. The workflow's handleHookEvent already handles SubagentStop by filtering
-// the agent out of activeAgents.
-func cmdDeregisterAgent(ctx context.Context, c client.Client, args []string) {
+// cmdShutDown removes a single agent from activeAgents by sending a SubagentStop
+// hook event with agent_type. The workflow's handleHookEvent handles SubagentStop by
+// filtering the agent_type out of activeAgents. This matches the original NTCoding approach
+// where agentType (e.g., "developer-1") is stable across respawns, unlike agentId.
+//
+// Also accepts the legacy "deregister-agent" command alias for backwards compatibility.
+func cmdShutDown(ctx context.Context, c client.Client, args []string) {
 	if len(args) < 1 {
 		log.Fatal("workflow-id required")
 	}
 	workflowID := resolveWorkflowID(args[0])
 
-	var agentID string
+	var agentName string
 	for i := 1; i < len(args)-1; i += 2 {
 		switch args[i] {
 		case "--agent":
-			agentID = args[i+1]
+			agentName = args[i+1]
 		}
 	}
-	if agentID == "" {
-		log.Fatal("--agent <agent-id> is required")
+	if agentName == "" {
+		log.Fatal("--agent <agent-type> is required")
 	}
 
 	sig := model.SignalHookEvent{
 		HookType:  "SubagentStop",
 		SessionID: "cli",
 		Detail: map[string]string{
-			"agent_id": agentID,
+			"agent_type": agentName,
 		},
 	}
 	err := c.SignalWorkflow(ctx, workflowID, "", wf.SignalHookEvent, sig)
 	if err != nil {
 		log.Fatalf("Signal failed: %v", err)
 	}
-	fmt.Printf("Deregister signal sent for agent %q in workflow %s\n", agentID, workflowID)
+	fmt.Printf("Shut-down signal sent for agent %q in workflow %s\n", agentName, workflowID)
 }
 
 // cmdDeregisterAllAgents clears ALL activeAgents by sending a clear-active-agents signal.

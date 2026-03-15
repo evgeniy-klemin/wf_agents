@@ -279,30 +279,48 @@ func (s *sessionState) handleHookEvent(ctx workflow.Context, evt model.SignalHoo
 	evtType := model.EventToolUse
 	switch evt.HookType {
 	case "PreToolUse":
-		// Auto-register teammates from PreToolUse (Agent Teams teammates don't fire SubagentStart)
-		if agentID, ok := evt.Detail["agent_id"]; ok && agentID != "" {
+		// Auto-register by agent_type (preferred) or agent_id (fallback).
+		// agent_type is stable across respawns (e.g., "developer-1"), unlike agent_id.
+		regKey := ""
+		if at, ok := evt.Detail["agent_type"]; ok && at != "" {
+			regKey = at
+		} else if ai, ok := evt.Detail["agent_id"]; ok && ai != "" {
+			regKey = ai
+		}
+		if regKey != "" {
 			found := false
 			for _, a := range s.activeAgents {
-				if a == agentID {
+				if a == regKey {
 					found = true
 					break
 				}
 			}
 			if !found {
-				s.activeAgents = append(s.activeAgents, agentID)
+				s.activeAgents = append(s.activeAgents, regKey)
 			}
 		}
 	case "SubagentStart":
 		evtType = model.EventAgentSpawn
-		if agentID, ok := evt.Detail["agent_id"]; ok {
-			s.activeAgents = append(s.activeAgents, agentID)
+		if agentType, ok := evt.Detail["agent_type"]; ok && agentType != "" {
+			// Store agentType (not agentId) — matches original NTCoding approach.
+			// agentType is stable across respawns (e.g., "developer-1"), unlike agentId.
+			found := false
+			for _, a := range s.activeAgents {
+				if a == agentType {
+					found = true
+					break
+				}
+			}
+			if !found {
+				s.activeAgents = append(s.activeAgents, agentType)
+			}
 		}
 	case "SubagentStop", "Stop":
 		evtType = model.EventAgentStop
-		if agentID, ok := evt.Detail["agent_id"]; ok {
+		if agentType, ok := evt.Detail["agent_type"]; ok && agentType != "" {
 			filtered := s.activeAgents[:0]
 			for _, a := range s.activeAgents {
-				if a != agentID {
+				if a != agentType {
 					filtered = append(filtered, a)
 				}
 			}
