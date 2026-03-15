@@ -170,6 +170,39 @@ teammate_idle:
     checks: []
 ```
 
+### Real-world example: Developer blocked by TeammateIdle
+
+In session `73433ac2`, Developer-1 finished all work (build passes, tests pass, 5 files modified) and wanted to go idle. But our blanket TeammateIdle exit-code-2 enforcement kept blocking him indefinitely. The developer sent a message to the Team Lead:
+
+> "The TeammateIdle hook will keep blocking me indefinitely until the Temporal workflow phase changes from DEVELOPING. I cannot resolve this myself."
+
+With the declarative config, this is solved cleanly:
+
+**Plugin defaults** (`config/defaults.yaml`):
+```yaml
+teammate_idle:
+  - match: "*"
+    checks: []    # everyone idles freely by default
+```
+
+**Project override** (`.wf-agents.yaml`):
+```yaml
+teammate_idle:
+  - match: "developer*"
+    checks:
+      - type: command_ran
+        category: lint
+        message: "Run lint before going idle"
+```
+
+**How it works:**
+1. Developer starts working in DEVELOPING phase
+2. Developer runs `golangci-lint run` → hook-handler matches pattern from `tracking.lint`, sends `track-command` signal → `commandsRan["lint"] = true`
+3. Developer finishes, goes idle → TeammateIdle fires → checks `command_ran` for `lint` → `commandsRan["lint"]` is true → **idle allowed**
+4. If developer tries to idle WITHOUT running lint → check fails → exit code 2 → "Run lint before going idle" → developer keeps working
+
+**Without `.wf-agents.yaml`:** Plugin defaults apply — everyone idles freely, no enforcement. This is the safe default for projects that don't need strict quality gates.
+
 ### Merge strategy (Helm-like)
 
 | Section | Merge rule |
