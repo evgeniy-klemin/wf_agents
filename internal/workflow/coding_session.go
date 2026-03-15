@@ -269,6 +269,7 @@ func (s *sessionState) handleTransition(ctx workflow.Context, req model.SignalTr
 	})
 
 	if req.To.IsTerminal() {
+		s.activeAgents = s.activeAgents[:0]
 		s.doneCh.Send(ctx, true)
 	}
 

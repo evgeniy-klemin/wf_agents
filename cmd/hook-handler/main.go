@@ -71,11 +71,24 @@ func main() {
 		log.Fatalf("Failed to parse hook input: %v", err)
 	}
 
-	// Dump raw hook input to log file for diagnostics
+	// Append to session log file (JSONL format — one JSON object per line)
 	logDir := filepath.Join(os.TempDir(), "wf-agents-hook-logs")
 	_ = os.MkdirAll(logDir, 0755)
-	logFile := filepath.Join(logDir, fmt.Sprintf("%s-%s.json", input.HookEventName, input.SessionID))
-	_ = os.WriteFile(logFile, rawInput, 0644)
+	logFile := filepath.Join(logDir, input.SessionID+".jsonl")
+
+	// Add timestamp and write as one line
+	logEntry := map[string]interface{}{
+		"ts":    time.Now().UTC().Format(time.RFC3339Nano),
+		"event": input.HookEventName,
+		"raw":   json.RawMessage(rawInput),
+	}
+	logLine, _ := json.Marshal(logEntry)
+	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err == nil {
+		f.Write(logLine)
+		f.Write([]byte("\n"))
+		f.Close()
+	}
 
 	// Capture any fields not in our struct
 	var rawFields map[string]json.RawMessage
@@ -495,6 +508,8 @@ func resolveWorkflowID(sessionID, cwd string) string {
 			"parent":      bestSessionID,
 		})
 		_ = os.WriteFile(teammateMarker, teammateData, 0o644)
+		fmt.Fprintf(os.Stderr, "Teammate resolved: session=%s → workflow=%s (via CWD match with %s)\n",
+			sessionID, bestWorkflowID, bestSessionID)
 		return bestWorkflowID
 	}
 
