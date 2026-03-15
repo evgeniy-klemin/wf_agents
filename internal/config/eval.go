@@ -1,6 +1,9 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // CheckContext provides the runtime values needed to evaluate guard checks.
 type CheckContext interface {
@@ -13,6 +16,9 @@ type CheckContext interface {
 	OriginPhase() string
 	// CommandsRan tracks which commands have been run (Phase 2 state).
 	CommandsRan() map[string]bool
+	// TeammateName returns the name of the teammate (used by role_check).
+	// Returns "" when the context is not teammate-specific.
+	TeammateName() string
 }
 
 // EvalCheck evaluates a single Check against the given context.
@@ -68,6 +74,14 @@ func EvalCheck(check Check, ctx CheckContext) string {
 		}
 		return check.Message
 
+	case "role_check":
+		// Passes if the teammate name does NOT contain the role key (i.e. check only applies
+		// to teammates whose name contains key). If it does contain the key, return the message.
+		if strings.Contains(strings.ToLower(ctx.TeammateName()), strings.ToLower(check.Key)) {
+			return check.Message
+		}
+		return ""
+
 	default:
 		return fmt.Sprintf("unknown check type %q", check.Type)
 	}
@@ -82,6 +96,23 @@ func EvalChecks(checks []Check, ctx CheckContext) string {
 		}
 	}
 	return ""
+}
+
+// FindIdleRule returns the first IdleRule from cfg that matches the given phase.
+// Exact phase matches are preferred over wildcard ("*") matches.
+// Returns nil if no rule matches.
+func FindIdleRule(cfg *Config, phase string) *IdleRule {
+	var wild *IdleRule
+	for i := range cfg.TeammateIdle {
+		r := &cfg.TeammateIdle[i]
+		if r.Match == phase {
+			return r
+		}
+		if r.Match == "*" && wild == nil {
+			wild = r
+		}
+	}
+	return wild
 }
 
 // FindGuards returns the GuardRules from cfg that match the given from→to transition.

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/eklemin/wf-agents/internal/config"
 	"github.com/eklemin/wf-agents/internal/model"
 	wf "github.com/eklemin/wf-agents/internal/workflow"
 	"go.temporal.io/sdk/client"
@@ -318,10 +319,9 @@ func main() {
 				})
 				os.Exit(2)
 			}
-		} else if strings.Contains(strings.ToLower(input.TeammateName), "developer") {
-			// Developer going idle.
-			if phase == model.PhaseDeveloping {
-				reason := "Developer cannot go idle in DEVELOPING without finishing work. Complete your task and message the Team Lead."
+		} else {
+			// Teammate going idle — evaluate config-driven idle rules.
+			if reason := evalTeammateIdleConfig(input.CWD, string(phase), input.TeammateName); reason != "" {
 				fmt.Fprintf(os.Stderr, "%s\n", reason)
 				logResponse(input.SessionID, "TeammateIdle", 2, map[string]string{
 					"action": "keep_working",
@@ -330,7 +330,6 @@ func main() {
 				os.Exit(2)
 			}
 		}
-		// Reviewer idle: always allowed (no exit 2).
 
 	case "Stop":
 		sendHookEvent(ctx, c, workflowID, model.SignalHookEvent{
@@ -653,4 +652,37 @@ func temporalHost() string {
 		return h
 	}
 	return "localhost:7233"
+}
+
+// idleCheckContext implements config.CheckContext for teammate idle evaluation.
+// It carries only the teammate name; other fields (evidence, iteration, agents) are
+// not available at idle-check time and return zero/nil values.
+type idleCheckContext struct {
+	teammateName string
+}
+
+func (c *idleCheckContext) Evidence() map[string]string  { return nil }
+func (c *idleCheckContext) ActiveAgentCount() int        { return 0 }
+func (c *idleCheckContext) Iteration() int               { return 0 }
+func (c *idleCheckContext) MaxIterations() int           { return 0 }
+func (c *idleCheckContext) OriginPhase() string          { return "" }
+func (c *idleCheckContext) CommandsRan() map[string]bool { return nil }
+func (c *idleCheckContext) TeammateName() string         { return c.teammateName }
+
+// evalTeammateIdleConfig loads the project config (with optional .wf-agents.yaml override),
+// finds the idle rule matching the current phase, and evaluates its checks.
+// Returns a non-empty denial reason if the teammate should not idle, or "" if idle is allowed.
+func evalTeammateIdleConfig(projectDir, phase, teammateName string) string {
+	cfg, err := config.LoadConfig(projectDir)
+	if err != nil {
+		// Config load failure: log but allow idle to avoid blocking teammates unexpectedly.
+		fmt.Fprintf(os.Stderr, "Warning: failed to load config: %v\n", err)
+		return ""
+	}
+	rule := config.FindIdleRule(cfg, phase)
+	if rule == nil {
+		return ""
+	}
+	ctx := &idleCheckContext{teammateName: teammateName}
+	return config.EvalChecks(rule.Checks, ctx)
 }

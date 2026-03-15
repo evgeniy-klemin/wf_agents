@@ -35,6 +35,7 @@ func (c *sessionCheckContext) Iteration() int                 { return c.state.i
 func (c *sessionCheckContext) MaxIterations() int             { return c.state.maxIter }
 func (c *sessionCheckContext) OriginPhase() string            { return c.originPhase }
 func (c *sessionCheckContext) CommandsRan() map[string]bool   { return nil }
+func (c *sessionCheckContext) TeammateName() string           { return "" }
 
 // validateTransition checks whether the transition from→to is allowed given the current
 // session state and evidence. Returns "" to allow, or a non-empty denial reason.

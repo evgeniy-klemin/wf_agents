@@ -137,12 +137,13 @@ func TestMergeConfigs_IdleNewMatchAppended(t *testing.T) {
 
 // simpleCtx is a test implementation of CheckContext.
 type simpleCtx struct {
-	evidence    map[string]string
-	agentCount  int
-	iteration   int
-	maxIter     int
-	originPhase string
-	commandsRan map[string]bool
+	evidence     map[string]string
+	agentCount   int
+	iteration    int
+	maxIter      int
+	originPhase  string
+	commandsRan  map[string]bool
+	teammateName string
 }
 
 func (c *simpleCtx) Evidence() map[string]string  { return c.evidence }
@@ -151,6 +152,7 @@ func (c *simpleCtx) Iteration() int               { return c.iteration }
 func (c *simpleCtx) MaxIterations() int           { return c.maxIter }
 func (c *simpleCtx) OriginPhase() string          { return c.originPhase }
 func (c *simpleCtx) CommandsRan() map[string]bool { return c.commandsRan }
+func (c *simpleCtx) TeammateName() string         { return c.teammateName }
 
 func TestEvalCheck_EvidencePass(t *testing.T) {
 	c := Check{Type: "evidence", Key: "k", Value: "v", Message: "failed"}
@@ -291,4 +293,84 @@ func TestFindGuards_ExactBeforeWildcard(t *testing.T) {
 	// Exact match must come first
 	assert.Equal(t, "DEVELOPING", rules[0].From)
 	assert.Equal(t, "*", rules[1].From)
+}
+
+// --- role_check ---
+
+func TestEvalCheck_RoleCheckMatchFails(t *testing.T) {
+	c := Check{Type: "role_check", Key: "developer", Message: "developer blocked"}
+	ctx := &simpleCtx{teammateName: "developer-2"}
+	assert.Equal(t, "developer blocked", EvalCheck(c, ctx))
+}
+
+func TestEvalCheck_RoleCheckNoMatchPasses(t *testing.T) {
+	c := Check{Type: "role_check", Key: "developer", Message: "developer blocked"}
+	ctx := &simpleCtx{teammateName: "reviewer-1"}
+	assert.Empty(t, EvalCheck(c, ctx))
+}
+
+func TestEvalCheck_RoleCheckCaseInsensitive(t *testing.T) {
+	c := Check{Type: "role_check", Key: "Developer", Message: "blocked"}
+	ctx := &simpleCtx{teammateName: "Developer-1"}
+	assert.Equal(t, "blocked", EvalCheck(c, ctx))
+}
+
+// --- FindIdleRule ---
+
+func TestFindIdleRule_ExactMatch(t *testing.T) {
+	cfg := &Config{TeammateIdle: []IdleRule{
+		{Match: "DEVELOPING", Checks: []Check{{Type: "role_check", Key: "developer", Message: "m"}}},
+		{Match: "*", Checks: []Check{}},
+	}}
+	rule := FindIdleRule(cfg, "DEVELOPING")
+	require.NotNil(t, rule)
+	assert.Equal(t, "DEVELOPING", rule.Match)
+}
+
+func TestFindIdleRule_WildcardFallback(t *testing.T) {
+	cfg := &Config{TeammateIdle: []IdleRule{
+		{Match: "DEVELOPING", Checks: []Check{{Type: "role_check", Key: "developer", Message: "m"}}},
+		{Match: "*", Checks: []Check{}},
+	}}
+	rule := FindIdleRule(cfg, "REVIEWING")
+	require.NotNil(t, rule)
+	assert.Equal(t, "*", rule.Match)
+}
+
+func TestFindIdleRule_NoMatch(t *testing.T) {
+	cfg := &Config{TeammateIdle: []IdleRule{
+		{Match: "DEVELOPING", Checks: []Check{{Type: "role_check", Key: "developer", Message: "m"}}},
+	}}
+	rule := FindIdleRule(cfg, "REVIEWING")
+	assert.Nil(t, rule)
+}
+
+func TestFindIdleRule_DefaultConfigDeveloperInDeveloping(t *testing.T) {
+	cfg, err := DefaultConfig()
+	require.NoError(t, err)
+	rule := FindIdleRule(cfg, "DEVELOPING")
+	require.NotNil(t, rule)
+	ctx := &simpleCtx{teammateName: "developer-2"}
+	reason := EvalChecks(rule.Checks, ctx)
+	assert.NotEmpty(t, reason)
+}
+
+func TestFindIdleRule_DefaultConfigReviewerInDeveloping(t *testing.T) {
+	cfg, err := DefaultConfig()
+	require.NoError(t, err)
+	rule := FindIdleRule(cfg, "DEVELOPING")
+	require.NotNil(t, rule)
+	ctx := &simpleCtx{teammateName: "reviewer-1"}
+	reason := EvalChecks(rule.Checks, ctx)
+	assert.Empty(t, reason)
+}
+
+func TestFindIdleRule_DefaultConfigAnyPhaseWildcard(t *testing.T) {
+	cfg, err := DefaultConfig()
+	require.NoError(t, err)
+	rule := FindIdleRule(cfg, "REVIEWING")
+	require.NotNil(t, rule)
+	ctx := &simpleCtx{teammateName: "developer-1"}
+	reason := EvalChecks(rule.Checks, ctx)
+	assert.Empty(t, reason)
 }
