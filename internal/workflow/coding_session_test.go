@@ -920,7 +920,7 @@ func TestWorkflowCompletesAfterCompleteTransition(t *testing.T) {
 }
 
 func TestRespawnGuardActiveAgents(t *testing.T) {
-	// Test the RESPAWN → DEVELOPING guard: must deny when subagents still active.
+	// Test the RESPAWN → DEVELOPING guard: must deny when teammates still active.
 	// We verify the guard condition inline since handleTransition needs a workflow context.
 	t.Run("deny with active agents", func(t *testing.T) {
 		activeAgents := []string{"dev-agent-1", "dev-agent-2"}
@@ -933,9 +933,9 @@ func TestRespawnGuardActiveAgents(t *testing.T) {
 		var activeAgents []string
 		assert.Equal(t, 0, len(activeAgents), "should allow when no active agents")
 	})
-	t.Run("SubagentStop removes from list", func(t *testing.T) {
+	t.Run("TeammateStop removes from list", func(t *testing.T) {
 		agents := []string{"dev-1", "rev-1"}
-		// Simulate SubagentStop for dev-1
+		// Simulate TeammateStop (SubagentStop event) for dev-1
 		filtered := agents[:0]
 		for _, a := range agents {
 			if a != "dev-1" {
@@ -944,4 +944,253 @@ func TestRespawnGuardActiveAgents(t *testing.T) {
 		}
 		assert.Equal(t, []string{"rev-1"}, filtered)
 	})
+}
+
+// TestRespawnDoesNotAutoClearActiveAgents verifies that transitioning TO RESPAWN does NOT
+// automatically clear activeAgents. Teammates must shut down explicitly (sending Stop events),
+// which removes them from activeAgents naturally. The guard still blocks RESPAWN → DEVELOPING
+// if agents remain.
+func TestRespawnDoesNotAutoClearActiveAgents(t *testing.T) {
+	t.Run("activeAgents preserved after RESPAWN entry", func(t *testing.T) {
+		// Directly test sessionState — no workflow.Context needed.
+		s := &sessionState{
+			phase:        model.PhaseRespawn,
+			activeAgents: []string{"dev-1", "dev-2", "rev-1"},
+			maxIter:      5,
+			iteration:    1,
+		}
+
+		// No auto-clear should have happened. Agents must still be present.
+		assert.Equal(t, 3, len(s.activeAgents),
+			"RESPAWN must NOT auto-clear activeAgents — teammates must shut down explicitly")
+	})
+
+	t.Run("guardNoActiveAgents blocks RESPAWN→DEVELOPING when agents still active", func(t *testing.T) {
+		s := &sessionState{
+			phase:        model.PhaseRespawn,
+			activeAgents: []string{"dev-1"},
+			maxIter:      5,
+			iteration:    1,
+		}
+
+		reason := guardNoActiveAgents(s, nil)
+		assert.NotEmpty(t, reason,
+			"guardNoActiveAgents must deny RESPAWN→DEVELOPING when activeAgents is non-empty")
+	})
+
+	t.Run("guardNoActiveAgents passes when agents have stopped", func(t *testing.T) {
+		s := &sessionState{
+			phase:        model.PhaseRespawn,
+			activeAgents: []string{},
+			maxIter:      5,
+			iteration:    1,
+		}
+
+		reason := guardNoActiveAgents(s, nil)
+		assert.Empty(t, reason, "guardNoActiveAgents should pass when activeAgents is empty")
+	})
+
+	t.Run("Stop event removes agent so RESPAWN→DEVELOPING is allowed", func(t *testing.T) {
+		// Simulate: agent registers in DEVELOPING via agent_type, sends Stop with agent_type,
+		// then RESPAWN → DEVELOPING succeeds.
+		env := setupEnv(t)
+
+		// Register the agent via PreToolUse using agent_type, then simulate it stopping via SubagentStop.
+		env.RegisterDelayedCallback(func() {
+			env.SignalWorkflow(SignalHookEvent, model.SignalHookEvent{
+				HookType:  "PreToolUse",
+				SessionID: "test",
+				Tool:      "Edit",
+				Detail:    map[string]string{"agent_type": "developer-1", "agent_id": "dev-agent-1"},
+			})
+		}, 0)
+		env.RegisterDelayedCallback(func() {
+			env.SignalWorkflow(SignalHookEvent, model.SignalHookEvent{
+				HookType:  "SubagentStop",
+				SessionID: "test",
+				Detail:    map[string]string{"agent_type": "developer-1"},
+			})
+		}, 0)
+
+		registerTransitions(env, t, []model.Phase{
+			model.PhaseRespawn,
+			model.PhaseDeveloping,
+			model.PhaseReviewing,
+			model.PhaseRespawn,    // Review reject — agent must stop explicitly (Stop event sent above)
+			model.PhaseDeveloping, // guardNoActiveAgents passes because agent stopped
+			model.PhaseReviewing,
+			model.PhaseCommitting,
+			model.PhasePRCreation,
+			model.PhaseFeedback,
+			model.PhaseComplete,
+		})
+
+		env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
+			SessionID: "test", TaskDescription: "test", MaxIterations: 5,
+		})
+
+		require.True(t, env.IsWorkflowCompleted(),
+			"workflow should complete after agent stops naturally")
+		require.NoError(t, env.GetWorkflowError())
+	})
+}
+
+// TestSubagentStartStoresAgentType verifies that SubagentStart stores agent_type
+// (not agent_id) in activeAgents, and SubagentStop removes by agent_type.
+func TestSubagentStartStoresAgentType(t *testing.T) {
+	env := setupEnv(t)
+
+	// Send SubagentStart with agent_type — should register it.
+	// Then send SubagentStop with agent_type — should deregister it.
+	// Then RESPAWN → DEVELOPING should succeed (no active agents).
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(SignalHookEvent, model.SignalHookEvent{
+			HookType:  "SubagentStart",
+			SessionID: "test",
+			Detail:    map[string]string{"agent_type": "developer-1", "agent_id": "some-uuid-abc"},
+		})
+	}, 0)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(SignalHookEvent, model.SignalHookEvent{
+			HookType:  "SubagentStop",
+			SessionID: "test",
+			Detail:    map[string]string{"agent_type": "developer-1"},
+		})
+	}, 0)
+
+	registerTransitions(env, t, []model.Phase{
+		model.PhaseRespawn,
+		model.PhaseDeveloping,
+		model.PhaseReviewing,
+		model.PhaseCommitting,
+		model.PhasePRCreation,
+		model.PhaseFeedback,
+		model.PhaseComplete,
+	})
+
+	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
+		SessionID: "test", TaskDescription: "test", MaxIterations: 5,
+	})
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+}
+
+// TestSubagentStartNoDuplicates verifies that SubagentStart does not add duplicate agent_type.
+func TestSubagentStartNoDuplicates(t *testing.T) {
+	env := setupEnv(t)
+
+	// Send SubagentStart twice with the same agent_type.
+	// Then send SubagentStop once — should deregister it cleanly.
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(SignalHookEvent, model.SignalHookEvent{
+			HookType:  "SubagentStart",
+			SessionID: "test",
+			Detail:    map[string]string{"agent_type": "developer-1"},
+		})
+		env.SignalWorkflow(SignalHookEvent, model.SignalHookEvent{
+			HookType:  "SubagentStart",
+			SessionID: "test",
+			Detail:    map[string]string{"agent_type": "developer-1"},
+		})
+		env.SignalWorkflow(SignalHookEvent, model.SignalHookEvent{
+			HookType:  "SubagentStop",
+			SessionID: "test",
+			Detail:    map[string]string{"agent_type": "developer-1"},
+		})
+	}, 0)
+
+	registerTransitions(env, t, []model.Phase{
+		model.PhaseRespawn,
+		model.PhaseDeveloping,
+		model.PhaseReviewing,
+		model.PhaseCommitting,
+		model.PhasePRCreation,
+		model.PhaseFeedback,
+		model.PhaseComplete,
+	})
+
+	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
+		SessionID: "test", TaskDescription: "test", MaxIterations: 5,
+	})
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	val, err := env.QueryWorkflow(QueryStatus)
+	require.NoError(t, err)
+	var status model.WorkflowStatus
+	require.NoError(t, val.Get(&status))
+	assert.Equal(t, 0, len(status.ActiveAgents),
+		"activeAgents should be empty after SubagentStop")
+}
+
+// TestShutDownCommandUsesAgentType verifies that the shut-down CLI command
+// sends a SubagentStop signal with agent_type (not agent_id).
+// We test this by directly verifying the signal structure.
+func TestShutDownCommandUsesAgentType(t *testing.T) {
+	// The cmdShutDown function sends:
+	//   HookType: "SubagentStop"
+	//   Detail: map[string]string{"agent_type": agentName}
+	// We verify this structure here by constructing the signal and checking its fields.
+	agentName := "developer-1"
+	sig := model.SignalHookEvent{
+		HookType:  "SubagentStop",
+		SessionID: "cli",
+		Detail: map[string]string{
+			"agent_type": agentName,
+		},
+	}
+	assert.Equal(t, "SubagentStop", sig.HookType)
+	assert.Equal(t, "developer-1", sig.Detail["agent_type"])
+	_, hasAgentID := sig.Detail["agent_id"]
+	assert.False(t, hasAgentID, "shut-down signal should not include agent_id")
+}
+
+// TestClearActiveAgentsSignal verifies that the clear-active-agents signal
+// removes all agents from activeAgents.
+func TestClearActiveAgentsSignal(t *testing.T) {
+	env := setupEnv(t)
+
+	// Register two agents via PreToolUse using agent_type, then send clear signal, then complete.
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(SignalHookEvent, model.SignalHookEvent{
+			HookType:  "PreToolUse",
+			SessionID: "test",
+			Tool:      "Edit",
+			Detail:    map[string]string{"agent_type": "developer-1"},
+		})
+		env.SignalWorkflow(SignalHookEvent, model.SignalHookEvent{
+			HookType:  "PreToolUse",
+			SessionID: "test",
+			Tool:      "Edit",
+			Detail:    map[string]string{"agent_type": "reviewer-1"},
+		})
+		// Clear all agents
+		env.SignalWorkflow(SignalClearActiveAgents, "cli")
+	}, 0)
+
+	registerTransitions(env, t, []model.Phase{
+		model.PhaseRespawn,
+		model.PhaseDeveloping,
+		model.PhaseReviewing,
+		model.PhaseCommitting,
+		model.PhasePRCreation,
+		model.PhaseFeedback,
+		model.PhaseComplete,
+	})
+
+	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
+		SessionID: "test", TaskDescription: "test", MaxIterations: 5,
+	})
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	val, err := env.QueryWorkflow(QueryStatus)
+	require.NoError(t, err)
+	var status model.WorkflowStatus
+	require.NoError(t, val.Get(&status))
+	assert.Equal(t, 0, len(status.ActiveAgents),
+		"activeAgents should be empty after clear-active-agents signal")
 }

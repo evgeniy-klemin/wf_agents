@@ -55,7 +55,7 @@ func guardNoActiveAgents(s *sessionState, _ map[string]string) string {
 		return ""
 	}
 	return fmt.Sprintf(
-		"cannot leave RESPAWN with %d active subagent(s) — kill old agents before spawning new ones",
+		"cannot leave RESPAWN with %d active teammate(s) — shut down old teammates before spawning new ones",
 		len(s.activeAgents),
 	)
 }
@@ -143,8 +143,8 @@ func validateTransition(s *sessionState, from, to model.Phase, evidence map[stri
 // --- Tool permission enforcement ---
 //
 // Rules:
-// - Team Lead (main agent, not a subagent): Edit/Write/NotebookEdit are always forbidden —
-//   Team Lead must delegate file changes to Developer subagent.
+// - Team Lead (main agent, not a teammate): Edit/Write/NotebookEdit are always forbidden —
+//   Team Lead must delegate file changes to Developer teammate.
 // - PLANNING and RESPAWN: all file writes (Edit/Write/NotebookEdit) are forbidden for everyone.
 // - Global: git commit, git push, git checkout, git add are forbidden in ALL phases
 //   except per-phase exemptions:
@@ -196,7 +196,7 @@ func isClaudeInfraFile(toolInput json.RawMessage) bool {
 }
 
 // CheckToolPermission checks whether a tool is allowed given the phase, tool name,
-// agent ID, and the current set of active agents.
+// agent ID, and the current set of active teammates.
 // This centralizes ALL permission logic alongside transition guards.
 func CheckToolPermission(
 	phase model.Phase,
@@ -205,15 +205,15 @@ func CheckToolPermission(
 	agentID string,
 	activeAgents []string,
 ) ToolPermissionResult {
-	isTeamLead := !IsSubagent(agentID, activeAgents)
+	isTeamLead := !IsTeammate(agentID, activeAgents)
 
 	// Team Lead cannot edit PROJECT files directly — but CAN write plan/memory files
 	// (Claude Code infra: plan mode and memory system). Must delegate project file changes
-	// to Developer subagent.
+	// to Developer teammate.
 	if isTeamLead && fileWritingTools[toolName] && !isClaudeInfraFile(toolInput) {
 		return ToolPermissionResult{
 			Denied: true,
-			Reason: "Team Lead cannot edit files directly — delegate to Developer subagent",
+			Reason: "Team Lead cannot edit files directly — delegate to Developer teammate",
 		}
 	}
 
@@ -243,25 +243,19 @@ func CheckToolPermission(
 		return result
 	}
 
-	// If we get here, the tool is allowed. Auto-approve for subagents to bypass permission prompts.
+	// If we get here, the tool is allowed. Auto-approve for teammates to bypass permission prompts.
 	if !isTeamLead {
 		return ToolPermissionResult{Denied: false, Allowed: true}
 	}
 	return ToolPermissionResult{Denied: false}
 }
 
-// IsSubagent returns true if agentID is non-empty and present in the activeAgents list.
-// If agentID is empty or not in the list, the caller is assumed to be the Team Lead (main agent).
-func IsSubagent(agentID string, activeAgents []string) bool {
-	if agentID == "" {
-		return false
-	}
-	for _, id := range activeAgents {
-		if id == agentID {
-			return true
-		}
-	}
-	return false
+// IsTeammate returns true if agentID is non-empty.
+// Agent Teams teammates may not have fired SubagentStart before PreToolUse, so
+// checking against activeAgents is unreliable. Any non-empty agentID is treated
+// as a teammate; an empty agentID means the main agent (Team Lead).
+func IsTeammate(agentID string, activeAgents []string) bool {
+	return agentID != ""
 }
 
 // safeGitSubcommands are read-only git subcommands allowed in PLANNING.
@@ -590,7 +584,7 @@ func PhaseHint(phase model.Phase) string {
 	case model.PhaseRespawn:
 		return "Only agent management allowed. Transition to DEVELOPING when agents are ready."
 	case model.PhaseReviewing:
-		return "Team Lead must delegate review to Reviewer subagent — do NOT review code directly. If issues found, transition back to DEVELOPING."
+		return "Team Lead must delegate review to Reviewer teammate — do NOT review code directly. If issues found, transition back to DEVELOPING."
 	case model.PhaseCommitting:
 		return "Only git operations are allowed."
 	case model.PhasePRCreation:

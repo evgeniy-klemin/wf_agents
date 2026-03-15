@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -33,6 +34,8 @@ type claudeHookInput struct {
 	Model          string          `json:"model,omitempty"`
 	LastMessage    string          `json:"last_assistant_message,omitempty"`
 	Error          string          `json:"error,omitempty"`
+	TeammateName   string          `json:"teammate_name,omitempty"`
+	TeamName       string          `json:"team_name,omitempty"`
 }
 
 // hookOutput is the JSON structure that Claude Code expects on stdout (exit 0).
@@ -53,13 +56,78 @@ type hookSpecificOutput struct {
 	PermissionDecisionReason string `json:"permissionDecisionReason,omitempty"`
 }
 
+// logResponse appends a response entry to the session JSONL log.
+func logResponse(sessionID string, event string, exitCode int, response interface{}) {
+	logDir := filepath.Join(os.TempDir(), "wf-agents-hook-logs")
+	logFile := filepath.Join(logDir, sessionID+".jsonl")
+	entry := map[string]interface{}{
+		"ts":        time.Now().UTC().Format(time.RFC3339Nano),
+		"event":     event,
+		"direction": "response",
+		"exit_code": exitCode,
+		"response":  response,
+	}
+	line, _ := json.Marshal(entry)
+	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err == nil {
+		f.Write(line)
+		f.Write([]byte("\n"))
+		f.Close()
+	}
+}
+
 func main() {
 	log.SetFlags(0)
 	log.SetOutput(os.Stderr)
 
+	// Read raw stdin for diagnostics, then decode
+	rawInput, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		log.Fatalf("Failed to read stdin: %v", err)
+	}
+
 	var input claudeHookInput
-	if err := json.NewDecoder(os.Stdin).Decode(&input); err != nil {
+	if err := json.Unmarshal(rawInput, &input); err != nil {
 		log.Fatalf("Failed to parse hook input: %v", err)
+	}
+
+	// Append to session log file (JSONL format — one JSON object per line)
+	logDir := filepath.Join(os.TempDir(), "wf-agents-hook-logs")
+	_ = os.MkdirAll(logDir, 0755)
+	logFile := filepath.Join(logDir, input.SessionID+".jsonl")
+
+	// Add timestamp and write as one line
+	logEntry := map[string]interface{}{
+		"ts":        time.Now().UTC().Format(time.RFC3339Nano),
+		"event":     input.HookEventName,
+		"direction": "request",
+		"raw":       json.RawMessage(rawInput),
+	}
+	logLine, _ := json.Marshal(logEntry)
+	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err == nil {
+		f.Write(logLine)
+		f.Write([]byte("\n"))
+		f.Close()
+	}
+
+	// Capture any fields not in our struct
+	var rawFields map[string]json.RawMessage
+	_ = json.Unmarshal(rawInput, &rawFields)
+	// Log unknown fields to stderr for discovery
+	knownFields := map[string]bool{
+		"session_id": true, "hook_event_name": true, "cwd": true,
+		"permission_mode": true, "transcript_path": true,
+		"tool_name": true, "tool_input": true, "tool_response": true,
+		"tool_use_id": true, "agent_id": true, "agent_type": true,
+		"prompt": true, "source": true, "model": true,
+		"last_assistant_message": true, "error": true,
+		"teammate_name": true, "team_name": true,
+	}
+	for k := range rawFields {
+		if !knownFields[k] {
+			fmt.Fprintf(os.Stderr, "UNKNOWN FIELD in %s: %s = %s\n", input.HookEventName, k, string(rawFields[k]))
+		}
 	}
 
 	if input.SessionID == "" {
@@ -68,11 +136,19 @@ func main() {
 	}
 
 	// No active workflow for this session → hooks are no-ops
-	if !sessionMarkerExists(input.SessionID) {
+	workflowID := resolveWorkflowID(input.SessionID, input.CWD)
+	if workflowID == "" {
 		os.Exit(0)
 	}
 
-	workflowID := "coding-session-" + input.SessionID
+	// Detect teammate sessions: their session_id differs from the workflow's.
+	// Set a synthetic agent_id so IsTeammate() returns true and teammates get auto-approve.
+	workflowSessionID := strings.TrimPrefix(workflowID, "coding-session-")
+	if input.SessionID != workflowSessionID {
+		if input.AgentID == "" {
+			input.AgentID = "teammate-" + input.SessionID
+		}
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -87,41 +163,6 @@ func main() {
 	defer c.Close()
 
 	detail := buildDetail(input)
-
-	// --- Auto-BLOCKED / auto-unblock logic (before per-event handling) ---
-	//
-	// "Blocking" events: Notification, TeammateIdle → transition TO BLOCKED
-	// All other events from Claude Code → transition BACK from BLOCKED
-	// "Blocking" events: agent stopped working, waiting for input
-	// Stop = Claude finished turn, waiting for user input
-	// Notification = system notification (e.g., teammate needs attention)
-	// TeammateIdle = subagent waiting
-	isBlockingEvent := input.HookEventName == "Stop" || input.HookEventName == "Notification" ||
-		input.HookEventName == "TeammateIdle"
-
-	if isBlockingEvent {
-		phase := queryPhase(ctx, c, workflowID)
-		autoBlockPhases := map[model.Phase]bool{
-			model.PhasePlanning:   true,
-			model.PhaseDeveloping: true,
-			model.PhaseReviewing:  true,
-			model.PhaseCommitting: true,
-			model.PhaseRespawn:    true,
-			model.PhasePRCreation: true,
-			model.PhaseFeedback:   true,
-		}
-		if autoBlockPhases[phase] {
-			autoTransition(ctx, c, workflowID, input.SessionID, model.PhaseBlocked,
-				fmt.Sprintf("auto: %s in %s", input.HookEventName, phase))
-		}
-	} else if input.HookEventName != "SessionStart" {
-		// Any active event (tool use, user prompt, subagent, etc.) → auto-unblock
-		status := queryStatus(ctx, c, workflowID)
-		if status.Phase == model.PhaseBlocked && status.PreBlockedPhase != "" {
-			autoTransition(ctx, c, workflowID, input.SessionID, status.PreBlockedPhase,
-				fmt.Sprintf("auto: %s received, returning to %s", input.HookEventName, status.PreBlockedPhase))
-		}
-	}
 
 	switch input.HookEventName {
 	case "PreToolUse":
@@ -147,6 +188,10 @@ func main() {
 			// Write reason to stderr (logged) and stdout (shown to Claude).
 			fmt.Fprintf(os.Stderr, "DENIED: %s\n", decision.Reason)
 			fmt.Fprintf(os.Stdout, "%s\n", decision.Reason)
+			logResponse(input.SessionID, "PreToolUse", 2, map[string]string{
+				"decision": "deny",
+				"reason":   decision.Reason,
+			})
 			os.Exit(2)
 		}
 
@@ -170,6 +215,10 @@ func main() {
 				},
 			}
 			json.NewEncoder(os.Stdout).Encode(out)
+			logResponse(input.SessionID, "PreToolUse", 0, map[string]string{
+				"decision": "allow",
+				"phase":    string(currentPhase),
+			})
 			os.Exit(0)
 		}
 
@@ -193,6 +242,10 @@ func main() {
 			}
 			json.NewEncoder(os.Stdout).Encode(out)
 		}
+		logResponse(input.SessionID, "PreToolUse", 0, map[string]string{
+			"decision": "pass",
+			"phase":    string(currentPhase),
+		})
 
 	case "PostToolUse":
 		sendHookEvent(ctx, c, workflowID, model.SignalHookEvent{
@@ -239,11 +292,45 @@ func main() {
 	case "TeammateIdle":
 		detail["agent_id"] = input.AgentID
 		detail["agent_type"] = input.AgentType
+		detail["teammate_name"] = input.TeammateName
+		detail["team_name"] = input.TeamName
 		sendHookEvent(ctx, c, workflowID, model.SignalHookEvent{
 			HookType:  "TeammateIdle",
 			SessionID: input.SessionID,
 			Detail:    detail,
 		})
+
+		// Determine who is idle and enforce appropriate constraints.
+		// If teammate_name is non-empty (or agent_id is non-empty), this is a teammate going idle.
+		// If both are empty, assume it is the Team Lead.
+		phase := queryPhase(ctx, c, workflowID)
+		isTeammate := input.TeammateName != "" || input.AgentID != ""
+
+		if !isTeammate {
+			// This is the Team Lead going idle.
+			// Lead can only idle in BLOCKED or COMPLETE.
+			if phase != model.PhaseBlocked && phase != model.PhaseComplete {
+				reason := fmt.Sprintf("Lead cannot go idle in %s. Transition to BLOCKED or COMPLETE, or continue working.", phase)
+				fmt.Fprintf(os.Stderr, "%s\n", reason)
+				logResponse(input.SessionID, "TeammateIdle", 2, map[string]string{
+					"action": "keep_working",
+					"reason": reason,
+				})
+				os.Exit(2)
+			}
+		} else if strings.Contains(strings.ToLower(input.TeammateName), "developer") {
+			// Developer going idle.
+			if phase == model.PhaseDeveloping {
+				reason := "Developer cannot go idle in DEVELOPING without finishing work. Complete your task and message the Team Lead."
+				fmt.Fprintf(os.Stderr, "%s\n", reason)
+				logResponse(input.SessionID, "TeammateIdle", 2, map[string]string{
+					"action": "keep_working",
+					"reason": reason,
+				})
+				os.Exit(2)
+			}
+		}
+		// Reviewer idle: always allowed (no exit 2).
 
 	case "Stop":
 		sendHookEvent(ctx, c, workflowID, model.SignalHookEvent{
@@ -278,6 +365,10 @@ func main() {
 			},
 		}
 		json.NewEncoder(os.Stdout).Encode(out)
+		logResponse(input.SessionID, "SessionStart", 0, map[string]string{
+			"action":      "context_injected",
+			"workflow_id": workflowID,
+		})
 
 	case "UserPromptSubmit":
 		detail["prompt"] = input.Prompt
@@ -290,6 +381,13 @@ func main() {
 		if input.Prompt != "" {
 			setTask(ctx, c, workflowID, input.Prompt)
 		}
+
+	case "TaskCompleted":
+		sendHookEvent(ctx, c, workflowID, model.SignalHookEvent{
+			HookType:  "TaskCompleted",
+			SessionID: input.SessionID,
+			Detail:    detail,
+		})
 
 	case "PermissionRequest":
 		// Log to Temporal for audit trail — PreToolUse already handled auto-approve/deny,
@@ -309,6 +407,9 @@ func main() {
 		})
 	}
 
+	logResponse(input.SessionID, input.HookEventName, 0, map[string]string{
+		"action": "logged",
+	})
 	os.Exit(0)
 }
 
@@ -330,9 +431,8 @@ func queryPhase(ctx context.Context, c client.Client, workflowID string) model.P
 // phaseInstructions returns comprehensive enforcement instructions for the current phase.
 // Injected as additionalContext on every PreToolUse — this is the PRIMARY mechanism
 // that keeps Claude on track (since plugin CLAUDE.md is project docs, not workflow rules).
-// For most phases, content is loaded from claude/states/<phase>.md under CLAUDE_PLUGIN_ROOT
-// and placeholders ({{WF_CLIENT}}, {{PLUGIN_ROOT}}, {{AGENT_FILE}}) are substituted.
-// COMPLETE and BLOCKED are kept as hardcoded one-liners.
+// Content is loaded from states/<phase>.md under CLAUDE_PLUGIN_ROOT and placeholders
+// ({{WF_CLIENT}}, {{PLUGIN_ROOT}}, {{AGENT_FILE}}) are substituted.
 func phaseInstructions(phase model.Phase) string {
 	wfc := wfClientBin()
 
@@ -348,20 +448,8 @@ func phaseInstructions(phase model.Phase) string {
 		"CONTEXT RECOVERY: If context was compressed or you lost your role instructions, " +
 		"re-read your full protocol: " + agentFile + "\n\n"
 
-	// Enforcement-only preamble for phases where subagents act
+	// Enforcement-only preamble for phases where teammates act
 	enforcementPreamble := "If a tool call is denied, DO NOT retry — follow the denial reason.\n\n"
-
-	// Keep simple one-liners hardcoded — no file needed.
-	switch phase {
-	case model.PhaseComplete:
-		return "PHASE: COMPLETE. Workflow finished. No further actions needed."
-	case model.PhaseBlocked:
-		return fmt.Sprintf(`PHASE: BLOCKED — Paused, waiting for human intervention.
-
-DO NOT proceed. DO NOT attempt transitions except back to the pre-blocked phase.
-Check: %s status <id> to see pre_blocked_phase.
-When unblocked: transition ONLY to the pre-blocked phase.`, wfc)
-	}
 
 	// Map each phase to its state file name and the appropriate preamble.
 	type phaseConfig struct {
@@ -376,6 +464,8 @@ When unblocked: transition ONLY to the pre-blocked phase.`, wfc)
 		model.PhaseCommitting: {"committing.md", teamLeadPreamble},
 		model.PhasePRCreation: {"pr_creation.md", teamLeadPreamble},
 		model.PhaseFeedback:   {"feedback.md", teamLeadPreamble},
+		model.PhaseBlocked:    {"blocked.md", teamLeadPreamble},
+		model.PhaseComplete:   {"complete.md", teamLeadPreamble},
 	}
 
 	cfg, ok := configs[phase]
@@ -383,7 +473,7 @@ When unblocked: transition ONLY to the pre-blocked phase.`, wfc)
 		return fmt.Sprintf("PHASE: %s", phase)
 	}
 
-	stateFile := filepath.Join(pluginRoot, "claude", "states", cfg.filename)
+	stateFile := filepath.Join(pluginRoot, "states", cfg.filename)
 	raw, err := os.ReadFile(stateFile)
 	if err != nil {
 		return fmt.Sprintf("PHASE: %s", phase)
@@ -398,12 +488,82 @@ When unblocked: transition ONLY to the pre-blocked phase.`, wfc)
 	return cfg.preamble + content
 }
 
-// sessionMarkerExists checks if wf-client start has been run for this session.
-// The marker file is created by wf-client start in $TMPDIR/wf-agents-sessions/<session-id>.
-func sessionMarkerExists(sessionID string) bool {
-	marker := filepath.Join(os.TempDir(), "wf-agents-sessions", sessionID)
-	_, err := os.Stat(marker)
-	return err == nil
+// resolveWorkflowID returns the workflow ID for the given session.
+// First checks if session_id itself has a marker (lead session).
+// If not, scans all markers to find one with matching CWD (teammate session).
+// Returns empty string if no workflow found.
+func resolveWorkflowID(sessionID, cwd string) string {
+	dir := filepath.Join(os.TempDir(), "wf-agents-sessions")
+
+	// Direct match — this is the lead session
+	marker := filepath.Join(dir, sessionID)
+	if data, err := os.ReadFile(marker); err == nil {
+		var m map[string]string
+		if json.Unmarshal(data, &m) == nil {
+			return m["workflow_id"]
+		}
+		// Legacy marker (plain text) — assume workflow_id format
+		return "coding-session-" + strings.TrimSpace(string(data))
+	}
+
+	// No direct match — scan for CWD match (teammate session).
+	// Only consider lead markers (no "parent" field). Among multiple lead markers
+	// with the same CWD, pick the one with the most recent modification time.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+
+	var bestWorkflowID string
+	var bestSessionID string
+	var bestModTime time.Time
+
+	for _, entry := range entries {
+		path := filepath.Join(dir, entry.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var m map[string]string
+		if json.Unmarshal(data, &m) != nil {
+			continue
+		}
+		// Skip teammate markers — only lead markers can be the CWD match source.
+		if m["parent"] != "" {
+			continue
+		}
+		if m["cwd"] != cwd || cwd == "" {
+			continue
+		}
+		// Pick the marker with the latest modification time.
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().After(bestModTime) {
+			bestModTime = info.ModTime()
+			bestWorkflowID = m["workflow_id"]
+			bestSessionID = m["session_id"]
+		}
+	}
+
+	if bestWorkflowID != "" && bestSessionID != sessionID {
+		// Found a workflow with same CWD — this teammate belongs to it.
+		// Create a marker for the teammate so future hooks resolve directly.
+		teammateMarker := filepath.Join(dir, sessionID)
+		teammateData, _ := json.Marshal(map[string]string{
+			"session_id":  sessionID,
+			"workflow_id": bestWorkflowID,
+			"cwd":         cwd,
+			"parent":      bestSessionID,
+		})
+		_ = os.WriteFile(teammateMarker, teammateData, 0o644)
+		fmt.Fprintf(os.Stderr, "Teammate resolved: session=%s → workflow=%s (via CWD match with %s)\n",
+			sessionID, bestWorkflowID, bestSessionID)
+		return bestWorkflowID
+	}
+
+	return ""
 }
 
 func buildDetail(input claudeHookInput) map[string]string {
@@ -425,37 +585,25 @@ func buildDetail(input claudeHookInput) map[string]string {
 	if input.Error != "" {
 		d["error"] = input.Error
 	}
+	if input.AgentID != "" {
+		d["agent_id"] = input.AgentID
+	}
+	if input.AgentType != "" {
+		d["agent_type"] = input.AgentType
+	}
+	if input.Source != "" {
+		d["source"] = input.Source
+	}
+	if input.Model != "" {
+		d["model"] = input.Model
+	}
+	if input.TeammateName != "" {
+		d["teammate_name"] = input.TeammateName
+	}
+	if input.TeamName != "" {
+		d["team_name"] = input.TeamName
+	}
 	return d
-}
-
-// autoTransition performs a workflow transition via UpdateWorkflow (same path as wf-client).
-// Errors are logged but not fatal — the workflow continues even if auto-transition fails.
-func autoTransition(ctx context.Context, c client.Client, workflowID, sessionID string, to model.Phase, reason string) {
-	req := model.SignalTransition{
-		To:        to,
-		SessionID: sessionID,
-		Reason:    reason,
-	}
-	handle, err := c.UpdateWorkflow(ctx, client.UpdateWorkflowOptions{
-		WorkflowID:   workflowID,
-		UpdateName:   wf.UpdateTransition,
-		Args:         []interface{}{req},
-		WaitForStage: client.WorkflowUpdateStageCompleted,
-	})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: auto-transition to %s failed: %v\n", to, err)
-		return
-	}
-	var result model.TransitionResult
-	if err := handle.Get(ctx, &result); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: auto-transition result error: %v\n", err)
-		return
-	}
-	if result.Allowed {
-		fmt.Fprintf(os.Stderr, "Auto-transition: %s → %s (%s)\n", result.From, result.To, reason)
-	} else {
-		fmt.Fprintf(os.Stderr, "Warning: auto-transition denied: %s → %s: %s\n", result.From, result.To, result.Reason)
-	}
 }
 
 // queryStatus fetches full workflow status (phase + pre_blocked_phase) via Temporal query.
