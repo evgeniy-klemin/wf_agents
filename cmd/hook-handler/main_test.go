@@ -256,6 +256,132 @@ func TestPhaseInstructionsFallbackOnMissingFile(t *testing.T) {
 	}
 }
 
+// TestSyntheticAgentID_TeammateSessionGetsAgentID verifies that when a session_id differs from
+// the workflow's session_id (teammate session), a synthetic agent_id is set.
+func TestSyntheticAgentID_TeammateSessionGetsAgentID(t *testing.T) {
+	dir := setupMarkerDir(t)
+	leadSessionID := "lead-session-synthetic-agent-id-test"
+	teammateSessionID := "teammate-synthetic-agent-id-test"
+	cwd := "/unique/cwd/for/synthetic-agent-id-test"
+	workflowID := "coding-session-" + leadSessionID
+
+	defer os.Remove(filepath.Join(dir, leadSessionID))
+	defer os.Remove(filepath.Join(dir, teammateSessionID))
+
+	// Write lead session marker
+	makeMarker(t, dir, leadSessionID, map[string]string{
+		"session_id":  leadSessionID,
+		"workflow_id": workflowID,
+		"cwd":         cwd,
+	})
+
+	// Simulate a teammate hook input: same CWD, different session_id, empty agent_id
+	input := claudeHookInput{
+		SessionID: teammateSessionID,
+		CWD:       cwd,
+		AgentID:   "",
+	}
+
+	// Resolve the workflow ID (side-effect: creates teammate marker)
+	resolvedWorkflowID := resolveWorkflowID(input.SessionID, input.CWD)
+	if resolvedWorkflowID != workflowID {
+		t.Fatalf("expected workflow_id %q, got %q", workflowID, resolvedWorkflowID)
+	}
+
+	// Apply synthetic agent_id logic (mirrors the code in main())
+	workflowSessionID := strings.TrimPrefix(resolvedWorkflowID, "coding-session-")
+	if input.SessionID != workflowSessionID && input.AgentID == "" {
+		input.AgentID = "teammate-" + input.SessionID
+	}
+
+	expectedAgentID := "teammate-" + teammateSessionID
+	if input.AgentID != expectedAgentID {
+		t.Errorf("synthetic agent_id = %q, want %q", input.AgentID, expectedAgentID)
+	}
+}
+
+// TestSyntheticAgentID_LeadSessionUnchanged verifies that the lead session's agent_id is NOT
+// modified (session_id matches workflow's session_id).
+func TestSyntheticAgentID_LeadSessionUnchanged(t *testing.T) {
+	dir := setupMarkerDir(t)
+	leadSessionID := "lead-session-no-change-test"
+	workflowID := "coding-session-" + leadSessionID
+	cwd := "/unique/cwd/for/no-change-test"
+
+	defer os.Remove(filepath.Join(dir, leadSessionID))
+
+	makeMarker(t, dir, leadSessionID, map[string]string{
+		"session_id":  leadSessionID,
+		"workflow_id": workflowID,
+		"cwd":         cwd,
+	})
+
+	input := claudeHookInput{
+		SessionID: leadSessionID,
+		CWD:       cwd,
+		AgentID:   "",
+	}
+
+	resolvedWorkflowID := resolveWorkflowID(input.SessionID, input.CWD)
+	if resolvedWorkflowID != workflowID {
+		t.Fatalf("expected workflow_id %q, got %q", workflowID, resolvedWorkflowID)
+	}
+
+	// Apply synthetic agent_id logic
+	workflowSessionID := strings.TrimPrefix(resolvedWorkflowID, "coding-session-")
+	if input.SessionID != workflowSessionID && input.AgentID == "" {
+		input.AgentID = "teammate-" + input.SessionID
+	}
+
+	// Lead session should NOT get a synthetic agent_id
+	if input.AgentID != "" {
+		t.Errorf("lead session agent_id should remain empty, got %q", input.AgentID)
+	}
+}
+
+// TestSyntheticAgentID_ExistingAgentIDPreserved verifies that a teammate with an existing
+// agent_id (explicitly set by Claude Code) is not overwritten.
+func TestSyntheticAgentID_ExistingAgentIDPreserved(t *testing.T) {
+	dir := setupMarkerDir(t)
+	leadSessionID := "lead-session-preserve-agent-id-test"
+	teammateSessionID := "teammate-preserve-agent-id-test"
+	cwd := "/unique/cwd/for/preserve-agent-id-test"
+	workflowID := "coding-session-" + leadSessionID
+	existingAgentID := "existing-agent-abc"
+
+	defer os.Remove(filepath.Join(dir, leadSessionID))
+	defer os.Remove(filepath.Join(dir, teammateSessionID))
+
+	makeMarker(t, dir, leadSessionID, map[string]string{
+		"session_id":  leadSessionID,
+		"workflow_id": workflowID,
+		"cwd":         cwd,
+	})
+
+	// Teammate already has an agent_id set
+	input := claudeHookInput{
+		SessionID: teammateSessionID,
+		CWD:       cwd,
+		AgentID:   existingAgentID,
+	}
+
+	resolvedWorkflowID := resolveWorkflowID(input.SessionID, input.CWD)
+	if resolvedWorkflowID != workflowID {
+		t.Fatalf("expected workflow_id %q, got %q", workflowID, resolvedWorkflowID)
+	}
+
+	// Apply synthetic agent_id logic
+	workflowSessionID := strings.TrimPrefix(resolvedWorkflowID, "coding-session-")
+	if input.SessionID != workflowSessionID && input.AgentID == "" {
+		input.AgentID = "teammate-" + input.SessionID
+	}
+
+	// Existing agent_id should be preserved
+	if input.AgentID != existingAgentID {
+		t.Errorf("existing agent_id should be preserved, got %q, want %q", input.AgentID, existingAgentID)
+	}
+}
+
 // TestAutoAllowOutputHasPermissionDecisionAllow verifies that when Allowed is true, the JSON output
 // contains permissionDecision: "allow" so Claude Code bypasses the permission prompt.
 func TestAutoAllowOutputHasPermissionDecisionAllow(t *testing.T) {

@@ -107,6 +107,15 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Detect teammate sessions: their session_id differs from the workflow's.
+	// Set a synthetic agent_id so IsTeammate() returns true and teammates get auto-approve.
+	workflowSessionID := strings.TrimPrefix(workflowID, "coding-session-")
+	if input.SessionID != workflowSessionID {
+		if input.AgentID == "" {
+			input.AgentID = "teammate-" + input.SessionID
+		}
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
