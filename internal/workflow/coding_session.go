@@ -9,11 +9,12 @@ import (
 )
 
 const (
-	SignalTransition      = "transition"
-	SignalHookEvent       = "hook-event"
-	SignalJournal         = "journal"
-	SignalComplete        = "complete"
-	SignalResetIterations = "reset-iterations"
+	SignalTransition       = "transition"
+	SignalHookEvent        = "hook-event"
+	SignalJournal          = "journal"
+	SignalComplete         = "complete"
+	SignalResetIterations  = "reset-iterations"
+	SignalClearActiveAgents = "clear-active-agents"
 
 	QueryStatus   = "status"
 	QueryTimeline = "timeline"
@@ -82,6 +83,7 @@ func CodingSessionWorkflow(ctx workflow.Context, input model.WorkflowInput) (mod
 	journalCh := workflow.GetSignalChannel(ctx, SignalJournal)
 	setTaskCh := workflow.GetSignalChannel(ctx, SignalSetTask)
 	resetIterationsCh := workflow.GetSignalChannel(ctx, SignalResetIterations)
+	clearActiveAgentsCh := workflow.GetSignalChannel(ctx, SignalClearActiveAgents)
 
 	// Drain legacy signal channels to prevent workflow stuck on unprocessed signals
 	legacyTransitionCh := workflow.GetSignalChannel(ctx, SignalTransition)
@@ -131,6 +133,17 @@ func CodingSessionWorkflow(ctx workflow.Context, input model.WorkflowInput) (mod
 				"message": fmt.Sprintf("iteration counter reset from %d to 1 (totalIterations=%d)", old, state.totalIterations),
 			})
 			logger.Info("Iteration counter reset", "old_iteration", old, "total_iterations", state.totalIterations)
+		})
+
+		sel.AddReceive(clearActiveAgentsCh, func(ch workflow.ReceiveChannel, more bool) {
+			var sessionID string
+			ch.Receive(ctx, &sessionID)
+			count := len(state.activeAgents)
+			state.activeAgents = state.activeAgents[:0]
+			state.addEvent(ctx, model.EventJournal, sessionID, map[string]string{
+				"message": fmt.Sprintf("cleared %d active agent(s) via deregister-all-agents", count),
+			})
+			logger.Info("Active agents cleared", "count", count, "session", sessionID)
 		})
 
 		// doneCh unblocks the selector when a terminal phase is reached via Update handler
@@ -265,17 +278,49 @@ func (s *sessionState) handleTransition(ctx workflow.Context, req model.SignalTr
 func (s *sessionState) handleHookEvent(ctx workflow.Context, evt model.SignalHookEvent) {
 	evtType := model.EventToolUse
 	switch evt.HookType {
+	case "PreToolUse":
+		// Auto-register by agent_type (preferred) or agent_id (fallback).
+		// agent_type is stable across respawns (e.g., "developer-1"), unlike agent_id.
+		regKey := ""
+		if at, ok := evt.Detail["agent_type"]; ok && at != "" {
+			regKey = at
+		} else if ai, ok := evt.Detail["agent_id"]; ok && ai != "" {
+			regKey = ai
+		}
+		if regKey != "" {
+			found := false
+			for _, a := range s.activeAgents {
+				if a == regKey {
+					found = true
+					break
+				}
+			}
+			if !found {
+				s.activeAgents = append(s.activeAgents, regKey)
+			}
+		}
 	case "SubagentStart":
 		evtType = model.EventAgentSpawn
-		if agentID, ok := evt.Detail["agent_id"]; ok {
-			s.activeAgents = append(s.activeAgents, agentID)
+		if agentType, ok := evt.Detail["agent_type"]; ok && agentType != "" {
+			// Store agentType (not agentId) — matches original NTCoding approach.
+			// agentType is stable across respawns (e.g., "developer-1"), unlike agentId.
+			found := false
+			for _, a := range s.activeAgents {
+				if a == agentType {
+					found = true
+					break
+				}
+			}
+			if !found {
+				s.activeAgents = append(s.activeAgents, agentType)
+			}
 		}
 	case "SubagentStop", "Stop":
 		evtType = model.EventAgentStop
-		if agentID, ok := evt.Detail["agent_id"]; ok {
+		if agentType, ok := evt.Detail["agent_type"]; ok && agentType != "" {
 			filtered := s.activeAgents[:0]
 			for _, a := range s.activeAgents {
-				if a != agentID {
+				if a != agentType {
 					filtered = append(filtered, a)
 				}
 			}

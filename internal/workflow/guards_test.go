@@ -311,11 +311,11 @@ func TestIsAllowedGitInPlanning_Fetch(t *testing.T) {
 	assert.True(t, isAllowedGitInPlanning("git fetch origin main"), "git fetch with args should be allowed in PLANNING")
 }
 
-// TestSubagentBashAutoApprove verifies that subagents get Bash commands auto-approved
+// TestTeammateBashAutoApprove verifies that teammates get Bash commands auto-approved
 // when the command is not denied, even if the command is not in the auto-approve list.
-func TestSubagentBashAutoApprove(t *testing.T) {
+func TestTeammateBashAutoApprove(t *testing.T) {
 	activeAgents := []string{"developer-agent-1"}
-	subagentID := "developer-agent-1"
+	teammateID := "developer-agent-1"
 	teamLeadID := "" // empty = Team Lead
 
 	makeInput := func(cmd string) []byte {
@@ -323,17 +323,17 @@ func TestSubagentBashAutoApprove(t *testing.T) {
 		return b
 	}
 
-	// Test 1: subagent Bash command NOT in auto-approve list (make build) gets Allowed: true
-	t.Run("subagent non-auto-approve bash gets auto-approved", func(t *testing.T) {
+	// Test 1: teammate Bash command NOT in auto-approve list (make build) gets Allowed: true
+	t.Run("teammate non-auto-approve bash gets auto-approved", func(t *testing.T) {
 		result := CheckToolPermission(
 			model.PhaseDeveloping,
 			"Bash",
 			makeInput("make build"),
-			subagentID,
+			teammateID,
 			activeAgents,
 		)
-		assert.False(t, result.Denied, "make build should not be denied for subagent")
-		assert.True(t, result.Allowed, "make build should be auto-approved (Allowed=true) for subagent")
+		assert.False(t, result.Denied, "make build should not be denied for teammate")
+		assert.True(t, result.Allowed, "make build should be auto-approved (Allowed=true) for teammate")
 	})
 
 	// Test 2: Team Lead Bash command NOT in auto-approve list does NOT get auto-approved
@@ -349,15 +349,15 @@ func TestSubagentBashAutoApprove(t *testing.T) {
 		assert.False(t, result.Allowed, "make build should NOT be auto-approved for Team Lead")
 	})
 
-	// Test 3: denied Bash command (git commit) is still denied for subagents
-	t.Run("denied bash command still denied for subagent", func(t *testing.T) {
+	// Test 3: denied Bash command (git commit) is still denied for teammates
+	t.Run("denied bash command still denied for teammate", func(t *testing.T) {
 		result := CheckToolPermission(
 			model.PhaseDeveloping,
 			"Bash",
 			makeInput("git commit -m 'test'"),
-			subagentID,
+			teammateID,
 			activeAgents,
 		)
-		assert.True(t, result.Denied, "git commit should be denied for subagent in DEVELOPING phase")
+		assert.True(t, result.Denied, "git commit should be denied for teammate in DEVELOPING phase")
 	})
 }

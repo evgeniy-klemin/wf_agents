@@ -6,9 +6,9 @@
 ```
 .claude-plugin/plugin.json   Plugin manifest
 hooks/hooks.json              Hook configuration (all events → bin/hook-handler)
-agents/                       Subagent definitions with YAML frontmatter
+agents/                       Agent definitions with YAML frontmatter
 commands/                     Slash commands
-claude/states/                Phase instructions (*.md) — read from disk by hook-handler
+states/                       Phase instructions (*.md) — read from disk by hook-handler
 ```
 
 ### Go backend
@@ -34,6 +34,19 @@ make web                      # start web dashboard (port 8090)
 
 Uses Colima as Docker runtime. If Docker socket stops responding: `colima restart && docker compose up -d`.
 
+## Agent Teams (experimental)
+
+This plugin uses Claude Code's Agent Teams feature for multi-agent coordination.
+Requires Claude Code v2.1.32+ and the experimental flag enabled in settings.json:
+
+```json
+{
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  }
+}
+```
+
 ## Testing
 
 ```bash
@@ -48,7 +61,7 @@ go test ./internal/model/ -v       # state machine tests
 - Transitions use `UpdateWorkflow` (synchronous allow/deny), not signals
 - `WaitForStage: client.WorkflowUpdateStageCompleted` required in UpdateWorkflow options
 - Task description set via `set-task` signal on first `UserPromptSubmit`
-- Phase instructions loaded from `claude/states/*.md` and injected as `additionalContext` on every PreToolUse
+- Phase instructions loaded from `states/*.md` and injected as `additionalContext` on every PreToolUse
 - Bash commands chained with `&&`, `||`, `|`, `;` are split and each segment checked independently in guards
 
 ## Important conventions

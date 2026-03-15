@@ -52,6 +52,10 @@ func main() {
 		cmdComplete(ctx, c, os.Args[2:])
 	case "reset-iterations":
 		cmdResetIterations(ctx, c, os.Args[2:])
+	case "deregister-agent", "shut-down":
+		cmdShutDown(ctx, c, os.Args[2:])
+	case "deregister-all-agents":
+		cmdDeregisterAllAgents(ctx, c, os.Args[2:])
 	case "list":
 		cmdList(ctx, c)
 	default:
@@ -65,13 +69,15 @@ func printUsage() {
 	fmt.Println(`Usage: wf-client <command> [args]
 
 Commands:
-  start             --session <id> --task <desc> [--repo <path>] [--max-iter <n>]
-  status            <workflow-id>
-  timeline          <workflow-id>
-  transition        <workflow-id> --to <PHASE> [--reason <text>]
-  journal           <workflow-id> --message <text>
-  complete          <workflow-id>
-  reset-iterations  <workflow-id>
+  start                 --session <id> --task <desc> [--repo <path>] [--max-iter <n>]
+  status                <workflow-id>
+  timeline              <workflow-id>
+  transition            <workflow-id> --to <PHASE> [--reason <text>]
+  journal               <workflow-id> --message <text>
+  complete              <workflow-id>
+  reset-iterations      <workflow-id>
+  shut-down             <workflow-id> --agent <agent-type>
+  deregister-all-agents <workflow-id>
   list`)
 }
 
@@ -135,8 +141,16 @@ func cmdStart(ctx context.Context, c client.Client, args []string) {
 		log.Fatalf("Failed to start workflow: %v", err)
 	}
 
+	// Determine CWD: use --repo flag if provided, otherwise current directory.
+	cwd := input.RepoPath
+	if cwd == "" {
+		if wd, err := os.Getwd(); err == nil {
+			cwd = wd
+		}
+	}
+
 	// Create marker file so hook-handler knows this session is active
-	createSessionMarker(input.SessionID)
+	createSessionMarker(input.SessionID, cwd)
 
 	fmt.Printf("Workflow started:\n  ID:    %s\n  RunID: %s\n  UI:    http://localhost:8080/namespaces/default/workflows/%s\n",
 		run.GetID(), run.GetRunID(), workflowID)
@@ -323,6 +337,57 @@ func cmdResetIterations(ctx context.Context, c client.Client, args []string) {
 	fmt.Println("Total iterations counter is unchanged. You may now retry the RESPAWN transition.")
 }
 
+// cmdShutDown removes a single agent from activeAgents by sending a SubagentStop
+// hook event with agent_type. The workflow's handleHookEvent handles SubagentStop by
+// filtering the agent_type out of activeAgents. This matches the original NTCoding approach
+// where agentType (e.g., "developer-1") is stable across respawns, unlike agentId.
+//
+// Also accepts the legacy "deregister-agent" command alias for backwards compatibility.
+func cmdShutDown(ctx context.Context, c client.Client, args []string) {
+	if len(args) < 1 {
+		log.Fatal("workflow-id required")
+	}
+	workflowID := resolveWorkflowID(args[0])
+
+	var agentName string
+	for i := 1; i < len(args)-1; i += 2 {
+		switch args[i] {
+		case "--agent":
+			agentName = args[i+1]
+		}
+	}
+	if agentName == "" {
+		log.Fatal("--agent <agent-type> is required")
+	}
+
+	sig := model.SignalHookEvent{
+		HookType:  "SubagentStop",
+		SessionID: "cli",
+		Detail: map[string]string{
+			"agent_type": agentName,
+		},
+	}
+	err := c.SignalWorkflow(ctx, workflowID, "", wf.SignalHookEvent, sig)
+	if err != nil {
+		log.Fatalf("Signal failed: %v", err)
+	}
+	fmt.Printf("Shut-down signal sent for agent %q in workflow %s\n", agentName, workflowID)
+}
+
+// cmdDeregisterAllAgents clears ALL activeAgents by sending a clear-active-agents signal.
+func cmdDeregisterAllAgents(ctx context.Context, c client.Client, args []string) {
+	if len(args) < 1 {
+		log.Fatal("workflow-id required")
+	}
+	workflowID := resolveWorkflowID(args[0])
+
+	err := c.SignalWorkflow(ctx, workflowID, "", wf.SignalClearActiveAgents, "cli")
+	if err != nil {
+		log.Fatalf("Signal failed: %v", err)
+	}
+	fmt.Printf("All active agents cleared in workflow %s\n", workflowID)
+}
+
 func cmdList(ctx context.Context, c client.Client) {
 	resp, err := c.ListWorkflow(ctx, &workflowservice.ListWorkflowExecutionsRequest{
 		Namespace: "default",
@@ -437,23 +502,52 @@ func collectEvidence() map[string]string {
 	return evidence
 }
 
-// createSessionMarker writes a marker file so the hook-handler knows this session
-// has an active workflow. Without the marker, hooks are no-ops.
-func createSessionMarker(sessionID string) {
+// createSessionMarker writes a JSON marker file so the hook-handler knows this session
+// has an active workflow and can resolve teammates by CWD. Without the marker, hooks are no-ops.
+func createSessionMarker(sessionID, cwd string) {
 	dir := filepath.Join(os.TempDir(), "wf-agents-sessions")
 	os.MkdirAll(dir, 0o755)
 	marker := filepath.Join(dir, sessionID)
-	if err := os.WriteFile(marker, []byte(sessionID), 0o644); err != nil {
+	data, _ := json.Marshal(map[string]string{
+		"session_id":  sessionID,
+		"workflow_id": "coding-session-" + sessionID,
+		"cwd":         cwd,
+	})
+	if err := os.WriteFile(marker, data, 0o644); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not create session marker: %v\n", err)
 	}
 }
 
 // removeSessionMarker deletes the marker file for the given session so that
 // hook-handler becomes a no-op after the workflow reaches COMPLETE.
+// It also removes any teammate markers whose "parent" field matches sessionID.
 func removeSessionMarker(sessionID string) {
-	marker := filepath.Join(os.TempDir(), "wf-agents-sessions", sessionID)
+	dir := filepath.Join(os.TempDir(), "wf-agents-sessions")
+	marker := filepath.Join(dir, sessionID)
 	if err := os.Remove(marker); err != nil && !os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "Warning: could not remove session marker: %v\n", err)
+	}
+
+	// Clean up teammate markers that belong to this parent session.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.Name() == sessionID {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		var m map[string]string
+		if json.Unmarshal(data, &m) != nil {
+			continue
+		}
+		if m["parent"] == sessionID {
+			os.Remove(filepath.Join(dir, entry.Name()))
+		}
 	}
 }
 

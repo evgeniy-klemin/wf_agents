@@ -1,4 +1,4 @@
-.PHONY: build worker client hook-handler web up down status install
+.PHONY: build worker web up down status install list timeline start clean
 
 # Build all binaries
 build:
