@@ -180,6 +180,16 @@ func cmdStatus(ctx context.Context, c client.Client, args []string) {
 	fmt.Fprintf(w, "Started:\t%s\n", status.StartedAt)
 	fmt.Fprintf(w, "Updated:\t%s\n", status.LastUpdatedAt)
 	fmt.Fprintf(w, "Task:\t%s\n", status.Task)
+	if len(status.CommandsRan) > 0 {
+		fmt.Fprintf(w, "Commands Ran:\t\n")
+		for agent, cats := range status.CommandsRan {
+			for cat, ran := range cats {
+				if ran {
+					fmt.Fprintf(w, "  %s/%s:\ttrue\n", agent, cat)
+				}
+			}
+		}
+	}
 	w.Flush()
 }
 

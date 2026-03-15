@@ -44,3 +44,20 @@ type SignalJournal struct {
 	SessionID string `json:"session_id"`
 	Message   string `json:"message"`
 }
+
+// SignalCommandRan records that an agent ran a command matching a tracking category.
+type SignalCommandRan struct {
+	SessionID string `json:"session_id"`
+	AgentName string `json:"agent_name"`
+	Category  string `json:"category"`
+	Command   string `json:"command"`
+}
+
+// SignalInvalidateCommands resets specified tracking categories for an agent when
+// a file-change tool is used.
+type SignalInvalidateCommands struct {
+	SessionID  string   `json:"session_id"`
+	AgentName  string   `json:"agent_name"`
+	Categories []string `json:"categories"`
+	Tool       string   `json:"tool"`
+}

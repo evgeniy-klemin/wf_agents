@@ -4,18 +4,15 @@ package config
 // Neither base nor override is mutated.
 //
 // Merge rules:
-//   - tracking.lint/test: append then deduplicate (base entries first)
+//   - tracking: same category key → override replaces base (patterns + flag); new keys append
 //   - guards: same from+to → append override checks to base checks;
 //     disabled:true in override → remove all rules for that from+to pair
 //   - teammate_idle: same match → replace; new match → append
 func MergeConfigs(base, override *Config) *Config {
 	result := &Config{}
 
-	// Merge tracking
-	result.Tracking = TrackingConfig{
-		Lint: dedupStrings(base.Tracking.Lint, override.Tracking.Lint),
-		Test: dedupStrings(base.Tracking.Test, override.Tracking.Test),
-	}
+	// Merge tracking — override replaces by key, new keys append
+	result.Tracking = mergeTracking(base.Tracking, override.Tracking)
 
 	// Merge guards
 	result.Guards = mergeGuards(base.Guards, override.Guards)
@@ -26,17 +23,17 @@ func MergeConfigs(base, override *Config) *Config {
 	return result
 }
 
-func dedupStrings(base, extra []string) []string {
-	seen := make(map[string]bool, len(base)+len(extra))
-	result := make([]string, 0, len(base)+len(extra))
-	for _, s := range append(base, extra...) {
-		if !seen[s] {
-			seen[s] = true
-			result = append(result, s)
-		}
+func mergeTracking(base, override TrackingConfig) TrackingConfig {
+	result := make(TrackingConfig)
+	for k, v := range base {
+		result[k] = v
+	}
+	for k, v := range override {
+		result[k] = v // override replaces base for same key
 	}
 	return result
 }
+
 
 func mergeGuards(base, override []GuardRule) []GuardRule {
 	// Build index of base rules by from+to key

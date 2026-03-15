@@ -9,10 +9,30 @@ type Config struct {
 	TeammateIdle []IdleRule     `yaml:"teammate_idle"`
 }
 
-// TrackingConfig holds command patterns used to detect when lint/test commands ran.
-type TrackingConfig struct {
-	Lint []string `yaml:"lint"`
-	Test []string `yaml:"test"`
+// TrackingConfig maps category name to its tracking configuration.
+type TrackingConfig map[string]TrackingCategory
+
+// TrackingCategory defines the patterns and invalidation behavior for a tracking category.
+type TrackingCategory struct {
+	Patterns               []string `yaml:"patterns"`
+	InvalidateOnFileChange *bool    `yaml:"invalidate_on_file_change,omitempty"`
+}
+
+// ShouldInvalidateOnFileChange returns true if this category should be reset when
+// the agent modifies files. Defaults to true when not explicitly set.
+func (tc TrackingCategory) ShouldInvalidateOnFileChange() bool {
+	if tc.InvalidateOnFileChange == nil {
+		return true
+	}
+	return *tc.InvalidateOnFileChange
+}
+
+// fileChangeTools are tool names that count as a file modification for invalidation purposes.
+var fileChangeTools = map[string]bool{"Edit": true, "Write": true, "NotebookEdit": true}
+
+// IsFileChangeTool returns true if the given tool name is a file-modification tool.
+func IsFileChangeTool(toolName string) bool {
+	return fileChangeTools[toolName]
 }
 
 // GuardRule defines guard checks for a phase transition.

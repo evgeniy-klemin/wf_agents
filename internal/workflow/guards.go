@@ -508,6 +508,11 @@ func isSafeBashCommand(cmd string) bool {
 	return false
 }
 
+// SplitBashCommandsExported is the exported version of splitBashCommands for use by hook-handler.
+func SplitBashCommandsExported(cmd string) []string {
+	return splitBashCommands(cmd)
+}
+
 // splitBashCommands splits a command line on pipes and command separators.
 func splitBashCommands(cmd string) []string {
 	var parts []string

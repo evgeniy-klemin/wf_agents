@@ -170,6 +170,12 @@ func main() {
 		status := queryStatus(ctx, c, workflowID)
 		phase := status.Phase
 
+		// Per-agent command tracking: run before permission check so that tracking
+		// signals are sent regardless of which code path handles the allow/deny.
+		if input.TeammateName != "" {
+			trackPreToolUse(ctx, c, workflowID, input)
+		}
+
 		// Check if tool is allowed in this phase
 		decision := wf.CheckToolPermission(phase, input.ToolName, input.ToolInput, input.AgentID, status.ActiveAgents)
 
@@ -320,8 +326,9 @@ func main() {
 				os.Exit(2)
 			}
 		} else {
-			// Teammate going idle — evaluate config-driven idle rules.
-			if reason := evalTeammateIdleConfig(input.CWD, string(phase), input.TeammateName); reason != "" {
+			// Teammate going idle — query per-agent command tracking then evaluate config-driven idle rules.
+			commandsRan := queryAgentCommands(ctx, c, workflowID, input.TeammateName)
+			if reason := evalTeammateIdleConfig(input.CWD, string(phase), input.TeammateName, commandsRan); reason != "" {
 				fmt.Fprintf(os.Stderr, "%s\n", reason)
 				logResponse(input.SessionID, "TeammateIdle", 2, map[string]string{
 					"action": "keep_working",
@@ -655,10 +662,9 @@ func temporalHost() string {
 }
 
 // idleCheckContext implements config.CheckContext for teammate idle evaluation.
-// It carries only the teammate name; other fields (evidence, iteration, agents) are
-// not available at idle-check time and return zero/nil values.
 type idleCheckContext struct {
 	teammateName string
+	commandsRan  map[string]bool
 }
 
 func (c *idleCheckContext) Evidence() map[string]string  { return nil }
@@ -666,13 +672,114 @@ func (c *idleCheckContext) ActiveAgentCount() int        { return 0 }
 func (c *idleCheckContext) Iteration() int               { return 0 }
 func (c *idleCheckContext) MaxIterations() int           { return 0 }
 func (c *idleCheckContext) OriginPhase() string          { return "" }
-func (c *idleCheckContext) CommandsRan() map[string]bool { return nil }
+func (c *idleCheckContext) CommandsRan() map[string]bool { return c.commandsRan }
 func (c *idleCheckContext) TeammateName() string         { return c.teammateName }
+
+// queryAgentCommands fetches the command tracking state for a specific agent via Temporal query.
+func queryAgentCommands(ctx context.Context, c client.Client, workflowID, agentName string) map[string]bool {
+	resp, err := c.QueryWorkflow(ctx, workflowID, "", wf.QueryCommandsRan, agentName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: cannot query commands-ran for %s: %v\n", agentName, err)
+		return nil
+	}
+	var result map[string]bool
+	if err := resp.Get(&result); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: cannot decode commands-ran: %v\n", err)
+		return nil
+	}
+	return result
+}
+
+// trackPreToolUse handles per-agent command tracking signals for PreToolUse events.
+// For file-change tools (Edit/Write/NotebookEdit), it sends InvalidateCommands for categories
+// with invalidate_on_file_change=true. For Bash tools, it matches the command against tracking
+// patterns and sends CommandRan signals for each matched category.
+func trackPreToolUse(ctx context.Context, c client.Client, workflowID string, input claudeHookInput) {
+	cfg, err := config.LoadConfig(input.CWD)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to load config for tracking: %v\n", err)
+		return
+	}
+
+	// File-change tool: invalidate categories that have invalidate_on_file_change=true
+	if config.IsFileChangeTool(input.ToolName) {
+		var toInvalidate []string
+		for catName, cat := range cfg.Tracking {
+			if cat.ShouldInvalidateOnFileChange() {
+				toInvalidate = append(toInvalidate, catName)
+			}
+		}
+		if len(toInvalidate) > 0 {
+			err := c.SignalWorkflow(ctx, workflowID, "", wf.SignalInvalidateCommands, model.SignalInvalidateCommands{
+				SessionID:  input.SessionID,
+				AgentName:  input.TeammateName,
+				Categories: toInvalidate,
+				Tool:       input.ToolName,
+			})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to send invalidate-commands signal: %v\n", err)
+			}
+		}
+		return
+	}
+
+	// Bash tool: match command segments against tracking patterns
+	if input.ToolName != "Bash" {
+		return
+	}
+	var bashInput struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal(input.ToolInput, &bashInput); err != nil || bashInput.Command == "" {
+		return
+	}
+
+	segments := wf.SplitBashCommandsExported(bashInput.Command)
+	for catName, cat := range cfg.Tracking {
+		for _, seg := range segments {
+			seg = strings.TrimSpace(seg)
+			if matchesAnyPattern(seg, cat.Patterns) {
+				err := c.SignalWorkflow(ctx, workflowID, "", wf.SignalCommandRan, model.SignalCommandRan{
+					SessionID: input.SessionID,
+					AgentName: input.TeammateName,
+					Category:  catName,
+					Command:   seg,
+				})
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to send command-ran signal: %v\n", err)
+				}
+				break // one signal per category per tool call is enough
+			}
+		}
+	}
+}
+
+// matchesAnyPattern returns true if cmd starts with any of the given patterns at a word boundary.
+func matchesAnyPattern(cmd string, patterns []string) bool {
+	for _, p := range patterns {
+		if matchesBashPatternPrefix(cmd, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchesBashPatternPrefix checks if cmd starts with pattern at a word boundary.
+func matchesBashPatternPrefix(cmd, pattern string) bool {
+	if !strings.HasPrefix(cmd, pattern) {
+		return false
+	}
+	if len(cmd) == len(pattern) {
+		return true
+	}
+	c := cmd[len(pattern)]
+	return c == ' ' || c == '\t' || c == '|' || c == ';' || c == '&' || c == '\n'
+}
 
 // evalTeammateIdleConfig loads the project config (with optional .wf-agents.yaml override),
 // finds the idle rule matching the current phase, and evaluates its checks.
 // Returns a non-empty denial reason if the teammate should not idle, or "" if idle is allowed.
-func evalTeammateIdleConfig(projectDir, phase, teammateName string) string {
+func evalTeammateIdleConfig(projectDir, phase, teammateName string, commandsRan map[string]bool) string {
 	cfg, err := config.LoadConfig(projectDir)
 	if err != nil {
 		// Config load failure: log but allow idle to avoid blocking teammates unexpectedly.
@@ -683,6 +790,6 @@ func evalTeammateIdleConfig(projectDir, phase, teammateName string) string {
 	if rule == nil {
 		return ""
 	}
-	ctx := &idleCheckContext{teammateName: teammateName}
+	ctx := &idleCheckContext{teammateName: teammateName, commandsRan: commandsRan}
 	return config.EvalChecks(rule.Checks, ctx)
 }

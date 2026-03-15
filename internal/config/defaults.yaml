@@ -1,15 +1,19 @@
 tracking:
   lint:
-    - "go vet"
-    - "golangci-lint"
-    - "npm run lint"
-    - "cargo clippy"
+    patterns:
+      - "go vet"
+      - "golangci-lint"
+      - "npm run lint"
+      - "cargo clippy"
+    invalidate_on_file_change: true
   test:
-    - "go test"
-    - "npm test"
-    - "cargo test"
-    - "python -m pytest"
-    - "pytest"
+    patterns:
+      - "go test"
+      - "npm test"
+      - "cargo test"
+      - "python -m pytest"
+      - "pytest"
+    invalidate_on_file_change: true
 
 guards:
   # RESPAWN → DEVELOPING: no active teammates

@@ -9,16 +9,19 @@ import (
 )
 
 const (
-	SignalTransition       = "transition"
-	SignalHookEvent        = "hook-event"
-	SignalJournal          = "journal"
-	SignalComplete         = "complete"
-	SignalResetIterations  = "reset-iterations"
+	SignalTransition        = "transition"
+	SignalHookEvent         = "hook-event"
+	SignalJournal           = "journal"
+	SignalComplete          = "complete"
+	SignalResetIterations   = "reset-iterations"
 	SignalClearActiveAgents = "clear-active-agents"
+	SignalCommandRan        = "command-ran"
+	SignalInvalidateCommands = "invalidate-commands"
 
-	QueryStatus   = "status"
-	QueryTimeline = "timeline"
-	QueryPhase    = "phase"
+	QueryStatus      = "status"
+	QueryTimeline    = "timeline"
+	QueryPhase       = "phase"
+	QueryCommandsRan = "query-commands-ran"
 
 	UpdateTransition = "request-transition"
 	SignalSetTask    = "set-task"
@@ -35,12 +38,13 @@ func CodingSessionWorkflow(ctx workflow.Context, input model.WorkflowInput) (mod
 		iteration:       1,
 		totalIterations: 1,
 		events:          make([]model.WorkflowEvent, 0, 100),
-		activeAgents:   make([]string, 0),
-		startedAt:      workflow.Now(ctx),
-		lastUpdated:    workflow.Now(ctx),
-		phaseEnteredAt: workflow.Now(ctx),
-		task:           input.TaskDescription,
-		maxIter:        input.MaxIterations,
+		activeAgents:    make([]string, 0),
+		commandsRan:     make(map[string]map[string]bool),
+		startedAt:       workflow.Now(ctx),
+		lastUpdated:     workflow.Now(ctx),
+		phaseEnteredAt:  workflow.Now(ctx),
+		task:            input.TaskDescription,
+		maxIter:         input.MaxIterations,
 	}
 	if state.maxIter == 0 {
 		state.maxIter = 5
@@ -71,6 +75,15 @@ func CodingSessionWorkflow(ctx workflow.Context, input model.WorkflowInput) (mod
 		return model.WorkflowTimeline{}, fmt.Errorf("set phase query: %w", err)
 	}
 
+	if err := workflow.SetQueryHandler(ctx, QueryCommandsRan, func(agentName string) (map[string]bool, error) {
+		if state.commandsRan == nil {
+			return nil, nil
+		}
+		return state.commandsRan[agentName], nil
+	}); err != nil {
+		return model.WorkflowTimeline{}, fmt.Errorf("set commands-ran query: %w", err)
+	}
+
 	// Register update handler for synchronous transition requests (allow/deny)
 	if err := workflow.SetUpdateHandler(ctx, UpdateTransition, func(ctx workflow.Context, req model.SignalTransition) (model.TransitionResult, error) {
 		return state.handleTransition(ctx, req), nil
@@ -84,6 +97,8 @@ func CodingSessionWorkflow(ctx workflow.Context, input model.WorkflowInput) (mod
 	setTaskCh := workflow.GetSignalChannel(ctx, SignalSetTask)
 	resetIterationsCh := workflow.GetSignalChannel(ctx, SignalResetIterations)
 	clearActiveAgentsCh := workflow.GetSignalChannel(ctx, SignalClearActiveAgents)
+	commandRanCh := workflow.GetSignalChannel(ctx, SignalCommandRan)
+	invalidateCommandsCh := workflow.GetSignalChannel(ctx, SignalInvalidateCommands)
 
 	// Drain legacy signal channels to prevent workflow stuck on unprocessed signals
 	legacyTransitionCh := workflow.GetSignalChannel(ctx, SignalTransition)
@@ -146,6 +161,38 @@ func CodingSessionWorkflow(ctx workflow.Context, input model.WorkflowInput) (mod
 			logger.Info("Active agents cleared", "count", count, "session", sessionID)
 		})
 
+		sel.AddReceive(commandRanCh, func(ch workflow.ReceiveChannel, more bool) {
+			var sig model.SignalCommandRan
+			ch.Receive(ctx, &sig)
+			if sig.AgentName == "" || sig.Category == "" {
+				return
+			}
+			if state.commandsRan == nil {
+				state.commandsRan = make(map[string]map[string]bool)
+			}
+			if state.commandsRan[sig.AgentName] == nil {
+				state.commandsRan[sig.AgentName] = make(map[string]bool)
+			}
+			state.commandsRan[sig.AgentName][sig.Category] = true
+			logger.Info("Command ran recorded", "agent", sig.AgentName, "category", sig.Category, "command", sig.Command)
+		})
+
+		sel.AddReceive(invalidateCommandsCh, func(ch workflow.ReceiveChannel, more bool) {
+			var sig model.SignalInvalidateCommands
+			ch.Receive(ctx, &sig)
+			if sig.AgentName == "" || state.commandsRan == nil {
+				return
+			}
+			agentCmds := state.commandsRan[sig.AgentName]
+			if agentCmds == nil {
+				return
+			}
+			for _, cat := range sig.Categories {
+				delete(agentCmds, cat)
+			}
+			logger.Info("Commands invalidated", "agent", sig.AgentName, "categories", sig.Categories, "tool", sig.Tool)
+		})
+
 		// doneCh unblocks the selector when a terminal phase is reached via Update handler
 		sel.AddReceive(state.doneCh, func(ch workflow.ReceiveChannel, more bool) {
 			var v bool
@@ -185,6 +232,7 @@ type sessionState struct {
 	totalIterations int         // cumulative counter, never reset
 	events          []model.WorkflowEvent
 	activeAgents    []string
+	commandsRan     map[string]map[string]bool // agent → category → ran
 	startedAt       time.Time
 	lastUpdated     time.Time
 	phaseEnteredAt  time.Time
@@ -260,6 +308,11 @@ func (s *sessionState) handleTransition(ctx workflow.Context, req model.SignalTr
 	s.phaseEnteredAt = workflow.Now(ctx)
 	result.Allowed = true
 
+	// Clear command tracking on RESPAWN — fresh iteration = fresh state
+	if req.To == model.PhaseRespawn {
+		s.commandsRan = make(map[string]map[string]bool)
+	}
+
 	s.addEvent(ctx, model.EventTransition, req.SessionID, map[string]string{
 		"from":             string(result.From),
 		"to":               string(req.To),
@@ -320,6 +373,10 @@ func (s *sessionState) handleHookEvent(ctx workflow.Context, evt model.SignalHoo
 }
 
 func (s *sessionState) status(now time.Time) model.WorkflowStatus {
+	var commandsRan map[string]map[string]bool
+	if len(s.commandsRan) > 0 {
+		commandsRan = s.commandsRan
+	}
 	return model.WorkflowStatus{
 		Phase:                s.phase,
 		Iteration:            s.iteration,
@@ -333,6 +390,7 @@ func (s *sessionState) status(now time.Time) model.WorkflowStatus {
 		CurrentPhaseSecs:     now.Sub(s.phaseEnteredAt).Seconds(),
 		PhaseDurationSecs:    s.computePhaseDurations(now),
 		CurrentIterPhaseSecs: s.computeCurrentIterPhaseDurations(now),
+		CommandsRan:          commandsRan,
 	}
 }
 

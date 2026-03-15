@@ -64,14 +64,43 @@ guards:
 
 // --- Merge rules ---
 
-func TestMergeConfigs_TrackingAppendAndDedup(t *testing.T) {
-	base := &Config{Tracking: TrackingConfig{Lint: []string{"go vet", "golangci-lint"}, Test: []string{"go test"}}}
-	override := &Config{Tracking: TrackingConfig{Lint: []string{"golangci-lint", "npm run lint"}, Test: []string{"npm test"}}}
+func TestMergeConfigs_TrackingOverrideByKey(t *testing.T) {
+	base := &Config{Tracking: TrackingConfig{
+		"lint": {Patterns: []string{"go vet", "golangci-lint"}},
+		"test": {Patterns: []string{"go test"}},
+	}}
+	override := &Config{Tracking: TrackingConfig{
+		"lint": {Patterns: []string{"npm run lint"}}, // replaces base lint
+		"e2e":  {Patterns: []string{"make test-e2e"}}, // new key appended
+	}}
 
 	merged := MergeConfigs(base, override)
 
-	assert.Equal(t, []string{"go vet", "golangci-lint", "npm run lint"}, merged.Tracking.Lint)
-	assert.Equal(t, []string{"go test", "npm test"}, merged.Tracking.Test)
+	// Override replaces base for same key
+	assert.Equal(t, []string{"npm run lint"}, merged.Tracking["lint"].Patterns)
+	// Base-only key preserved
+	assert.Equal(t, []string{"go test"}, merged.Tracking["test"].Patterns)
+	// New key appended
+	assert.Equal(t, []string{"make test-e2e"}, merged.Tracking["e2e"].Patterns)
+}
+
+func TestTrackingCategory_ShouldInvalidateOnFileChange_DefaultTrue(t *testing.T) {
+	tc := TrackingCategory{Patterns: []string{"go test"}}
+	assert.True(t, tc.ShouldInvalidateOnFileChange(), "default should be true when nil")
+}
+
+func TestTrackingCategory_ShouldInvalidateOnFileChange_ExplicitFalse(t *testing.T) {
+	f := false
+	tc := TrackingCategory{Patterns: []string{"go test"}, InvalidateOnFileChange: &f}
+	assert.False(t, tc.ShouldInvalidateOnFileChange())
+}
+
+func TestIsFileChangeTool(t *testing.T) {
+	assert.True(t, IsFileChangeTool("Edit"))
+	assert.True(t, IsFileChangeTool("Write"))
+	assert.True(t, IsFileChangeTool("NotebookEdit"))
+	assert.False(t, IsFileChangeTool("Bash"))
+	assert.False(t, IsFileChangeTool("Read"))
 }
 
 func TestMergeConfigs_GuardsAppendChecks(t *testing.T) {
@@ -222,6 +251,24 @@ func TestEvalCheck_MaxIterationsFail(t *testing.T) {
 	ctx := &simpleCtx{originPhase: "DEVELOPING", iteration: 5, maxIter: 5}
 	reason := EvalCheck(c, ctx)
 	assert.NotEmpty(t, reason)
+}
+
+func TestEvalCheck_CommandRanPass(t *testing.T) {
+	c := Check{Type: "command_ran", Key: "test", Message: "tests not run"}
+	ctx := &simpleCtx{commandsRan: map[string]bool{"test": true}}
+	assert.Empty(t, EvalCheck(c, ctx))
+}
+
+func TestEvalCheck_CommandRanFail_NilMap(t *testing.T) {
+	c := Check{Type: "command_ran", Key: "test", Message: "tests not run"}
+	ctx := &simpleCtx{commandsRan: nil}
+	assert.Equal(t, "tests not run", EvalCheck(c, ctx))
+}
+
+func TestEvalCheck_CommandRanFail_CategoryNotSet(t *testing.T) {
+	c := Check{Type: "command_ran", Key: "test", Message: "tests not run"}
+	ctx := &simpleCtx{commandsRan: map[string]bool{"lint": true}}
+	assert.Equal(t, "tests not run", EvalCheck(c, ctx))
 }
 
 func TestEvalCheck_UnknownTypeFailsSafe(t *testing.T) {
