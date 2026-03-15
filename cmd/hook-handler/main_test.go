@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/eklemin/wf-agents/internal/model"
 )
@@ -128,6 +129,89 @@ func TestResolveWorkflowID_CWDMatch(t *testing.T) {
 	}
 	if m["cwd"] != cwd {
 		t.Errorf("teammate marker cwd = %q, want %q", m["cwd"], cwd)
+	}
+}
+
+// TestResolveWorkflowID_CWDMatch_SkipsTeammateMarkers verifies that teammate markers
+// (those with a "parent" field) are not used as the CWD match source — only lead markers
+// are considered when scanning by CWD.
+// The stale teammate marker's name is alphabetically before the lead marker name to
+// ensure the bug is observable: without the fix the current code returns the wrong workflow.
+func TestResolveWorkflowID_CWDMatch_SkipsTeammateMarkers(t *testing.T) {
+	dir := setupMarkerDir(t)
+	// "aaa-stale-teammate-skip-test" sorts before "zzz-lead-skip-teammate-markers-test"
+	// so without the fix the stale marker is found first (os.ReadDir returns sorted names).
+	leadSessionID := "zzz-lead-skip-teammate-markers-test"
+	oldTeammateSessionID := "aaa-stale-teammate-skip-test"
+	newTeammateSessionID := "new-teammate-skip-test-zzz"
+	cwd := "/unique/cwd/for/skip-teammate-markers-test"
+
+	defer os.Remove(filepath.Join(dir, leadSessionID))
+	defer os.Remove(filepath.Join(dir, oldTeammateSessionID))
+	defer os.Remove(filepath.Join(dir, newTeammateSessionID)) // auto-created
+
+	// Write stale teammate marker first (same CWD, but has "parent" field — wrong workflow)
+	makeMarker(t, dir, oldTeammateSessionID, map[string]string{
+		"session_id":  oldTeammateSessionID,
+		"workflow_id": "coding-session-old-lead-wrong-workflow",
+		"cwd":         cwd,
+		"parent":      "some-old-lead-session",
+	})
+
+	// Write lead marker (same CWD, no parent field — correct workflow)
+	makeMarker(t, dir, leadSessionID, map[string]string{
+		"session_id":  leadSessionID,
+		"workflow_id": "coding-session-" + leadSessionID,
+		"cwd":         cwd,
+	})
+
+	// New teammate resolves — should get the lead's workflow, not the stale teammate's
+	got := resolveWorkflowID(newTeammateSessionID, cwd)
+	want := "coding-session-" + leadSessionID
+	if got != want {
+		t.Errorf("resolveWorkflowID should skip teammate markers, got %q, want %q", got, want)
+	}
+}
+
+// TestResolveWorkflowID_CWDMatch_PicksLatest verifies that when multiple lead markers
+// share the same CWD, the one with the most recent modification time wins.
+// "aaa-old-lead-picks-latest-test" sorts before "zzz-new-lead-picks-latest-test" so
+// without the fix the old lead is returned (first CWD match wins). With the fix the
+// newest modtime wins.
+func TestResolveWorkflowID_CWDMatch_PicksLatest(t *testing.T) {
+	dir := setupMarkerDir(t)
+	oldLeadSessionID := "aaa-old-lead-picks-latest-test"
+	newLeadSessionID := "zzz-new-lead-picks-latest-test"
+	teammateSessionID := "teammate-picks-latest-test"
+	cwd := "/unique/cwd/for/picks-latest-test"
+
+	defer os.Remove(filepath.Join(dir, oldLeadSessionID))
+	defer os.Remove(filepath.Join(dir, newLeadSessionID))
+	defer os.Remove(filepath.Join(dir, teammateSessionID))
+
+	// Write old lead marker first and backdate its modtime
+	makeMarker(t, dir, oldLeadSessionID, map[string]string{
+		"session_id":  oldLeadSessionID,
+		"workflow_id": "coding-session-" + oldLeadSessionID,
+		"cwd":         cwd,
+	})
+	oldTime := time.Now().Add(-2 * time.Second)
+	if err := os.Chtimes(filepath.Join(dir, oldLeadSessionID), oldTime, oldTime); err != nil {
+		t.Fatalf("cannot set mod time on old marker: %v", err)
+	}
+
+	// Write new lead marker (same CWD, newer modtime)
+	makeMarker(t, dir, newLeadSessionID, map[string]string{
+		"session_id":  newLeadSessionID,
+		"workflow_id": "coding-session-" + newLeadSessionID,
+		"cwd":         cwd,
+	})
+
+	// Teammate resolves — should get the NEWEST lead's workflow
+	got := resolveWorkflowID(teammateSessionID, cwd)
+	want := "coding-session-" + newLeadSessionID
+	if got != want {
+		t.Errorf("resolveWorkflowID should pick latest lead marker, got %q, want %q", got, want)
 	}
 }
 

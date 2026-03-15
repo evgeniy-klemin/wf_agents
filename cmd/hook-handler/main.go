@@ -443,13 +443,21 @@ func resolveWorkflowID(sessionID, cwd string) string {
 		return "coding-session-" + strings.TrimSpace(string(data))
 	}
 
-	// No direct match — scan for CWD match (teammate session)
+	// No direct match — scan for CWD match (teammate session).
+	// Only consider lead markers (no "parent" field). Among multiple lead markers
+	// with the same CWD, pick the one with the most recent modification time.
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return ""
 	}
+
+	var bestWorkflowID string
+	var bestSessionID string
+	var bestModTime time.Time
+
 	for _, entry := range entries {
-		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		path := filepath.Join(dir, entry.Name())
+		data, err := os.ReadFile(path)
 		if err != nil {
 			continue
 		}
@@ -457,19 +465,37 @@ func resolveWorkflowID(sessionID, cwd string) string {
 		if json.Unmarshal(data, &m) != nil {
 			continue
 		}
-		if m["cwd"] == cwd && cwd != "" {
-			// Found a workflow with same CWD — this teammate belongs to it.
-			// Create a marker for the teammate so future hooks resolve directly.
-			teammateMarker := filepath.Join(dir, sessionID)
-			teammateData, _ := json.Marshal(map[string]string{
-				"session_id":  sessionID,
-				"workflow_id": m["workflow_id"],
-				"cwd":         cwd,
-				"parent":      m["session_id"],
-			})
-			_ = os.WriteFile(teammateMarker, teammateData, 0o644)
-			return m["workflow_id"]
+		// Skip teammate markers — only lead markers can be the CWD match source.
+		if m["parent"] != "" {
+			continue
 		}
+		if m["cwd"] != cwd || cwd == "" {
+			continue
+		}
+		// Pick the marker with the latest modification time.
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().After(bestModTime) {
+			bestModTime = info.ModTime()
+			bestWorkflowID = m["workflow_id"]
+			bestSessionID = m["session_id"]
+		}
+	}
+
+	if bestWorkflowID != "" && bestSessionID != sessionID {
+		// Found a workflow with same CWD — this teammate belongs to it.
+		// Create a marker for the teammate so future hooks resolve directly.
+		teammateMarker := filepath.Join(dir, sessionID)
+		teammateData, _ := json.Marshal(map[string]string{
+			"session_id":  sessionID,
+			"workflow_id": bestWorkflowID,
+			"cwd":         cwd,
+			"parent":      bestSessionID,
+		})
+		_ = os.WriteFile(teammateMarker, teammateData, 0o644)
+		return bestWorkflowID
 	}
 
 	return ""
