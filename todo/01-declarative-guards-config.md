@@ -7,21 +7,54 @@ created: 2026-03-15
 
 ## Problem
 
-Guard logic and tool permission checks are hardcoded in Go (`guards.go`). Adding new checks requires code changes, rebuilds, and redeployment. Different target projects need different rules.
+Guard logic and tool permission checks are hardcoded in Go (`guards.go`). This creates several issues:
 
-## Solution
+1. **Language/project coupling** — lint/test patterns (`go vet`, `golangci-lint`) are Go-specific, but the plugin should be language-agnostic
+2. **No project customization** — different projects need different rules (e.g., Python project needs `pytest` tracked, not `go test`)
+3. **Rigid transitions** — adding/modifying guard checks requires code changes, rebuilds, redeployment
+4. **TeammateIdle enforcement** — currently blanket exit-code-2 for developers with no way to know if work is actually done (see session 73433ac2 where developer was blocked indefinitely)
+5. **No CI/CD alignment** — project's Makefile lint/test commands should be the same commands checked by guards
 
-Move guard definitions to declarative YAML config:
-- Plugin ships `config/defaults.yaml` with built-in guards
-- Target project overrides/extends via `.wf-agents.yaml` in project root
-- Helm-style deep merge: project values append to defaults, `disabled: true` removes a guard
+## Solution: Two-layer YAML config with Helm-style merge
 
-### Config format
+### Architecture
+
+```
+Plugin (defaults)              Target Project (overrides)
+config/defaults.yaml    +      .wf-agents.yaml
+        │                              │
+        └──────── deep merge ──────────┘
+                      │
+              Effective Config
+                      │
+          ┌───────────┼───────────┐
+          │           │           │
+       Guards    TeammateIdle  Tracking
+    (transitions)  (idle rules)  (command patterns)
+```
+
+### Layer 1: Plugin defaults (`config/defaults.yaml`)
+
+Shipped with the plugin, embedded via `//go:embed`. Contains all built-in guards that the plugin currently enforces in Go code.
 
 ```yaml
 tracking:
-  lint: ["golangci-lint", "go vet", "make lint"]
-  test: ["go test", "make test"]
+  lint:
+    - "golangci-lint"
+    - "go vet"
+    - "make lint"
+    - "npm run lint"
+    - "cargo clippy"
+    - "eslint"
+    - "pylint"
+    - "flake8"
+  test:
+    - "go test"
+    - "make test"
+    - "npm test"
+    - "cargo test"
+    - "pytest"
+    - "python -m pytest"
 
 guards:
   - transition: "DEVELOPING → REVIEWING"
@@ -29,10 +62,45 @@ guards:
       - type: evidence
         key: "working_tree_clean"
         value: "false"
-        message: "No uncommitted changes"
-      - type: command_ran
-        category: lint
-        message: "Run lint before review"
+        message: "No uncommitted changes — there must be changes to review"
+
+  - transition: "COMMITTING → RESPAWN"
+    checks:
+      - type: evidence
+        key: "working_tree_clean"
+        value: "true"
+        message: "Working tree not clean — commit or stash changes first"
+      - type: max_iterations
+        message: "Max iterations reached"
+
+  - transition: "COMMITTING → PR_CREATION"
+    checks:
+      - type: evidence
+        key: "working_tree_clean"
+        value: "true"
+        message: "Working tree not clean — commit or stash changes first"
+
+  - transition: "RESPAWN → DEVELOPING"
+    checks:
+      - type: no_active_agents
+        message: "Shut down old teammates before spawning new ones"
+
+  - transition: "PR_CREATION → FEEDBACK"
+    checks:
+      - type: evidence
+        key: "pr_checks_pass"
+        value: "true"
+        message: "PR checks have not passed"
+
+  - transition: "FEEDBACK → COMPLETE"
+    checks:
+      - type: evidence
+        key: "pr_approved"
+        value: "true"
+        alternatives:
+          - key: "pr_merged"
+            value: "true"
+        message: "PR not approved or merged"
 
   - transition: "* → RESPAWN"
     checks:
@@ -40,28 +108,163 @@ guards:
         message: "Max iterations reached"
 
 teammate_idle:
+  - match: "*"
+    checks: []  # by default everyone idles freely
+```
+
+### Layer 2: Project overrides (`.wf-agents.yaml`)
+
+Located in target project root (found via CWD). Extends plugin defaults.
+
+```yaml
+# Example for a Go project with strict quality gates
+tracking:
+  lint:
+    # These APPEND to plugin defaults
+    - "staticcheck"
+    - "gofmt"
+  test:
+    - "go clean -testcache && go test"
+
+guards:
+  # ADD checks to existing transition (appends to defaults)
+  - transition: "DEVELOPING → REVIEWING"
+    checks:
+      - type: command_ran
+        category: lint
+        message: "Run lint before review"
+      - type: command_ran
+        category: test
+        message: "Run tests before review"
+
+  # ADD guard for transition not in defaults
+  - transition: "REVIEWING → COMMITTING"
+    checks:
+      - type: command_ran
+        category: test
+        message: "Reviewer must verify tests pass"
+
+  # DISABLE a default guard
+  # - transition: "PR_CREATION → FEEDBACK"
+  #   disabled: true
+
+teammate_idle:
+  # OVERRIDE: developer must lint before idle
   - match: "developer*"
     checks:
       - type: command_ran
         category: lint
-        message: "Run lint before idle"
+        message: "Run lint before going idle"
+  # reviewer idles freely (override default * match)
+  - match: "reviewer*"
+    checks: []
 ```
+
+### Merge strategy (Helm-like)
+
+| Section | Merge rule |
+|---|---|
+| `tracking` lists | Project values **append** to defaults (union, deduplicated) |
+| `guards` list | Project guards **append** — same transition = checks combined |
+| `guards` with `disabled: true` | **Removes** all guards for that transition |
+| `teammate_idle` | Project rules **override** by `match` pattern |
 
 ### Check types
 
-| Type | Description |
+| Type | Fields | Description |
+|---|---|---|
+| `evidence` | `key`, `value`, `alternatives` | Check evidence map passed via CLI `--evidence` flag |
+| `command_ran` | `category` | Check if Bash command matching category patterns was run this iteration |
+| `no_active_agents` | — | Check `len(activeAgents) == 0` |
+| `max_iterations` | — | Check iteration counter vs limit |
+| `file_exists` | `path` | Check file exists in CWD |
+| `command_succeeds` | `command` | Run shell command, check exit code 0 |
+
+Extensible — new check types added in Go, immediately usable in YAML without config format changes.
+
+### Wildcard transitions
+
+`*` matches any phase:
+- `"* → RESPAWN"` — applies to ALL transitions targeting RESPAWN
+- `"DEVELOPING → *"` — applies to ALL transitions from DEVELOPING
+- Specific transitions checked first, then wildcards
+
+## Implementation plan
+
+### Phase 1: Config package (`internal/config/`)
+
+```
+internal/config/
+  config.go        — types, LoadConfig(), MergeConfigs()
+  defaults.go      — //go:embed config/defaults.yaml
+  check_types.go   — check type registry and evaluation functions
+  merge.go         — Helm-style merge logic
+  config_test.go   — unit tests
+```
+
+Key types:
+```go
+type Config struct {
+    Tracking     TrackingConfig `yaml:"tracking"`
+    Guards       []GuardRule    `yaml:"guards"`
+    TeammateIdle []IdleRule     `yaml:"teammate_idle"`
+}
+
+type GuardRule struct {
+    Transition string  `yaml:"transition"`
+    Disabled   bool    `yaml:"disabled,omitempty"`
+    Checks     []Check `yaml:"checks"`
+}
+
+type Check struct {
+    Type         string `yaml:"type"`
+    Key          string `yaml:"key,omitempty"`
+    Value        string `yaml:"value,omitempty"`
+    Category     string `yaml:"category,omitempty"`
+    Command      string `yaml:"command,omitempty"`
+    Path         string `yaml:"path,omitempty"`
+    Alternatives []KV   `yaml:"alternatives,omitempty"`
+    Message      string `yaml:"message"`
+}
+```
+
+### Phase 2: Iteration command tracking
+
+Add to workflow state:
+- `commandsRan map[string]bool` — tracks categories per iteration
+- New signal `track-command` — hook-handler sends when Bash matches pattern
+- Reset on entering DEVELOPING
+
+### Phase 3: Config-driven guard evaluation
+
+Replace hardcoded guard functions with config evaluation. Keep BLOCKED/terminal logic hardcoded (special cases). Everything else from config.
+
+### Phase 4: Hook-handler integration
+
+- Load effective config (defaults + project override) on first call, cache
+- PreToolUse: match Bash commands → send track-command signal
+- TeammateIdle: evaluate idle rules from config
+- Send config to Temporal via signal on SessionStart
+
+### Phase 5: Migration
+
+Migrate existing hardcoded guards one-by-one to config. Each migration: add to defaults.yaml, remove from Go code, verify tests pass.
+
+## Files to modify
+
+| File | Changes |
 |---|---|
-| `evidence` | Check evidence map from CLI transition |
-| `command_ran` | Check if command category was run this iteration |
-| `no_active_agents` | Check activeAgents is empty |
-| `max_iterations` | Check iteration limit |
-| `file_exists` | Check file exists in CWD |
-| `command_succeeds` | Run command, check exit 0 |
+| `internal/config/` | New package: types, loader, merger, check evaluation |
+| `config/defaults.yaml` | New: plugin defaults (embedded) |
+| `internal/workflow/coding_session.go` | Command tracking state, signals, reset |
+| `internal/workflow/guards.go` | Config-driven evaluation alongside existing guards |
+| `internal/model/workflow_input.go` | CommandsRan in WorkflowStatus |
+| `cmd/hook-handler/main.go` | Load config, pattern matching, send signals |
+| `states/developing.md` | Note about running project lint |
+| `agents/developer.md` | Note about checking .wf-agents.yaml for lint command |
 
-### Files to modify
+## Backward compatibility
 
-- `internal/config/` — new package: types, loader, merger
-- `config/defaults.yaml` — new: plugin defaults (embedded via go:embed)
-- `internal/workflow/guards.go` — config-driven guard evaluation
-- `internal/workflow/coding_session.go` — config signal, command tracking
-- `cmd/hook-handler/main.go` — load config, pattern matching
+- Without `.wf-agents.yaml` in target project: defaults only (identical to current behavior)
+- Existing `--evidence` flags on transitions: unchanged
+- Existing hardcoded guards: migrated to defaults.yaml with identical behavior
