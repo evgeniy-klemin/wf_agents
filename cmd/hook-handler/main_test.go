@@ -466,6 +466,157 @@ func TestSyntheticAgentID_ExistingAgentIDPreserved(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// logResponse tests
+// ---------------------------------------------------------------------------
+
+// TestLogResponse_WritesJSONLEntry verifies that logResponse appends a valid JSONL entry
+// to the session log file with the correct fields.
+func TestLogResponse_WritesJSONLEntry(t *testing.T) {
+	// Use a unique session ID to avoid collisions with parallel tests
+	sessionID := "test-log-response-session-abc123"
+	logDir := filepath.Join(os.TempDir(), "wf-agents-hook-logs")
+	logFile := filepath.Join(logDir, sessionID+".jsonl")
+
+	// Ensure log file is cleaned up after the test
+	defer os.Remove(logFile)
+
+	// Call logResponse
+	logResponse(sessionID, "PreToolUse", 2, map[string]string{
+		"decision": "deny",
+		"reason":   "tool not allowed",
+	})
+
+	// Read back the file
+	data, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("logResponse did not create log file: %v", err)
+	}
+
+	// Parse the JSONL line
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 JSONL line, got %d: %s", len(lines), string(data))
+	}
+
+	var entry map[string]interface{}
+	if err := json.Unmarshal([]byte(lines[0]), &entry); err != nil {
+		t.Fatalf("logResponse wrote invalid JSON: %v\nline: %s", err, lines[0])
+	}
+
+	// Verify required fields
+	if entry["direction"] != "response" {
+		t.Errorf("direction = %q, want \"response\"", entry["direction"])
+	}
+	if entry["event"] != "PreToolUse" {
+		t.Errorf("event = %q, want \"PreToolUse\"", entry["event"])
+	}
+	if entry["exit_code"] == nil {
+		t.Error("exit_code field is missing")
+	}
+	if entry["ts"] == nil {
+		t.Error("ts field is missing")
+	}
+	if entry["response"] == nil {
+		t.Error("response field is missing")
+	}
+}
+
+// TestLogResponse_AppendMultipleEntries verifies that multiple logResponse calls
+// append separate lines to the JSONL file without overwriting.
+func TestLogResponse_AppendMultipleEntries(t *testing.T) {
+	sessionID := "test-log-response-append-xyz789"
+	logDir := filepath.Join(os.TempDir(), "wf-agents-hook-logs")
+	logFile := filepath.Join(logDir, sessionID+".jsonl")
+	defer os.Remove(logFile)
+
+	logResponse(sessionID, "PreToolUse", 0, map[string]string{"decision": "allow"})
+	logResponse(sessionID, "PreToolUse", 2, map[string]string{"decision": "deny"})
+
+	data, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("log file not found: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 JSONL lines, got %d:\n%s", len(lines), string(data))
+	}
+
+	for i, line := range lines {
+		var entry map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Errorf("line %d is not valid JSON: %v\nline: %s", i+1, err, line)
+		}
+	}
+}
+
+// TestLogResponse_ExitCodePreserved verifies that logResponse stores the exit_code accurately.
+func TestLogResponse_ExitCodePreserved(t *testing.T) {
+	sessionID := "test-log-response-exitcode-def456"
+	logDir := filepath.Join(os.TempDir(), "wf-agents-hook-logs")
+	logFile := filepath.Join(logDir, sessionID+".jsonl")
+	defer os.Remove(logFile)
+
+	logResponse(sessionID, "TeammateIdle", 2, map[string]string{"action": "keep_working"})
+
+	data, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("log file not found: %v", err)
+	}
+
+	var entry map[string]interface{}
+	if err := json.Unmarshal(bytes.TrimSpace(data), &entry); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	// JSON numbers unmarshal as float64
+	if exitCode, ok := entry["exit_code"].(float64); !ok || exitCode != 2 {
+		t.Errorf("exit_code = %v, want 2", entry["exit_code"])
+	}
+}
+
+// TestRequestLogHasDirectionField verifies that the existing request log entry
+// includes a "direction":"request" field.
+func TestRequestLogHasDirectionField(t *testing.T) {
+	sessionID := "test-request-direction-ghi012"
+	logDir := filepath.Join(os.TempDir(), "wf-agents-hook-logs")
+	_ = os.MkdirAll(logDir, 0755)
+	logFile := filepath.Join(logDir, sessionID+".jsonl")
+	defer os.Remove(logFile)
+
+	// Simulate the request log entry as written by main()
+	rawInput := []byte(`{"session_id":"` + sessionID + `","hook_event_name":"PostToolUse"}`)
+	logEntry := map[string]interface{}{
+		"ts":        time.Now().UTC().Format(time.RFC3339Nano),
+		"event":     "PostToolUse",
+		"direction": "request",
+		"raw":       json.RawMessage(rawInput),
+	}
+	logLine, err := json.Marshal(logEntry)
+	if err != nil {
+		t.Fatalf("failed to marshal log entry: %v", err)
+	}
+
+	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatalf("cannot open log file: %v", err)
+	}
+	f.Write(logLine)
+	f.Write([]byte("\n"))
+	f.Close()
+
+	data, _ := os.ReadFile(logFile)
+	var entry map[string]interface{}
+	if err := json.Unmarshal(bytes.TrimSpace(data), &entry); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	if entry["direction"] != "request" {
+		t.Errorf("direction = %q, want \"request\"", entry["direction"])
+	}
+}
+
 // TestAutoAllowOutputHasPermissionDecisionAllow verifies that when Allowed is true, the JSON output
 // contains permissionDecision: "allow" so Claude Code bypasses the permission prompt.
 func TestAutoAllowOutputHasPermissionDecisionAllow(t *testing.T) {

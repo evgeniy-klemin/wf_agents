@@ -56,6 +56,26 @@ type hookSpecificOutput struct {
 	PermissionDecisionReason string `json:"permissionDecisionReason,omitempty"`
 }
 
+// logResponse appends a response entry to the session JSONL log.
+func logResponse(sessionID string, event string, exitCode int, response interface{}) {
+	logDir := filepath.Join(os.TempDir(), "wf-agents-hook-logs")
+	logFile := filepath.Join(logDir, sessionID+".jsonl")
+	entry := map[string]interface{}{
+		"ts":        time.Now().UTC().Format(time.RFC3339Nano),
+		"event":     event,
+		"direction": "response",
+		"exit_code": exitCode,
+		"response":  response,
+	}
+	line, _ := json.Marshal(entry)
+	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err == nil {
+		f.Write(line)
+		f.Write([]byte("\n"))
+		f.Close()
+	}
+}
+
 func main() {
 	log.SetFlags(0)
 	log.SetOutput(os.Stderr)
@@ -78,9 +98,10 @@ func main() {
 
 	// Add timestamp and write as one line
 	logEntry := map[string]interface{}{
-		"ts":    time.Now().UTC().Format(time.RFC3339Nano),
-		"event": input.HookEventName,
-		"raw":   json.RawMessage(rawInput),
+		"ts":        time.Now().UTC().Format(time.RFC3339Nano),
+		"event":     input.HookEventName,
+		"direction": "request",
+		"raw":       json.RawMessage(rawInput),
 	}
 	logLine, _ := json.Marshal(logEntry)
 	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
@@ -167,6 +188,10 @@ func main() {
 			// Write reason to stderr (logged) and stdout (shown to Claude).
 			fmt.Fprintf(os.Stderr, "DENIED: %s\n", decision.Reason)
 			fmt.Fprintf(os.Stdout, "%s\n", decision.Reason)
+			logResponse(input.SessionID, "PreToolUse", 2, map[string]string{
+				"decision": "deny",
+				"reason":   decision.Reason,
+			})
 			os.Exit(2)
 		}
 
@@ -190,6 +215,10 @@ func main() {
 				},
 			}
 			json.NewEncoder(os.Stdout).Encode(out)
+			logResponse(input.SessionID, "PreToolUse", 0, map[string]string{
+				"decision": "allow",
+				"phase":    string(currentPhase),
+			})
 			os.Exit(0)
 		}
 
@@ -213,6 +242,10 @@ func main() {
 			}
 			json.NewEncoder(os.Stdout).Encode(out)
 		}
+		logResponse(input.SessionID, "PreToolUse", 0, map[string]string{
+			"decision": "pass",
+			"phase":    string(currentPhase),
+		})
 
 	case "PostToolUse":
 		sendHookEvent(ctx, c, workflowID, model.SignalHookEvent{
@@ -277,13 +310,23 @@ func main() {
 			// This is the Team Lead going idle.
 			// Lead can only idle in BLOCKED or COMPLETE.
 			if phase != model.PhaseBlocked && phase != model.PhaseComplete {
-				fmt.Fprintf(os.Stderr, "Lead cannot go idle in %s. Transition to BLOCKED or COMPLETE, or continue working.\n", phase)
+				reason := fmt.Sprintf("Lead cannot go idle in %s. Transition to BLOCKED or COMPLETE, or continue working.", phase)
+				fmt.Fprintf(os.Stderr, "%s\n", reason)
+				logResponse(input.SessionID, "TeammateIdle", 2, map[string]string{
+					"action": "keep_working",
+					"reason": reason,
+				})
 				os.Exit(2)
 			}
 		} else if strings.Contains(strings.ToLower(input.TeammateName), "developer") {
 			// Developer going idle.
 			if phase == model.PhaseDeveloping {
-				fmt.Fprintf(os.Stderr, "Developer cannot go idle in DEVELOPING without finishing work. Complete your task and message the Team Lead.\n")
+				reason := "Developer cannot go idle in DEVELOPING without finishing work. Complete your task and message the Team Lead."
+				fmt.Fprintf(os.Stderr, "%s\n", reason)
+				logResponse(input.SessionID, "TeammateIdle", 2, map[string]string{
+					"action": "keep_working",
+					"reason": reason,
+				})
 				os.Exit(2)
 			}
 		}
@@ -322,6 +365,10 @@ func main() {
 			},
 		}
 		json.NewEncoder(os.Stdout).Encode(out)
+		logResponse(input.SessionID, "SessionStart", 0, map[string]string{
+			"action":      "context_injected",
+			"workflow_id": workflowID,
+		})
 
 	case "UserPromptSubmit":
 		detail["prompt"] = input.Prompt
@@ -360,6 +407,9 @@ func main() {
 		})
 	}
 
+	logResponse(input.SessionID, input.HookEventName, 0, map[string]string{
+		"action": "logged",
+	})
 	os.Exit(0)
 }
 
