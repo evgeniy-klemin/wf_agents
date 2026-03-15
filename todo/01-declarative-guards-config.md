@@ -57,14 +57,16 @@ tracking:
     - "python -m pytest"
 
 guards:
-  - transition: "DEVELOPING → REVIEWING"
+  - from: DEVELOPING
+    to: REVIEWING
     checks:
       - type: evidence
         key: "working_tree_clean"
         value: "false"
         message: "No uncommitted changes — there must be changes to review"
 
-  - transition: "COMMITTING → RESPAWN"
+  - from: COMMITTING
+    to: RESPAWN
     checks:
       - type: evidence
         key: "working_tree_clean"
@@ -73,26 +75,30 @@ guards:
       - type: max_iterations
         message: "Max iterations reached"
 
-  - transition: "COMMITTING → PR_CREATION"
+  - from: COMMITTING
+    to: PR_CREATION
     checks:
       - type: evidence
         key: "working_tree_clean"
         value: "true"
         message: "Working tree not clean — commit or stash changes first"
 
-  - transition: "RESPAWN → DEVELOPING"
+  - from: RESPAWN
+    to: DEVELOPING
     checks:
       - type: no_active_agents
         message: "Shut down old teammates before spawning new ones"
 
-  - transition: "PR_CREATION → FEEDBACK"
+  - from: PR_CREATION
+    to: FEEDBACK
     checks:
       - type: evidence
         key: "pr_checks_pass"
         value: "true"
         message: "PR checks have not passed"
 
-  - transition: "FEEDBACK → COMPLETE"
+  - from: FEEDBACK
+    to: COMPLETE
     checks:
       - type: evidence
         key: "pr_approved"
@@ -102,7 +108,8 @@ guards:
             value: "true"
         message: "PR not approved or merged"
 
-  - transition: "* → RESPAWN"
+  - from: "*"
+    to: RESPAWN
     checks:
       - type: max_iterations
         message: "Max iterations reached"
@@ -128,7 +135,8 @@ tracking:
 
 guards:
   # ADD checks to existing transition (appends to defaults)
-  - transition: "DEVELOPING → REVIEWING"
+  - from: DEVELOPING
+    to: REVIEWING
     checks:
       - type: command_ran
         category: lint
@@ -138,14 +146,16 @@ guards:
         message: "Run tests before review"
 
   # ADD guard for transition not in defaults
-  - transition: "REVIEWING → COMMITTING"
+  - from: REVIEWING
+    to: COMMITTING
     checks:
       - type: command_ran
         category: test
         message: "Reviewer must verify tests pass"
 
   # DISABLE a default guard
-  # - transition: "PR_CREATION → FEEDBACK"
+  # - from: PR_CREATION
+  #   to: FEEDBACK
   #   disabled: true
 
 teammate_idle:
@@ -165,8 +175,8 @@ teammate_idle:
 | Section | Merge rule |
 |---|---|
 | `tracking` lists | Project values **append** to defaults (union, deduplicated) |
-| `guards` list | Project guards **append** — same transition = checks combined |
-| `guards` with `disabled: true` | **Removes** all guards for that transition |
+| `guards` list | Project guards **append** — same from+to pair = checks combined |
+| `guards` with `disabled: true` | **Removes** all guards for that from+to pair |
 | `teammate_idle` | Project rules **override** by `match` pattern |
 
 ### Check types
@@ -185,9 +195,9 @@ Extensible — new check types added in Go, immediately usable in YAML without c
 ### Wildcard transitions
 
 `*` matches any phase:
-- `"* → RESPAWN"` — applies to ALL transitions targeting RESPAWN
-- `"DEVELOPING → *"` — applies to ALL transitions from DEVELOPING
-- Specific transitions checked first, then wildcards
+- `from: "*"` matches any source phase, `to: "*"` matches any target phase. Specific from+to pairs checked first, then wildcards.
+- `from: "*", to: RESPAWN` — applies to ALL transitions targeting RESPAWN
+- `from: DEVELOPING, to: "*"` — applies to ALL transitions from DEVELOPING
 
 ## Implementation plan
 
@@ -211,9 +221,10 @@ type Config struct {
 }
 
 type GuardRule struct {
-    Transition string  `yaml:"transition"`
-    Disabled   bool    `yaml:"disabled,omitempty"`
-    Checks     []Check `yaml:"checks"`
+    From     string  `yaml:"from"`
+    To       string  `yaml:"to"`
+    Disabled bool    `yaml:"disabled,omitempty"`
+    Checks   []Check `yaml:"checks"`
 }
 
 type Check struct {
