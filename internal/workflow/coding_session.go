@@ -390,6 +390,45 @@ func (s *sessionState) handleHookEvent(ctx workflow.Context, evt model.SignalHoo
 		evtType = model.EventAgentStop
 	}
 
+	// Auto-BLOCKED: PermissionRequest from any agent → terminal waiting for user approval
+	if evt.HookType == "PermissionRequest" {
+		if !s.phase.IsTerminal() && s.phase != model.PhaseBlocked {
+			s.preBlockedPhase = s.phase
+			s.phase = model.PhaseBlocked
+			s.lastUpdated = workflow.Now(ctx)
+			s.phaseEnteredAt = workflow.Now(ctx)
+
+			agent := evt.Detail["agent_type"]
+			if agent == "" {
+				agent = "lead"
+			}
+			tool := evt.Tool
+			if tool == "" {
+				tool = evt.Detail["tool_name"]
+			}
+			s.addEvent(ctx, model.EventTransition, evt.SessionID, map[string]string{
+				"from":   string(s.preBlockedPhase),
+				"to":     string(model.PhaseBlocked),
+				"reason": fmt.Sprintf("auto: %s needs permission for %s", agent, tool),
+			})
+		}
+	}
+
+	// Auto-unblock: PostToolUse / PostToolUseFailure (permission resolved, any agent).
+	if s.phase == model.PhaseBlocked && s.preBlockedPhase != "" {
+		if evt.HookType == "PostToolUse" || evt.HookType == "PostToolUseFailure" {
+			from := s.phase
+			s.phase = s.preBlockedPhase
+			s.lastUpdated = workflow.Now(ctx)
+			s.phaseEnteredAt = workflow.Now(ctx)
+			s.addEvent(ctx, model.EventTransition, evt.SessionID, map[string]string{
+				"from":   string(from),
+				"to":     string(s.preBlockedPhase),
+				"reason": "auto: permission resolved",
+			})
+		}
+	}
+
 	detail := make(map[string]string)
 	detail["hook_type"] = evt.HookType
 	if evt.Tool != "" {

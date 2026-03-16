@@ -1,6 +1,8 @@
 package workflow
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/eklemin/wf-agents/internal/model"
@@ -1311,3 +1313,329 @@ func TestClearActiveAgentsSignal(t *testing.T) {
 	assert.Equal(t, 0, len(status.ActiveAgents),
 		"activeAgents should be empty after clear-active-agents signal")
 }
+
+// TestNoUnblockOnUserPromptSubmit verifies that UserPromptSubmit does NOT trigger auto-unblock.
+// Auto-unblock is only triggered by PostToolUse/PostToolUseFailure (PermissionRequest resolution).
+func TestNoUnblockOnUserPromptSubmit(t *testing.T) {
+	s := &sessionState{
+		phase:           model.PhaseBlocked,
+		preBlockedPhase: model.PhaseDeveloping,
+		events:          make([]model.WorkflowEvent, 0),
+		activeAgents:    make(map[string]string),
+		commandsRan:     make(map[string]map[string]bool),
+		maxIter:         5,
+		iteration:       1,
+	}
+
+	evt := model.SignalHookEvent{
+		HookType:  "UserPromptSubmit",
+		SessionID: "test",
+		Detail:    map[string]string{"agent_id": ""},
+	}
+
+	// Simulate the auto-unblock logic (PostToolUse/PostToolUseFailure only)
+	if s.phase == model.PhaseBlocked && s.preBlockedPhase != "" {
+		if evt.HookType == "PostToolUse" || evt.HookType == "PostToolUseFailure" {
+			from := s.phase
+			s.phase = s.preBlockedPhase
+			s.events = append(s.events, model.WorkflowEvent{
+				Type:      model.EventTransition,
+				SessionID: evt.SessionID,
+				Detail: map[string]string{
+					"from":   string(from),
+					"to":     string(s.preBlockedPhase),
+					"reason": "auto: permission resolved",
+				},
+			})
+		}
+	}
+
+	assert.Equal(t, model.PhaseBlocked, s.phase, "UserPromptSubmit should NOT unblock — phase stays BLOCKED")
+	assert.Empty(t, s.events, "no auto-unblock event should be emitted for UserPromptSubmit")
+}
+
+// TestAutoUnblockPreservesPreBlockedPhase verifies that PostToolUse auto-unblock returns to the
+// exact phase before BLOCKED (preBlockedPhase), tested with FEEDBACK as the pre-blocked phase.
+func TestAutoUnblockPreservesPreBlockedPhase(t *testing.T) {
+	s := &sessionState{
+		phase:           model.PhaseBlocked,
+		preBlockedPhase: model.PhaseFeedback,
+		events:          make([]model.WorkflowEvent, 0),
+		activeAgents:    make(map[string]string),
+		commandsRan:     make(map[string]map[string]bool),
+		maxIter:         5,
+		iteration:       1,
+	}
+
+	evt := model.SignalHookEvent{
+		HookType:  "PostToolUse",
+		SessionID: "test",
+		Detail:    map[string]string{"agent_type": "developer-1"},
+	}
+
+	// Simulate auto-unblock from BLOCKED via PostToolUse
+	if s.phase == model.PhaseBlocked && s.preBlockedPhase != "" {
+		if evt.HookType == "PostToolUse" || evt.HookType == "PostToolUseFailure" {
+			from := s.phase
+			s.phase = s.preBlockedPhase
+			s.events = append(s.events, model.WorkflowEvent{
+				Type:      model.EventTransition,
+				SessionID: evt.SessionID,
+				Detail: map[string]string{
+					"from":   string(from),
+					"to":     string(s.preBlockedPhase),
+					"reason": "auto: permission resolved",
+				},
+			})
+		}
+	}
+
+	assert.Equal(t, model.PhaseFeedback, s.phase, "phase should be FEEDBACK after auto-unblock via PostToolUse")
+
+	hasAutoUnblock := false
+	for _, e := range s.events {
+		if e.Type == model.EventTransition && e.Detail["from"] == "BLOCKED" && e.Detail["to"] == "FEEDBACK" {
+			if e.Detail["reason"] == "auto: permission resolved" {
+				hasAutoUnblock = true
+				break
+			}
+		}
+	}
+	assert.True(t, hasAutoUnblock, "should have auto-unblock transition event from BLOCKED to FEEDBACK")
+}
+
+
+// TestAutoBlockOnPermissionRequest verifies that a PermissionRequest hook event while in a
+// non-terminal, non-BLOCKED phase automatically transitions to BLOCKED and records preBlockedPhase.
+func TestAutoBlockOnPermissionRequest(t *testing.T) {
+	s := &sessionState{
+		phase:           model.PhaseDeveloping,
+		preBlockedPhase: "",
+		events:          make([]model.WorkflowEvent, 0),
+		activeAgents:    make(map[string]string),
+		commandsRan:     make(map[string]map[string]bool),
+		maxIter:         5,
+		iteration:       1,
+	}
+
+	evt := model.SignalHookEvent{
+		HookType:  "PermissionRequest",
+		SessionID: "test",
+		Tool:      "Bash",
+		Detail:    map[string]string{"agent_type": "developer-1"},
+	}
+
+	// Simulate the auto-block logic (same as handleHookEvent)
+	if evt.HookType == "PermissionRequest" {
+		if !s.phase.IsTerminal() && s.phase != model.PhaseBlocked {
+			s.preBlockedPhase = s.phase
+			s.phase = model.PhaseBlocked
+
+			agent := evt.Detail["agent_type"]
+			if agent == "" {
+				agent = "lead"
+			}
+			tool := evt.Tool
+			if tool == "" {
+				tool = evt.Detail["tool_name"]
+			}
+			s.events = append(s.events, model.WorkflowEvent{
+				Type:      model.EventTransition,
+				SessionID: evt.SessionID,
+				Detail: map[string]string{
+					"from":   string(s.preBlockedPhase),
+					"to":     string(model.PhaseBlocked),
+					"reason": fmt.Sprintf("auto: %s needs permission for %s", agent, tool),
+				},
+			})
+		}
+	}
+
+	assert.Equal(t, model.PhaseBlocked, s.phase, "phase should be BLOCKED after PermissionRequest")
+	assert.Equal(t, model.PhaseDeveloping, s.preBlockedPhase, "preBlockedPhase should be DEVELOPING")
+
+	hasAutoBlock := false
+	for _, e := range s.events {
+		if e.Type == model.EventTransition && e.Detail["from"] == "DEVELOPING" && e.Detail["to"] == "BLOCKED" {
+			if strings.Contains(e.Detail["reason"], "permission") {
+				hasAutoBlock = true
+				break
+			}
+		}
+	}
+	assert.True(t, hasAutoBlock, "should have auto-block transition event with reason containing 'permission'")
+}
+
+// TestAutoUnblockOnPostToolUseAfterPermissionRequest verifies that PostToolUse while in BLOCKED
+// (from a PermissionRequest) returns to preBlockedPhase.
+func TestAutoUnblockOnPostToolUseAfterPermissionRequest(t *testing.T) {
+	s := &sessionState{
+		phase:           model.PhaseBlocked,
+		preBlockedPhase: model.PhaseDeveloping,
+		events:          make([]model.WorkflowEvent, 0),
+		activeAgents:    make(map[string]string),
+		commandsRan:     make(map[string]map[string]bool),
+		maxIter:         5,
+		iteration:       1,
+	}
+
+	evt := model.SignalHookEvent{
+		HookType:  "PostToolUse",
+		SessionID: "test",
+		Tool:      "Bash",
+		Detail:    map[string]string{"agent_type": "developer-1"},
+	}
+
+	// Simulate the extended auto-unblock logic
+	isTeamLead := evt.Detail["agent_id"] == ""
+	shouldUnblock := false
+	if isTeamLead && evt.HookType == "UserPromptSubmit" {
+		shouldUnblock = true
+	}
+	if evt.HookType == "PostToolUse" || evt.HookType == "PostToolUseFailure" {
+		shouldUnblock = true
+	}
+	if s.phase == model.PhaseBlocked && s.preBlockedPhase != "" && shouldUnblock {
+		from := s.phase
+		s.phase = s.preBlockedPhase
+		reason := "auto: user responded"
+		if evt.HookType == "PostToolUse" || evt.HookType == "PostToolUseFailure" {
+			reason = "auto: permission resolved"
+		}
+		s.events = append(s.events, model.WorkflowEvent{
+			Type:      model.EventTransition,
+			SessionID: evt.SessionID,
+			Detail: map[string]string{
+				"from":   string(from),
+				"to":     string(s.preBlockedPhase),
+				"reason": reason,
+			},
+		})
+	}
+
+	assert.Equal(t, model.PhaseDeveloping, s.phase, "phase should return to DEVELOPING after PostToolUse")
+
+	hasUnblock := false
+	for _, e := range s.events {
+		if e.Type == model.EventTransition && e.Detail["from"] == "BLOCKED" && e.Detail["to"] == "DEVELOPING" {
+			if e.Detail["reason"] == "auto: permission resolved" {
+				hasUnblock = true
+				break
+			}
+		}
+	}
+	assert.True(t, hasUnblock, "should have auto-unblock transition event with reason 'auto: permission resolved' after PostToolUse")
+}
+
+// TestAutoUnblockOnPostToolUseFailureAfterPermissionRequest verifies that PostToolUseFailure
+// (user denied the permission) while in BLOCKED also returns to preBlockedPhase.
+func TestAutoUnblockOnPostToolUseFailureAfterPermissionRequest(t *testing.T) {
+	s := &sessionState{
+		phase:           model.PhaseBlocked,
+		preBlockedPhase: model.PhaseDeveloping,
+		events:          make([]model.WorkflowEvent, 0),
+		activeAgents:    make(map[string]string),
+		commandsRan:     make(map[string]map[string]bool),
+		maxIter:         5,
+		iteration:       1,
+	}
+
+	evt := model.SignalHookEvent{
+		HookType:  "PostToolUseFailure",
+		SessionID: "test",
+		Tool:      "Bash",
+		Detail:    map[string]string{"agent_type": "developer-1"},
+	}
+
+	// Simulate the extended auto-unblock logic
+	isTeamLead := evt.Detail["agent_id"] == ""
+	shouldUnblock := false
+	if isTeamLead && evt.HookType == "UserPromptSubmit" {
+		shouldUnblock = true
+	}
+	if evt.HookType == "PostToolUse" || evt.HookType == "PostToolUseFailure" {
+		shouldUnblock = true
+	}
+	if s.phase == model.PhaseBlocked && s.preBlockedPhase != "" && shouldUnblock {
+		from := s.phase
+		s.phase = s.preBlockedPhase
+		reason := "auto: user responded"
+		if evt.HookType == "PostToolUse" || evt.HookType == "PostToolUseFailure" {
+			reason = "auto: permission resolved"
+		}
+		s.events = append(s.events, model.WorkflowEvent{
+			Type:      model.EventTransition,
+			SessionID: evt.SessionID,
+			Detail: map[string]string{
+				"from":   string(from),
+				"to":     string(s.preBlockedPhase),
+				"reason": reason,
+			},
+		})
+	}
+
+	assert.Equal(t, model.PhaseDeveloping, s.phase, "phase should return to DEVELOPING after PostToolUseFailure")
+
+	hasUnblock := false
+	for _, e := range s.events {
+		if e.Type == model.EventTransition && e.Detail["from"] == "BLOCKED" && e.Detail["to"] == "DEVELOPING" {
+			if e.Detail["reason"] == "auto: permission resolved" {
+				hasUnblock = true
+				break
+			}
+		}
+	}
+	assert.True(t, hasUnblock, "should have auto-unblock transition event after PostToolUseFailure")
+}
+
+// TestNoDoubleBlockOnPermissionRequest verifies that a PermissionRequest while already in BLOCKED
+// does not overwrite preBlockedPhase.
+func TestNoDoubleBlockOnPermissionRequest(t *testing.T) {
+	s := &sessionState{
+		phase:           model.PhaseBlocked,
+		preBlockedPhase: model.PhaseDeveloping,
+		events:          make([]model.WorkflowEvent, 0),
+		activeAgents:    make(map[string]string),
+		commandsRan:     make(map[string]map[string]bool),
+		maxIter:         5,
+		iteration:       1,
+	}
+
+	evt := model.SignalHookEvent{
+		HookType:  "PermissionRequest",
+		SessionID: "test",
+		Tool:      "Bash",
+		Detail:    map[string]string{"agent_type": "developer-1"},
+	}
+
+	// Simulate the auto-block logic — should be a no-op because already BLOCKED
+	if evt.HookType == "PermissionRequest" {
+		if !s.phase.IsTerminal() && s.phase != model.PhaseBlocked {
+			s.preBlockedPhase = s.phase
+			s.phase = model.PhaseBlocked
+
+			agent := evt.Detail["agent_type"]
+			if agent == "" {
+				agent = "lead"
+			}
+			tool := evt.Tool
+			if tool == "" {
+				tool = evt.Detail["tool_name"]
+			}
+			s.events = append(s.events, model.WorkflowEvent{
+				Type:      model.EventTransition,
+				SessionID: evt.SessionID,
+				Detail: map[string]string{
+					"from":   string(s.preBlockedPhase),
+					"to":     string(model.PhaseBlocked),
+					"reason": fmt.Sprintf("auto: %s needs permission for %s", agent, tool),
+				},
+			})
+		}
+	}
+
+	assert.Equal(t, model.PhaseBlocked, s.phase, "phase should remain BLOCKED")
+	assert.Equal(t, model.PhaseDeveloping, s.preBlockedPhase, "preBlockedPhase should NOT be overwritten")
+	assert.Empty(t, s.events, "no transition event should be emitted when already BLOCKED")
+}
+

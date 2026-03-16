@@ -492,3 +492,77 @@ func TestMergeConfigs_IdleSameMatchAndAgentReplaces(t *testing.T) {
 	require.Len(t, merged.TeammateIdle[0].Checks, 1)
 	assert.Equal(t, "lint", merged.TeammateIdle[0].Checks[0].Category)
 }
+
+// --- FindLeadIdleRule ---
+
+func TestFindLeadIdleRule(t *testing.T) {
+	cfg := &Config{
+		LeadIdle: []LeadIdleRule{
+			{Phase: "PLANNING", Deny: true, Message: "No teammates in PLANNING"},
+			{Phase: "FEEDBACK", Deny: true, Message: "Continue polling"},
+			{Phase: "*", Deny: false},
+		},
+	}
+
+	// Exact match: PLANNING
+	r := FindLeadIdleRule(cfg, "PLANNING")
+	require.NotNil(t, r)
+	assert.True(t, r.Deny)
+	assert.Equal(t, "No teammates in PLANNING", r.Message)
+
+	// Exact match: FEEDBACK
+	r = FindLeadIdleRule(cfg, "FEEDBACK")
+	require.NotNil(t, r)
+	assert.True(t, r.Deny)
+	assert.Equal(t, "Continue polling", r.Message)
+
+	// Wildcard match: DEVELOPING falls through to "*"
+	r = FindLeadIdleRule(cfg, "DEVELOPING")
+	require.NotNil(t, r)
+	assert.False(t, r.Deny)
+
+	// No rules at all → nil
+	empty := &Config{}
+	r = FindLeadIdleRule(empty, "PLANNING")
+	assert.Nil(t, r)
+}
+
+func TestFindLeadIdleRulePriority(t *testing.T) {
+	cfg := &Config{
+		LeadIdle: []LeadIdleRule{
+			{Phase: "*", Deny: false, Message: "wildcard"},
+			{Phase: "PLANNING", Deny: true, Message: "exact"},
+		},
+	}
+
+	// Exact match must win over wildcard even when wildcard appears first
+	r := FindLeadIdleRule(cfg, "PLANNING")
+	require.NotNil(t, r)
+	assert.Equal(t, "exact", r.Message, "exact phase match should take priority over wildcard")
+
+	// Phase with no exact rule falls back to wildcard
+	r = FindLeadIdleRule(cfg, "REVIEWING")
+	require.NotNil(t, r)
+	assert.Equal(t, "wildcard", r.Message)
+}
+
+func TestDefaultConfig_HasLeadIdleRules(t *testing.T) {
+	cfg, err := DefaultConfig()
+	require.NoError(t, err)
+	assert.NotEmpty(t, cfg.LeadIdle, "defaults.yaml must contain lead_idle rules")
+
+	// PLANNING should be denied
+	r := FindLeadIdleRule(cfg, "PLANNING")
+	require.NotNil(t, r)
+	assert.True(t, r.Deny, "PLANNING should deny lead idle by default")
+
+	// FEEDBACK should be denied
+	r = FindLeadIdleRule(cfg, "FEEDBACK")
+	require.NotNil(t, r)
+	assert.True(t, r.Deny, "FEEDBACK should deny lead idle by default")
+
+	// DEVELOPING should allow
+	r = FindLeadIdleRule(cfg, "DEVELOPING")
+	require.NotNil(t, r)
+	assert.False(t, r.Deny, "DEVELOPING should allow lead idle by default")
+}
