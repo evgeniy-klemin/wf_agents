@@ -80,7 +80,7 @@ func mergeGuards(base, override []GuardRule) []GuardRule {
 }
 
 func idleRuleKey(r IdleRule) string {
-	return r.Match + "|" + r.Agent
+	return r.Phase + "|" + r.Agent
 }
 
 func mergeIdleRules(base, override []IdleRule) []IdleRule {

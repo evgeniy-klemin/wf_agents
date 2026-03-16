@@ -92,14 +92,14 @@ teammate_idle:
   # Override in .wf-agents.yaml to add per-agent, per-phase checks.
   # Example (uncomment and adapt):
   #
-  # - match: DEVELOPING
+  # - phase: DEVELOPING
   #   agent: "developer*"
   #   checks:
   #     - type: command_ran
   #       category: test
   #       message: "Run tests before going idle (e.g. 'go test ./...')"
-  # - match: DEVELOPING
+  # - phase: DEVELOPING
   #   agent: "reviewer*"
   #   checks: []
-  - match: "*"
+  - phase: "*"
     checks: []

@@ -150,13 +150,13 @@ func TestEvalTeammateIdleConfig_WithCommands(t *testing.T) {
 	dir := t.TempDir()
 	writeIdleConfig(t, dir, `
 teammate_idle:
-  - match: DEVELOPING
+  - phase: DEVELOPING
     checks:
       - type: command_ran
-        key: lint
+        category: lint
         message: "Must run lint before going idle"
       - type: command_ran
-        key: test
+        category: test
         message: "Must run tests before going idle"
 `)
 

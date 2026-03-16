@@ -934,11 +934,11 @@ func TestEvalTeammateIdleConfig_CustomConfig(t *testing.T) {
 	// Override the developer* rule for DEVELOPING to require lint instead of test.
 	writeTempConfig(t, dir, `
 teammate_idle:
-  - match: DEVELOPING
+  - phase: DEVELOPING
     agent: "developer*"
     checks:
       - type: command_ran
-        key: lint
+        category: lint
         message: "Must run lint before going idle in DEVELOPING"
 `)
 	// No commands ran — should be denied

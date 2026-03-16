@@ -67,12 +67,7 @@ func EvalCheck(check Check, ctx CheckContext) string {
 
 	case "command_ran":
 		cmds := ctx.CommandsRan()
-		// Prefer Category; fall back to Key for backwards compatibility.
-		key := check.Category
-		if key == "" {
-			key = check.Key
-		}
-		if cmds[key] {
+		if cmds[check.Category] {
 			return ""
 		}
 		return check.Message
@@ -112,8 +107,8 @@ func FindIdleRule(cfg *Config, phase, agentName string) *IdleRule {
 	var exactNoAgent, wildAgent, wildNoAgent *IdleRule
 	for i := range cfg.TeammateIdle {
 		r := &cfg.TeammateIdle[i]
-		exactPhase := r.Match == phase
-		wildcardPhase := r.Match == "*"
+		exactPhase := r.Phase == phase
+		wildcardPhase := r.Phase == "*"
 		if !exactPhase && !wildcardPhase {
 			continue
 		}

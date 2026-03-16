@@ -143,10 +143,10 @@ func TestMergeConfigs_GuardsNewPairAppended(t *testing.T) {
 
 func TestMergeConfigs_IdleOverride(t *testing.T) {
 	base := &Config{TeammateIdle: []IdleRule{
-		{Match: "*", Checks: []Check{}},
+		{Phase: "*", Checks: []Check{}},
 	}}
 	override := &Config{TeammateIdle: []IdleRule{
-		{Match: "*", Checks: []Check{{Type: "evidence", Key: "done", Value: "true", Message: "not done"}}},
+		{Phase: "*", Checks: []Check{{Type: "evidence", Key: "done", Value: "true", Message: "not done"}}},
 	}}
 
 	merged := MergeConfigs(base, override)
@@ -155,8 +155,8 @@ func TestMergeConfigs_IdleOverride(t *testing.T) {
 }
 
 func TestMergeConfigs_IdleNewMatchAppended(t *testing.T) {
-	base := &Config{TeammateIdle: []IdleRule{{Match: "*", Checks: []Check{}}}}
-	override := &Config{TeammateIdle: []IdleRule{{Match: "DEVELOPING", Checks: []Check{{Type: "no_active_agents", Message: "x"}}}}}
+	base := &Config{TeammateIdle: []IdleRule{{Phase: "*", Checks: []Check{}}}}
+	override := &Config{TeammateIdle: []IdleRule{{Phase: "DEVELOPING", Checks: []Check{{Type: "no_active_agents", Message: "x"}}}}}
 
 	merged := MergeConfigs(base, override)
 	assert.Len(t, merged.TeammateIdle, 2)
@@ -252,19 +252,19 @@ func TestEvalCheck_MaxIterationsFail(t *testing.T) {
 }
 
 func TestEvalCheck_CommandRanPass(t *testing.T) {
-	c := Check{Type: "command_ran", Key: "test", Message: "tests not run"}
+	c := Check{Type: "command_ran", Category: "test", Message: "tests not run"}
 	ctx := &simpleCtx{commandsRan: map[string]bool{"test": true}}
 	assert.Empty(t, EvalCheck(c, ctx))
 }
 
 func TestEvalCheck_CommandRanFail_NilMap(t *testing.T) {
-	c := Check{Type: "command_ran", Key: "test", Message: "tests not run"}
+	c := Check{Type: "command_ran", Category: "test", Message: "tests not run"}
 	ctx := &simpleCtx{commandsRan: nil}
 	assert.Equal(t, "tests not run", EvalCheck(c, ctx))
 }
 
 func TestEvalCheck_CommandRanFail_CategoryNotSet(t *testing.T) {
-	c := Check{Type: "command_ran", Key: "test", Message: "tests not run"}
+	c := Check{Type: "command_ran", Category: "test", Message: "tests not run"}
 	ctx := &simpleCtx{commandsRan: map[string]bool{"lint": true}}
 	assert.Equal(t, "tests not run", EvalCheck(c, ctx))
 }
@@ -278,13 +278,6 @@ func TestEvalCheck_CommandRanPass_Category(t *testing.T) {
 func TestEvalCheck_CommandRanFail_Category(t *testing.T) {
 	c := Check{Type: "command_ran", Category: "lint", Message: "lint not run"}
 	ctx := &simpleCtx{commandsRan: map[string]bool{"test": true}}
-	assert.Equal(t, "lint not run", EvalCheck(c, ctx))
-}
-
-func TestEvalCheck_CommandRan_CategoryTakesPrecedenceOverKey(t *testing.T) {
-	// When both Category and Key are set, Category wins.
-	c := Check{Type: "command_ran", Category: "lint", Key: "test", Message: "lint not run"}
-	ctx := &simpleCtx{commandsRan: map[string]bool{"test": true}} // only Key is in map
 	assert.Equal(t, "lint not run", EvalCheck(c, ctx))
 }
 
@@ -363,27 +356,27 @@ func TestFindGuards_ExactBeforeWildcard(t *testing.T) {
 
 func TestFindIdleRule_ExactMatch(t *testing.T) {
 	cfg := &Config{TeammateIdle: []IdleRule{
-		{Match: "DEVELOPING", Checks: []Check{{Type: "command_ran", Category: "test", Message: "m"}}},
-		{Match: "*", Checks: []Check{}},
+		{Phase: "DEVELOPING", Checks: []Check{{Type: "command_ran", Category: "test", Message: "m"}}},
+		{Phase: "*", Checks: []Check{}},
 	}}
 	rule := FindIdleRule(cfg, "DEVELOPING", "developer-1")
 	require.NotNil(t, rule)
-	assert.Equal(t, "DEVELOPING", rule.Match)
+	assert.Equal(t, "DEVELOPING", rule.Phase)
 }
 
 func TestFindIdleRule_WildcardFallback(t *testing.T) {
 	cfg := &Config{TeammateIdle: []IdleRule{
-		{Match: "DEVELOPING", Checks: []Check{{Type: "command_ran", Category: "test", Message: "m"}}},
-		{Match: "*", Checks: []Check{}},
+		{Phase: "DEVELOPING", Checks: []Check{{Type: "command_ran", Category: "test", Message: "m"}}},
+		{Phase: "*", Checks: []Check{}},
 	}}
 	rule := FindIdleRule(cfg, "REVIEWING", "developer-1")
 	require.NotNil(t, rule)
-	assert.Equal(t, "*", rule.Match)
+	assert.Equal(t, "*", rule.Phase)
 }
 
 func TestFindIdleRule_NoMatch(t *testing.T) {
 	cfg := &Config{TeammateIdle: []IdleRule{
-		{Match: "DEVELOPING", Checks: []Check{{Type: "command_ran", Category: "test", Message: "m"}}},
+		{Phase: "DEVELOPING", Checks: []Check{{Type: "command_ran", Category: "test", Message: "m"}}},
 	}}
 	rule := FindIdleRule(cfg, "REVIEWING", "developer-1")
 	assert.Nil(t, rule)
@@ -391,9 +384,9 @@ func TestFindIdleRule_NoMatch(t *testing.T) {
 
 func TestFindIdleRule_AgentGlobMatch(t *testing.T) {
 	cfg := &Config{TeammateIdle: []IdleRule{
-		{Match: "DEVELOPING", Agent: "developer*", Checks: []Check{{Type: "command_ran", Category: "test", Message: "run tests"}}},
-		{Match: "DEVELOPING", Agent: "reviewer*", Checks: []Check{}},
-		{Match: "*", Checks: []Check{}},
+		{Phase: "DEVELOPING", Agent: "developer*", Checks: []Check{{Type: "command_ran", Category: "test", Message: "run tests"}}},
+		{Phase: "DEVELOPING", Agent: "reviewer*", Checks: []Check{}},
+		{Phase: "*", Checks: []Check{}},
 	}}
 
 	// developer-1 matches developer* rule
@@ -409,13 +402,13 @@ func TestFindIdleRule_AgentGlobMatch(t *testing.T) {
 	// unknown agent falls through to wildcard
 	rule = FindIdleRule(cfg, "DEVELOPING", "other-agent")
 	require.NotNil(t, rule)
-	assert.Equal(t, "*", rule.Match)
+	assert.Equal(t, "*", rule.Phase)
 }
 
 func TestFindIdleRule_AgentGlobCaseInsensitive(t *testing.T) {
 	cfg := &Config{TeammateIdle: []IdleRule{
-		{Match: "DEVELOPING", Agent: "Developer*", Checks: []Check{{Type: "command_ran", Category: "test", Message: "run tests"}}},
-		{Match: "*", Checks: []Check{}},
+		{Phase: "DEVELOPING", Agent: "Developer*", Checks: []Check{{Type: "command_ran", Category: "test", Message: "run tests"}}},
+		{Phase: "*", Checks: []Check{}},
 	}}
 	rule := FindIdleRule(cfg, "DEVELOPING", "developer-2")
 	require.NotNil(t, rule)
@@ -424,8 +417,8 @@ func TestFindIdleRule_AgentGlobCaseInsensitive(t *testing.T) {
 
 func TestFindIdleRule_ExactAgentBeatsNoAgent(t *testing.T) {
 	cfg := &Config{TeammateIdle: []IdleRule{
-		{Match: "DEVELOPING", Checks: []Check{{Type: "command_ran", Category: "lint", Message: "run lint"}}},
-		{Match: "DEVELOPING", Agent: "developer*", Checks: []Check{{Type: "command_ran", Category: "test", Message: "run tests"}}},
+		{Phase: "DEVELOPING", Checks: []Check{{Type: "command_ran", Category: "lint", Message: "run lint"}}},
+		{Phase: "DEVELOPING", Agent: "developer*", Checks: []Check{{Type: "command_ran", Category: "test", Message: "run tests"}}},
 	}}
 	// developer* agent rule should win over no-agent rule
 	rule := FindIdleRule(cfg, "DEVELOPING", "developer-1")
@@ -435,8 +428,8 @@ func TestFindIdleRule_ExactAgentBeatsNoAgent(t *testing.T) {
 
 func TestFindIdleRule_WildcardAgentBeatsWildcardNoAgent(t *testing.T) {
 	cfg := &Config{TeammateIdle: []IdleRule{
-		{Match: "*", Checks: []Check{}},
-		{Match: "*", Agent: "developer*", Checks: []Check{{Type: "command_ran", Category: "test", Message: "run tests"}}},
+		{Phase: "*", Checks: []Check{}},
+		{Phase: "*", Agent: "developer*", Checks: []Check{{Type: "command_ran", Category: "test", Message: "run tests"}}},
 	}}
 	rule := FindIdleRule(cfg, "REVIEWING", "developer-1")
 	require.NotNil(t, rule)
@@ -463,11 +456,11 @@ func TestFindIdleRule_DefaultConfigAllowsIdleByDefault(t *testing.T) {
 
 func TestMergeConfigs_IdleAgentFieldCoexists(t *testing.T) {
 	base := &Config{TeammateIdle: []IdleRule{
-		{Match: "DEVELOPING", Agent: "developer*", Checks: []Check{{Type: "command_ran", Category: "test", Message: "run tests"}}},
-		{Match: "*", Checks: []Check{}},
+		{Phase: "DEVELOPING", Agent: "developer*", Checks: []Check{{Type: "command_ran", Category: "test", Message: "run tests"}}},
+		{Phase: "*", Checks: []Check{}},
 	}}
 	override := &Config{TeammateIdle: []IdleRule{
-		{Match: "DEVELOPING", Agent: "reviewer*", Checks: []Check{}},
+		{Phase: "DEVELOPING", Agent: "reviewer*", Checks: []Check{}},
 	}}
 
 	merged := MergeConfigs(base, override)
@@ -475,10 +468,10 @@ func TestMergeConfigs_IdleAgentFieldCoexists(t *testing.T) {
 	var devRule, revRule *IdleRule
 	for i := range merged.TeammateIdle {
 		r := &merged.TeammateIdle[i]
-		if r.Match == "DEVELOPING" && r.Agent == "developer*" {
+		if r.Phase == "DEVELOPING" && r.Agent == "developer*" {
 			devRule = r
 		}
-		if r.Match == "DEVELOPING" && r.Agent == "reviewer*" {
+		if r.Phase == "DEVELOPING" && r.Agent == "reviewer*" {
 			revRule = r
 		}
 	}
@@ -488,10 +481,10 @@ func TestMergeConfigs_IdleAgentFieldCoexists(t *testing.T) {
 
 func TestMergeConfigs_IdleSameMatchAndAgentReplaces(t *testing.T) {
 	base := &Config{TeammateIdle: []IdleRule{
-		{Match: "DEVELOPING", Agent: "developer*", Checks: []Check{{Type: "command_ran", Category: "test", Message: "original"}}},
+		{Phase: "DEVELOPING", Agent: "developer*", Checks: []Check{{Type: "command_ran", Category: "test", Message: "original"}}},
 	}}
 	override := &Config{TeammateIdle: []IdleRule{
-		{Match: "DEVELOPING", Agent: "developer*", Checks: []Check{{Type: "command_ran", Category: "lint", Message: "replaced"}}},
+		{Phase: "DEVELOPING", Agent: "developer*", Checks: []Check{{Type: "command_ran", Category: "lint", Message: "replaced"}}},
 	}}
 
 	merged := MergeConfigs(base, override)
