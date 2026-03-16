@@ -390,6 +390,22 @@ func TestTeammatePermissions(t *testing.T) {
 		result := CheckToolPermission(model.PhaseFeedback, "NotebookEdit", makeInput(""), "developer-1", activeAgents)
 		assert.True(t, result.Denied)
 	})
+
+	// Regression: agent name vs UUID — glob "developer*" must match agent name, not UUID.
+	// hook-handler must pass resolveAgentName() (e.g. "developer-1"), not raw agent_id (UUID).
+	t.Run("UUID as agentID does not match developer glob - rule not found - allowed", func(t *testing.T) {
+		// If UUID is passed instead of agent name, glob "developer*" won't match,
+		// no rule is found, and the tool is allowed by default — this is the bug.
+		result := CheckToolPermission(model.PhaseReviewing, "Edit", makeFileInput("/project/main.go"), "a8b02535bf2798948", activeAgents)
+		assert.False(t, result.Denied, "UUID does not match glob — no rule found, default open")
+	})
+
+	t.Run("agent name developer-1 matches glob and is denied in REVIEWING", func(t *testing.T) {
+		// When agent name is passed correctly, glob "developer*" matches and the rule applies.
+		result := CheckToolPermission(model.PhaseReviewing, "Edit", makeFileInput("/project/main.go"), "developer-1", activeAgents)
+		assert.True(t, result.Denied, "agent name matches glob — rule applies, denied in REVIEWING")
+		assert.Contains(t, result.Reason, "REVIEWING")
+	})
 }
 
 // TestTeammateBashAutoApprove verifies that teammates get Bash commands auto-approved
