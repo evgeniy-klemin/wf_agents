@@ -326,7 +326,11 @@ func main() {
 			// This is the Team Lead going idle.
 			// Lead can only idle in BLOCKED or COMPLETE.
 			if phase != model.PhaseBlocked && phase != model.PhaseComplete {
-				reason := fmt.Sprintf("Lead cannot go idle in %s. Transition to BLOCKED or COMPLETE, or continue working.", phase)
+				pluginRoot := os.Getenv("CLAUDE_PLUGIN_ROOT")
+				reason := fmt.Sprintf(
+					"DENIED: Lead cannot idle in %s. You MUST transition to BLOCKED before stopping. "+
+						"Run: %s/bin/wf-client transition <session-id> --to BLOCKED --reason \"<why you need the user>\"",
+					phase, pluginRoot)
 				fmt.Fprintf(os.Stderr, "%s\n", reason)
 				logResponse(input.SessionID, "TeammateIdle", 2, map[string]string{
 					"action": "keep_working",

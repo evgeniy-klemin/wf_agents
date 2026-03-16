@@ -390,6 +390,20 @@ func (s *sessionState) handleHookEvent(ctx workflow.Context, evt model.SignalHoo
 		evtType = model.EventAgentStop
 	}
 
+	// Auto-unblock: UserPromptSubmit from Team Lead while BLOCKED → return to preBlockedPhase
+	isTeamLead := evt.Detail["agent_id"] == ""
+	if isTeamLead && evt.HookType == "UserPromptSubmit" && s.phase == model.PhaseBlocked && s.preBlockedPhase != "" {
+		from := s.phase
+		s.phase = s.preBlockedPhase
+		s.lastUpdated = workflow.Now(ctx)
+		s.phaseEnteredAt = workflow.Now(ctx)
+		s.addEvent(ctx, model.EventTransition, evt.SessionID, map[string]string{
+			"from":   string(from),
+			"to":     string(s.preBlockedPhase),
+			"reason": "auto: user responded",
+		})
+	}
+
 	detail := make(map[string]string)
 	detail["hook_type"] = evt.HookType
 	if evt.Tool != "" {

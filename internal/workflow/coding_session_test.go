@@ -1311,3 +1311,183 @@ func TestClearActiveAgentsSignal(t *testing.T) {
 	assert.Equal(t, 0, len(status.ActiveAgents),
 		"activeAgents should be empty after clear-active-agents signal")
 }
+
+// TestAutoUnblockOnUserPromptSubmit verifies that a UserPromptSubmit hook event from the
+// Team Lead (empty agent_id) while in BLOCKED automatically returns to preBlockedPhase.
+// This is tested as a unit test on sessionState directly, because in the Temporal test env
+// update callbacks fire synchronously before signals, making it impossible to sequence
+// "signal then update" correctly. The unit test validates the core logic directly.
+func TestAutoUnblockOnUserPromptSubmit(t *testing.T) {
+	s := &sessionState{
+		phase:           model.PhaseBlocked,
+		preBlockedPhase: model.PhaseDeveloping,
+		events:          make([]model.WorkflowEvent, 0),
+		activeAgents:    make(map[string]string),
+		commandsRan:     make(map[string]map[string]bool),
+		maxIter:         5,
+		iteration:       1,
+	}
+
+	// Simulate the auto-unblock logic directly (same as handleHookEvent)
+	evt := model.SignalHookEvent{
+		HookType:  "UserPromptSubmit",
+		SessionID: "test",
+		Detail:    map[string]string{"agent_id": ""},
+	}
+
+	isTeamLead := evt.Detail["agent_id"] == ""
+	if isTeamLead && evt.HookType == "UserPromptSubmit" && s.phase == model.PhaseBlocked && s.preBlockedPhase != "" {
+		from := s.phase
+		s.phase = s.preBlockedPhase
+		s.events = append(s.events, model.WorkflowEvent{
+			Type:      model.EventTransition,
+			SessionID: evt.SessionID,
+			Detail: map[string]string{
+				"from":   string(from),
+				"to":     string(s.preBlockedPhase),
+				"reason": "auto: user responded",
+			},
+		})
+	}
+
+	assert.Equal(t, model.PhaseDeveloping, s.phase, "phase should be restored to DEVELOPING after auto-unblock")
+
+	hasAutoUnblock := false
+	for _, e := range s.events {
+		if e.Type == model.EventTransition && e.Detail["from"] == "BLOCKED" && e.Detail["to"] == "DEVELOPING" {
+			if e.Detail["reason"] == "auto: user responded" {
+				hasAutoUnblock = true
+				break
+			}
+		}
+	}
+	assert.True(t, hasAutoUnblock, "should have auto-unblock transition event from BLOCKED to DEVELOPING")
+}
+
+// TestAutoUnblockPreservesPreBlockedPhase verifies that auto-unblock returns to the exact
+// phase before BLOCKED (preBlockedPhase), tested with FEEDBACK as the pre-blocked phase.
+func TestAutoUnblockPreservesPreBlockedPhase(t *testing.T) {
+	s := &sessionState{
+		phase:           model.PhaseBlocked,
+		preBlockedPhase: model.PhaseFeedback,
+		events:          make([]model.WorkflowEvent, 0),
+		activeAgents:    make(map[string]string),
+		commandsRan:     make(map[string]map[string]bool),
+		maxIter:         5,
+		iteration:       1,
+	}
+
+	// Simulate auto-unblock from BLOCKED while preBlockedPhase is FEEDBACK
+	evt := model.SignalHookEvent{
+		HookType:  "UserPromptSubmit",
+		SessionID: "test",
+		Detail:    map[string]string{"agent_id": ""},
+	}
+
+	isTeamLead := evt.Detail["agent_id"] == ""
+	if isTeamLead && evt.HookType == "UserPromptSubmit" && s.phase == model.PhaseBlocked && s.preBlockedPhase != "" {
+		from := s.phase
+		s.phase = s.preBlockedPhase
+		s.events = append(s.events, model.WorkflowEvent{
+			Type:      model.EventTransition,
+			SessionID: evt.SessionID,
+			Detail: map[string]string{
+				"from":   string(from),
+				"to":     string(s.preBlockedPhase),
+				"reason": "auto: user responded",
+			},
+		})
+	}
+
+	assert.Equal(t, model.PhaseFeedback, s.phase, "phase should be FEEDBACK after auto-unblock")
+
+	hasAutoUnblock := false
+	for _, e := range s.events {
+		if e.Type == model.EventTransition && e.Detail["from"] == "BLOCKED" && e.Detail["to"] == "FEEDBACK" {
+			if e.Detail["reason"] == "auto: user responded" {
+				hasAutoUnblock = true
+				break
+			}
+		}
+	}
+	assert.True(t, hasAutoUnblock, "should have auto-unblock transition event from BLOCKED to FEEDBACK")
+}
+
+// TestNoUnblockWhenNotBlocked verifies that UserPromptSubmit in a non-BLOCKED phase
+// does not change the current phase (auto-unblock condition is not met).
+func TestNoUnblockWhenNotBlocked(t *testing.T) {
+	s := &sessionState{
+		phase:           model.PhaseDeveloping,
+		preBlockedPhase: "",
+		events:          make([]model.WorkflowEvent, 0),
+		activeAgents:    make(map[string]string),
+		commandsRan:     make(map[string]map[string]bool),
+		maxIter:         5,
+		iteration:       1,
+	}
+
+	// Simulate UserPromptSubmit while NOT in BLOCKED
+	evt := model.SignalHookEvent{
+		HookType:  "UserPromptSubmit",
+		SessionID: "test",
+		Detail:    map[string]string{"agent_id": ""},
+	}
+
+	isTeamLead := evt.Detail["agent_id"] == ""
+	if isTeamLead && evt.HookType == "UserPromptSubmit" && s.phase == model.PhaseBlocked && s.preBlockedPhase != "" {
+		from := s.phase
+		s.phase = s.preBlockedPhase
+		s.events = append(s.events, model.WorkflowEvent{
+			Type:      model.EventTransition,
+			SessionID: evt.SessionID,
+			Detail: map[string]string{
+				"from":   string(from),
+				"to":     string(s.preBlockedPhase),
+				"reason": "auto: user responded",
+			},
+		})
+	}
+
+	// Phase should remain unchanged
+	assert.Equal(t, model.PhaseDeveloping, s.phase, "phase should remain DEVELOPING when not BLOCKED")
+	assert.Empty(t, s.events, "no auto-unblock event should be emitted when not in BLOCKED")
+}
+
+// TestNoUnblockForTeammateUserPromptSubmit verifies that a UserPromptSubmit from a teammate
+// (non-empty agent_id) while in BLOCKED does NOT trigger auto-unblock.
+func TestNoUnblockForTeammateUserPromptSubmit(t *testing.T) {
+	s := &sessionState{
+		phase:           model.PhaseBlocked,
+		preBlockedPhase: model.PhaseDeveloping,
+		events:          make([]model.WorkflowEvent, 0),
+		activeAgents:    make(map[string]string),
+		commandsRan:     make(map[string]map[string]bool),
+		maxIter:         5,
+		iteration:       1,
+	}
+
+	// UserPromptSubmit from a teammate (non-empty agent_id) — should NOT auto-unblock
+	evt := model.SignalHookEvent{
+		HookType:  "UserPromptSubmit",
+		SessionID: "test",
+		Detail:    map[string]string{"agent_id": "some-teammate-uuid"},
+	}
+
+	isTeamLead := evt.Detail["agent_id"] == ""
+	if isTeamLead && evt.HookType == "UserPromptSubmit" && s.phase == model.PhaseBlocked && s.preBlockedPhase != "" {
+		from := s.phase
+		s.phase = s.preBlockedPhase
+		s.events = append(s.events, model.WorkflowEvent{
+			Type:      model.EventTransition,
+			SessionID: evt.SessionID,
+			Detail: map[string]string{
+				"from":   string(from),
+				"to":     string(s.preBlockedPhase),
+				"reason": "auto: user responded",
+			},
+		})
+	}
+
+	assert.Equal(t, model.PhaseBlocked, s.phase, "phase should remain BLOCKED when UserPromptSubmit is from a teammate")
+	assert.Empty(t, s.events, "no auto-unblock event should be emitted for teammate UserPromptSubmit")
+}

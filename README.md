@@ -86,11 +86,10 @@ Edit/Write/NotebookEdit are blocked. Only agent management and reads allowed.
 ### Iteration limits
 Soft limit (default 5). When max reached, guard denies RESPAWN with instructions to ask the user. If user confirms: `wf-client reset-iterations <id>` resets the guard counter. `totalIterations` preserved for dashboard display.
 
-### Auto-BLOCKED
-- `Stop` from Team Lead → automatic transition to BLOCKED (Stop from teammates is ignored — they finished their turn)
-- `Notification` → automatic transition to BLOCKED
-- `TeammateIdle` → phase-aware: no-op in DEVELOPING/REVIEWING/COMMITTING/PR_CREATION, automatic transition to BLOCKED in other phases
-- Any active event (tool use, user prompt) → automatic unblock
+### BLOCKED Enforcement
+- Lead **cannot idle** in any phase except BLOCKED or COMPLETE (enforced by TeammateIdle hook)
+- Lead must explicitly transition to BLOCKED with a reason before stopping
+- `UserPromptSubmit` from user while BLOCKED → automatic return to pre-blocked phase
 
 ## Guards (transition preconditions)
 

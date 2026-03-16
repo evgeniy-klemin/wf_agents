@@ -351,11 +351,31 @@ ${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to COMPLETE --reas
 ```
 GUARD: COMPLETE requires `reviewDecision=APPROVED` or `state=MERGED`. Transition will be DENIED otherwise.
 
-## BLOCKED State
+## BLOCKED State — MANDATORY when you need user input
 
 Announce: `⚠️ LEAD: BLOCKED`
 
-BLOCKED is a **pause**, not a terminal state. It remembers which phase you were in. When the blocker is resolved, you can ONLY transition back to the exact phase you were in before.
+**You CANNOT idle without transitioning to BLOCKED first.**
+The system will DENY your idle attempt with an error. You MUST:
+
+1. Transition to BLOCKED with a clear reason:
+   ```bash
+   ${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to BLOCKED --reason "<what you need from the user>"
+   ```
+2. Explain the blocker to the user (what decision/info/action is needed)
+3. Wait for user response — the workflow will **automatically return you to your previous phase** when the user responds
+
+**When to transition to BLOCKED:**
+- You need a decision from the user (plan approval, scope question, etc.)
+- A guard denied your transition and you can't fix it yourself
+- You're in FEEDBACK with no new comments and want to pause polling
+- Any situation where ONLY the user can unblock you
+
+**When NOT to use BLOCKED:**
+- Waiting for Developer/Reviewer response — they will message you back
+- Between tool calls in normal workflow — keep working
+
+BLOCKED remembers your previous phase. You can ONLY return to that exact phase.
 
 ## Iteration Tracking
 
