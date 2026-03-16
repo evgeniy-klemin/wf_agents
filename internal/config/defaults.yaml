@@ -1,0 +1,99 @@
+tracking:
+  lint:
+    patterns:
+      - "go vet"
+      - "golangci-lint"
+      - "npm run lint"
+      - "cargo clippy"
+    invalidate_on_file_change: true
+  test:
+    patterns:
+      - "go test"
+      - "npm test"
+      - "cargo test"
+      - "python -m pytest"
+      - "pytest"
+    invalidate_on_file_change: true
+
+guards:
+  # RESPAWN → DEVELOPING: no active teammates
+  - from: RESPAWN
+    to: DEVELOPING
+    checks:
+      - type: no_active_agents
+        message: "cannot leave RESPAWN with active teammate(s) — shut down old teammates before spawning new ones"
+
+  # DEVELOPING → REVIEWING: dirty working tree required
+  - from: DEVELOPING
+    to: REVIEWING
+    checks:
+      - type: evidence
+        key: working_tree_clean
+        value: "false"
+        message: "no uncommitted changes found — there must be changes to review"
+
+  # REVIEWING → RESPAWN: max iterations check (reject loop)
+  - from: REVIEWING
+    to: RESPAWN
+    checks:
+      - type: max_iterations
+        message: "max iterations reached. Ask the user whether to continue. If yes, run: wf-client reset-iterations <workflow-id>, then retry this transition."
+
+  # COMMITTING → RESPAWN: clean tree + max iterations
+  - from: COMMITTING
+    to: RESPAWN
+    checks:
+      - type: evidence
+        key: working_tree_clean
+        value: "true"
+        message: "working tree is not clean — commit or stash changes before leaving COMMITTING"
+      - type: max_iterations
+        message: "max iterations reached. Ask the user whether to continue. If yes, run: wf-client reset-iterations <workflow-id>, then retry this transition."
+
+  # COMMITTING → PR_CREATION: clean tree required
+  - from: COMMITTING
+    to: PR_CREATION
+    checks:
+      - type: evidence
+        key: working_tree_clean
+        value: "true"
+        message: "working tree is not clean — commit or stash changes before leaving COMMITTING"
+
+  # PR_CREATION → FEEDBACK: PR checks must pass
+  - from: PR_CREATION
+    to: FEEDBACK
+    checks:
+      - type: evidence
+        key: pr_checks_pass
+        value: "true"
+        message: "PR checks have not passed — wait for CI to complete"
+
+  # FEEDBACK → COMPLETE: PR approved OR merged
+  - from: FEEDBACK
+    to: COMPLETE
+    checks:
+      - type: evidence
+        key: pr_approved
+        value: "true"
+        alternatives:
+          - key: pr_merged
+            value: "true"
+        message: "PR has not been approved or merged — requires explicit human review approval or merge before completing"
+
+  # FEEDBACK → RESPAWN: max iterations check
+  - from: FEEDBACK
+    to: RESPAWN
+    checks:
+      - type: max_iterations
+        message: "max iterations reached. Ask the user whether to continue. If yes, run: wf-client reset-iterations <workflow-id>, then retry this transition."
+
+teammate_idle:
+  # In DEVELOPING, developers must not go idle — only reviewers may.
+  - match: DEVELOPING
+    checks:
+      - type: role_check
+        key: developer
+        message: "Developers must not go idle in DEVELOPING — delegate work to a developer teammate or transition the phase."
+  # All other phases: no constraints on teammate idle.
+  - match: "*"
+    checks: []

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/eklemin/wf-agents/internal/config"
 	"github.com/eklemin/wf-agents/internal/model"
 	wf "github.com/eklemin/wf-agents/internal/workflow"
 	"go.temporal.io/sdk/client"
@@ -169,6 +170,13 @@ func main() {
 		status := queryStatus(ctx, c, workflowID)
 		phase := status.Phase
 
+		// Per-agent command tracking: run before permission check so that tracking
+		// signals are sent regardless of which code path handles the allow/deny.
+		// In PreToolUse, TeammateName is often empty; AgentType (e.g. "developer-1") is the fallback.
+		if input.TeammateName != "" || input.AgentType != "" {
+			trackPreToolUse(ctx, c, workflowID, input)
+		}
+
 		// Check if tool is allowed in this phase
 		decision := wf.CheckToolPermission(phase, input.ToolName, input.ToolInput, input.AgentID, status.ActiveAgents)
 
@@ -318,10 +326,11 @@ func main() {
 				})
 				os.Exit(2)
 			}
-		} else if strings.Contains(strings.ToLower(input.TeammateName), "developer") {
-			// Developer going idle.
-			if phase == model.PhaseDeveloping {
-				reason := "Developer cannot go idle in DEVELOPING without finishing work. Complete your task and message the Team Lead."
+		} else {
+			// Teammate going idle — query per-agent command tracking then evaluate config-driven idle rules.
+			agentName := resolveAgentName(input)
+			commandsRan := queryAgentCommands(ctx, c, workflowID, agentName)
+			if reason := evalTeammateIdleConfig(input.CWD, string(phase), agentName, commandsRan); reason != "" {
 				fmt.Fprintf(os.Stderr, "%s\n", reason)
 				logResponse(input.SessionID, "TeammateIdle", 2, map[string]string{
 					"action": "keep_working",
@@ -330,7 +339,6 @@ func main() {
 				os.Exit(2)
 			}
 		}
-		// Reviewer idle: always allowed (no exit 2).
 
 	case "Stop":
 		sendHookEvent(ctx, c, workflowID, model.SignalHookEvent{
@@ -653,4 +661,162 @@ func temporalHost() string {
 		return h
 	}
 	return "localhost:7233"
+}
+
+// idleCheckContext implements config.CheckContext for teammate idle evaluation.
+type idleCheckContext struct {
+	teammateName string
+	commandsRan  map[string]bool
+}
+
+func (c *idleCheckContext) Evidence() map[string]string  { return nil }
+func (c *idleCheckContext) ActiveAgentCount() int        { return 0 }
+func (c *idleCheckContext) Iteration() int               { return 0 }
+func (c *idleCheckContext) MaxIterations() int           { return 0 }
+func (c *idleCheckContext) OriginPhase() string          { return "" }
+func (c *idleCheckContext) CommandsRan() map[string]bool { return c.commandsRan }
+func (c *idleCheckContext) TeammateName() string         { return c.teammateName }
+
+// queryAgentCommands fetches the command tracking state for a specific agent via Temporal query.
+func queryAgentCommands(ctx context.Context, c client.Client, workflowID, agentName string) map[string]bool {
+	resp, err := c.QueryWorkflow(ctx, workflowID, "", wf.QueryCommandsRan, agentName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: cannot query commands-ran for %s: %v\n", agentName, err)
+		return nil
+	}
+	var result map[string]bool
+	if err := resp.Get(&result); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: cannot decode commands-ran: %v\n", err)
+		return nil
+	}
+	return result
+}
+
+// resolveAgentName returns the agent name to use for command tracking.
+// TeammateName is preferred; AgentType is the fallback (populated in PreToolUse when
+// TeammateName is empty, e.g. "developer-1").
+func resolveAgentName(input claudeHookInput) string {
+	if input.TeammateName != "" {
+		return input.TeammateName
+	}
+	return input.AgentType
+}
+
+// workflowSignaler is a minimal interface for sending signals to a workflow.
+// It is satisfied by client.Client and allows test mocks without implementing
+// the full Temporal client interface.
+type workflowSignaler interface {
+	SignalWorkflow(ctx context.Context, workflowID string, runID string, signalName string, arg interface{}) error
+}
+
+// trackPreToolUse handles per-agent command tracking signals for PreToolUse events.
+// For file-change tools (Edit/Write/NotebookEdit), it sends InvalidateCommands for categories
+// with invalidate_on_file_change=true. For Bash tools, it matches the command against tracking
+// patterns and sends CommandRan signals for each matched category.
+func trackPreToolUse(ctx context.Context, c workflowSignaler, workflowID string, input claudeHookInput) {
+	agentName := input.TeammateName
+	if agentName == "" {
+		agentName = input.AgentType
+	}
+	if agentName == "" {
+		return
+	}
+
+	cfg, err := config.LoadConfig(input.CWD)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to load config for tracking: %v\n", err)
+		return
+	}
+
+	// File-change tool: invalidate categories that have invalidate_on_file_change=true
+	if config.IsFileChangeTool(input.ToolName) {
+		var toInvalidate []string
+		for catName, cat := range cfg.Tracking {
+			if cat.ShouldInvalidateOnFileChange() {
+				toInvalidate = append(toInvalidate, catName)
+			}
+		}
+		if len(toInvalidate) > 0 {
+			err := c.SignalWorkflow(ctx, workflowID, "", wf.SignalInvalidateCommands, model.SignalInvalidateCommands{
+				SessionID:  input.SessionID,
+				AgentName:  agentName,
+				Categories: toInvalidate,
+				Tool:       input.ToolName,
+			})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to send invalidate-commands signal: %v\n", err)
+			}
+		}
+		return
+	}
+
+	// Bash tool: match command segments against tracking patterns
+	if input.ToolName != "Bash" {
+		return
+	}
+	var bashInput struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal(input.ToolInput, &bashInput); err != nil || bashInput.Command == "" {
+		return
+	}
+
+	segments := wf.SplitBashCommandsExported(bashInput.Command)
+	for catName, cat := range cfg.Tracking {
+		for _, seg := range segments {
+			seg = strings.TrimSpace(seg)
+			if matchesAnyPattern(seg, cat.Patterns) {
+				err := c.SignalWorkflow(ctx, workflowID, "", wf.SignalCommandRan, model.SignalCommandRan{
+					SessionID: input.SessionID,
+					AgentName: agentName,
+					Category:  catName,
+					Command:   seg,
+				})
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to send command-ran signal: %v\n", err)
+				}
+				break // one signal per category per tool call is enough
+			}
+		}
+	}
+}
+
+// matchesAnyPattern returns true if cmd starts with any of the given patterns at a word boundary.
+func matchesAnyPattern(cmd string, patterns []string) bool {
+	for _, p := range patterns {
+		if matchesBashPatternPrefix(cmd, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchesBashPatternPrefix checks if cmd starts with pattern at a word boundary.
+func matchesBashPatternPrefix(cmd, pattern string) bool {
+	if !strings.HasPrefix(cmd, pattern) {
+		return false
+	}
+	if len(cmd) == len(pattern) {
+		return true
+	}
+	c := cmd[len(pattern)]
+	return c == ' ' || c == '\t' || c == '|' || c == ';' || c == '&' || c == '\n'
+}
+
+// evalTeammateIdleConfig loads the project config (with optional .wf-agents.yaml override),
+// finds the idle rule matching the current phase, and evaluates its checks.
+// Returns a non-empty denial reason if the teammate should not idle, or "" if idle is allowed.
+func evalTeammateIdleConfig(projectDir, phase, teammateName string, commandsRan map[string]bool) string {
+	cfg, err := config.LoadConfig(projectDir)
+	if err != nil {
+		// Config load failure: log but allow idle to avoid blocking teammates unexpectedly.
+		fmt.Fprintf(os.Stderr, "Warning: failed to load config: %v\n", err)
+		return ""
+	}
+	rule := config.FindIdleRule(cfg, phase)
+	if rule == nil {
+		return ""
+	}
+	ctx := &idleCheckContext{teammateName: teammateName, commandsRan: commandsRan}
+	return config.EvalChecks(rule.Checks, ctx)
 }

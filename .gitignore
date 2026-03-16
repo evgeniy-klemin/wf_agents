@@ -4,3 +4,5 @@ bin/
 .DS_Store
 /client
 /TODO.md
+# Project-specific wf-agents config (copy from .wf-agents.yaml.example)
+.wf-agents.yaml
