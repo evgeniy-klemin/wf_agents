@@ -390,8 +390,6 @@ func (s *sessionState) handleHookEvent(ctx workflow.Context, evt model.SignalHoo
 		evtType = model.EventAgentStop
 	}
 
-	isTeamLead := evt.Detail["agent_id"] == ""
-
 	// Auto-BLOCKED: PermissionRequest from any agent → terminal waiting for user approval
 	if evt.HookType == "PermissionRequest" {
 		if !s.phase.IsTerminal() && s.phase != model.PhaseBlocked {
@@ -416,29 +414,17 @@ func (s *sessionState) handleHookEvent(ctx workflow.Context, evt model.SignalHoo
 		}
 	}
 
-	// Auto-unblock: UserPromptSubmit from Team Lead while BLOCKED → return to preBlockedPhase.
-	// Also unblocks on PostToolUse / PostToolUseFailure (permission resolved, any agent).
+	// Auto-unblock: PostToolUse / PostToolUseFailure (permission resolved, any agent).
 	if s.phase == model.PhaseBlocked && s.preBlockedPhase != "" {
-		shouldUnblock := false
-		if isTeamLead && evt.HookType == "UserPromptSubmit" {
-			shouldUnblock = true
-		}
 		if evt.HookType == "PostToolUse" || evt.HookType == "PostToolUseFailure" {
-			shouldUnblock = true
-		}
-		if shouldUnblock {
 			from := s.phase
 			s.phase = s.preBlockedPhase
 			s.lastUpdated = workflow.Now(ctx)
 			s.phaseEnteredAt = workflow.Now(ctx)
-			reason := "auto: user responded"
-			if evt.HookType == "PostToolUse" || evt.HookType == "PostToolUseFailure" {
-				reason = "auto: permission resolved"
-			}
 			s.addEvent(ctx, model.EventTransition, evt.SessionID, map[string]string{
 				"from":   string(from),
 				"to":     string(s.preBlockedPhase),
-				"reason": reason,
+				"reason": "auto: permission resolved",
 			})
 		}
 	}
