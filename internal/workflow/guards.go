@@ -208,6 +208,35 @@ func CheckToolPermission(
 		}
 	}
 
+	// Teammate permissions: config-driven per-phase/per-agent tool restrictions
+	if !isTeamLead && !isClaudeInfraFile(toolInput) {
+		bashCmd := ""
+		if toolName == "Bash" {
+			var input struct{ Command string `json:"command"` }
+			json.Unmarshal(toolInput, &input)
+			bashCmd = strings.TrimSpace(input.Command)
+		}
+		if rule := config.FindTeammatePermission(guardConfig, string(phase), agentID, toolName, bashCmd); rule != nil {
+			allowed := false
+			for _, p := range rule.Phases {
+				if p == string(phase) {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				msg := rule.Message
+				if msg == "" {
+					msg = fmt.Sprintf("tool %s not allowed in this phase", toolName)
+				}
+				return ToolPermissionResult{
+					Denied: true,
+					Reason: fmt.Sprintf("%s (current phase: %s)", msg, phase),
+				}
+			}
+		}
+	}
+
 	// Bash: enforce global git command restrictions with per-phase exemptions
 	if toolName == "Bash" {
 		result := checkBashPermission(phase, toolInput)
