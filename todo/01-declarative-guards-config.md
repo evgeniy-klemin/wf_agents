@@ -1,8 +1,9 @@
 ---
 title: Declarative guards config with Helm-style overrides
-status: planned
+status: mostly done
 priority: high
 created: 2026-03-15
+updated: 2026-03-16
 ---
 
 ## Problem
@@ -115,7 +116,7 @@ guards:
         message: "Max iterations reached"
 
 teammate_idle:
-  - match: "*"
+  - phase: "*"
     checks: []  # by default everyone idles freely
 ```
 
@@ -159,14 +160,16 @@ guards:
   #   disabled: true
 
 teammate_idle:
-  # OVERRIDE: developer must lint before idle
-  - match: "developer*"
+  # OVERRIDE: developer must run tests before idle in DEVELOPING
+  - phase: DEVELOPING
+    agent: "developer*"
     checks:
       - type: command_ran
-        category: lint
-        message: "Run lint before going idle"
-  # reviewer idles freely (override default * match)
-  - match: "reviewer*"
+        category: test
+        message: "Run tests before going idle"
+  # reviewer idles freely in DEVELOPING
+  - phase: DEVELOPING
+    agent: "reviewer*"
     checks: []
 ```
 
@@ -181,18 +184,22 @@ With the declarative config, this is solved cleanly:
 **Plugin defaults** (`config/defaults.yaml`):
 ```yaml
 teammate_idle:
-  - match: "*"
+  - phase: "*"
     checks: []    # everyone idles freely by default
 ```
 
 **Project override** (`.wf-agents.yaml`):
 ```yaml
 teammate_idle:
-  - match: "developer*"
+  - phase: DEVELOPING
+    agent: "developer*"
     checks:
       - type: command_ran
-        category: lint
-        message: "Run lint before going idle"
+        category: test
+        message: "Run tests before going idle"
+  - phase: DEVELOPING
+    agent: "reviewer*"
+    checks: []
 ```
 
 **How it works:**
@@ -210,18 +217,16 @@ teammate_idle:
 | `tracking` lists | Project values **append** to defaults (union, deduplicated) |
 | `guards` list | Project guards **append** — same from+to pair = checks combined |
 | `guards` with `disabled: true` | **Removes** all guards for that from+to pair |
-| `teammate_idle` | Project rules **override** by `match` pattern |
+| `teammate_idle` | Project rules **override** by `phase\|agent` key |
 
 ### Check types
 
 | Type | Fields | Description |
 |---|---|---|
-| `evidence` | `key`, `value`, `alternatives` | Check evidence map passed via CLI `--evidence` flag |
+| `evidence` | `key`, `value`, `alternatives` | Check evidence map passed with transition request |
 | `command_ran` | `category` | Check if Bash command matching category patterns was run this iteration |
 | `no_active_agents` | — | Check `len(activeAgents) == 0` |
 | `max_iterations` | — | Check iteration counter vs limit |
-| `file_exists` | `path` | Check file exists in CWD |
-| `command_succeeds` | `command` | Run shell command, check exit code 0 |
 
 Extensible — new check types added in Go, immediately usable in YAML without config format changes.
 
@@ -253,6 +258,12 @@ type Config struct {
     TeammateIdle []IdleRule     `yaml:"teammate_idle"`
 }
 
+type IdleRule struct {
+    Phase  string  `yaml:"phase"`
+    Agent  string  `yaml:"agent,omitempty"`
+    Checks []Check `yaml:"checks"`
+}
+
 type GuardRule struct {
     From     string  `yaml:"from"`
     To       string  `yaml:"to"`
@@ -262,12 +273,10 @@ type GuardRule struct {
 
 type Check struct {
     Type         string `yaml:"type"`
-    Key          string `yaml:"key,omitempty"`
-    Value        string `yaml:"value,omitempty"`
-    Category     string `yaml:"category,omitempty"`
-    Command      string `yaml:"command,omitempty"`
-    Path         string `yaml:"path,omitempty"`
-    Alternatives []KV   `yaml:"alternatives,omitempty"`
+    Key          string `yaml:"key,omitempty"`          // evidence checks
+    Value        string `yaml:"value,omitempty"`         // evidence checks
+    Category     string `yaml:"category,omitempty"`      // command_ran checks
+    Alternatives []KV   `yaml:"alternatives,omitempty"`  // evidence OR semantics
     Message      string `yaml:"message"`
 }
 ```

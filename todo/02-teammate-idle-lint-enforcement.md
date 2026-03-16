@@ -1,33 +1,29 @@
 ---
 title: Config-driven TeammateIdle enforcement
-status: planned
+status: done
 priority: high
 created: 2026-03-15
+completed: 2026-03-16
 depends_on: [01-declarative-guards-config]
 ---
 
-## Problem
+## Status: DONE (PR #18)
 
-Current TeammateIdle exit-code-2 for developers blocks idle even when work is done. Developer-1 sent message: "The TeammateIdle hook will keep blocking me indefinitely." No way to know if lint/tests were run.
-
-## Solution
-
-Replace blanket enforcement with config-driven checks from `.wf-agents.yaml`:
+Implemented config-driven idle enforcement with per-agent glob matching.
 
 ```yaml
 teammate_idle:
-  - match: "developer*"
+  - phase: DEVELOPING
+    agent: "developer*"
     checks:
       - type: command_ran
-        category: lint
-        message: "Run lint before going idle"
-  - match: "reviewer*"
-    checks: []  # reviewer idles freely
+        category: test
+        message: "Run tests before going idle"
+  - phase: DEVELOPING
+    agent: "reviewer*"
+    checks: []
+  - phase: "*"
+    checks: []
 ```
 
-If no config or no matching rule → idle allowed (no exit 2).
-
-## Files to modify
-
-- `cmd/hook-handler/main.go` — TeammateIdle handler reads config
-- `internal/config/` — idle rule evaluation
+`FindIdleRule(cfg, phase, agentName)` with 4-level priority: exact phase+agent > exact phase+any > wildcard+agent > wildcard+any.

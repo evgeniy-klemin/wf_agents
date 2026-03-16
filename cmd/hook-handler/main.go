@@ -14,6 +14,7 @@ import (
 	"github.com/eklemin/wf-agents/internal/config"
 	"github.com/eklemin/wf-agents/internal/model"
 	wf "github.com/eklemin/wf-agents/internal/workflow"
+	enums "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/client"
 )
 
@@ -162,6 +163,13 @@ func main() {
 		os.Exit(0)
 	}
 	defer c.Close()
+
+	// Workflow execution finished (completed/terminated/cancelled) — skip all hook enforcement.
+	if desc, err := c.DescribeWorkflowExecution(ctx, workflowID, ""); err == nil {
+		if desc.WorkflowExecutionInfo.Status != enums.WORKFLOW_EXECUTION_STATUS_RUNNING {
+			os.Exit(0)
+		}
+	}
 
 	detail := buildDetail(input)
 
