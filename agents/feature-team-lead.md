@@ -368,12 +368,12 @@ The system will DENY your idle attempt with an error. You MUST:
 **When to transition to BLOCKED:**
 - You need a decision from the user (plan approval, scope question, etc.)
 - A guard denied your transition and you can't fix it yourself
-- You're in FEEDBACK with no new comments and want to pause polling
 - Any situation where ONLY the user can unblock you
 
 **When NOT to use BLOCKED:**
 - Waiting for Developer/Reviewer response — they will message you back
 - Between tool calls in normal workflow — keep working
+- In FEEDBACK — you MUST run the polling loop (sleep 60, check PR), do NOT skip it by going to BLOCKED
 
 BLOCKED remembers your previous phase. You can ONLY return to that exact phase.
 
