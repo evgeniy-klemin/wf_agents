@@ -1,0 +1,11 @@
+{"session_id":"test-race","hook_event_name":"SubagentStart","agent_id":"old-id","agent_type":"developer-1","cwd":"/tmp/test"}
+{"session_id":"test-race","hook_event_name":"PreToolUse","agent_id":"old-id","agent_type":"developer-1","cwd":"/tmp/test","tool_name":"Bash","tool_input":{},"tool_use_id":"tu1"}
+{"session_id":"test-race","hook_event_name":"SubagentStart","agent_id":"new-id","agent_type":"developer-1","cwd":"/tmp/test"}
+{"session_id":"test-race","hook_event_name":"SubagentStop","agent_id":"old-id","agent_type":"developer-1","cwd":"/tmp/test"}
+{"session_id":"test-race","hook_event_name":"PreToolUse","agent_id":"new-id","agent_type":"developer-1","cwd":"/tmp/test","tool_name":"Bash","tool_input":{},"tool_use_id":"tu2"}
+{"session_id":"test-race","hook_event_name":"SubagentStart","agent_id":"rev-old","agent_type":"reviewer-1","cwd":"/tmp/test"}
+{"session_id":"test-race","hook_event_name":"SubagentStart","agent_id":"rev-new","agent_type":"reviewer-1","cwd":"/tmp/test"}
+{"session_id":"test-race","hook_event_name":"SubagentStop","agent_id":"rev-old","agent_type":"reviewer-1","cwd":"/tmp/test"}
+{"session_id":"test-race","hook_event_name":"PreToolUse","agent_id":"rev-new","agent_type":"reviewer-1","cwd":"/tmp/test","tool_name":"Read","tool_input":{},"tool_use_id":"tu3"}
+{"session_id":"test-race","hook_event_name":"Stop","agent_id":"","agent_type":"","cwd":"/tmp/test"}
+{"session_id":"test-race","hook_event_name":"PreToolUse","agent_id":"new-id","agent_type":"developer-1","cwd":"/tmp/test","tool_name":"Bash","tool_input":{},"tool_use_id":"tu4"}

@@ -347,10 +347,9 @@ func cmdResetIterations(ctx context.Context, c client.Client, args []string) {
 	fmt.Println("Total iterations counter is unchanged. You may now retry the RESPAWN transition.")
 }
 
-// cmdShutDown removes a single agent from activeAgents by sending a SubagentStop
-// hook event with agent_type. The workflow's handleHookEvent handles SubagentStop by
-// filtering the agent_type out of activeAgents. This matches the original NTCoding approach
-// where agentType (e.g., "developer-1") is stable across respawns, unlike agentId.
+// cmdShutDown removes a single named agent from activeAgents by sending the
+// agent-shut-down signal. This is the explicit, intent-clear way to deregister
+// a teammate (developer-N, reviewer-N) after they finish work.
 //
 // Also accepts the legacy "deregister-agent" command alias for backwards compatibility.
 func cmdShutDown(ctx context.Context, c client.Client, args []string) {
@@ -370,14 +369,7 @@ func cmdShutDown(ctx context.Context, c client.Client, args []string) {
 		log.Fatal("--agent <agent-type> is required")
 	}
 
-	sig := model.SignalHookEvent{
-		HookType:  "SubagentStop",
-		SessionID: "cli",
-		Detail: map[string]string{
-			"agent_type": agentName,
-		},
-	}
-	err := c.SignalWorkflow(ctx, workflowID, "", wf.SignalHookEvent, sig)
+	err := c.SignalWorkflow(ctx, workflowID, "", wf.SignalAgentShutDown, struct{ AgentName string }{agentName})
 	if err != nil {
 		log.Fatalf("Signal failed: %v", err)
 	}

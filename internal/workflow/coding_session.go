@@ -2,12 +2,15 @@ package workflow
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/eklemin/wf-agents/internal/model"
 	"go.temporal.io/sdk/workflow"
 )
 
+// Signal and query name constants used by CodingSessionWorkflow.
 const (
 	SignalTransition        = "transition"
 	SignalHookEvent         = "hook-event"
@@ -17,6 +20,7 @@ const (
 	SignalClearActiveAgents = "clear-active-agents"
 	SignalCommandRan        = "command-ran"
 	SignalInvalidateCommands = "invalidate-commands"
+	SignalAgentShutDown     = "agent-shut-down"
 
 	QueryStatus      = "status"
 	QueryTimeline    = "timeline"
@@ -38,7 +42,7 @@ func CodingSessionWorkflow(ctx workflow.Context, input model.WorkflowInput) (mod
 		iteration:       1,
 		totalIterations: 1,
 		events:          make([]model.WorkflowEvent, 0, 100),
-		activeAgents:    make([]string, 0),
+		activeAgents:    make(map[string]string),
 		commandsRan:     make(map[string]map[string]bool),
 		startedAt:       workflow.Now(ctx),
 		lastUpdated:     workflow.Now(ctx),
@@ -97,6 +101,7 @@ func CodingSessionWorkflow(ctx workflow.Context, input model.WorkflowInput) (mod
 	setTaskCh := workflow.GetSignalChannel(ctx, SignalSetTask)
 	resetIterationsCh := workflow.GetSignalChannel(ctx, SignalResetIterations)
 	clearActiveAgentsCh := workflow.GetSignalChannel(ctx, SignalClearActiveAgents)
+	agentShutDownCh := workflow.GetSignalChannel(ctx, SignalAgentShutDown)
 	commandRanCh := workflow.GetSignalChannel(ctx, SignalCommandRan)
 	invalidateCommandsCh := workflow.GetSignalChannel(ctx, SignalInvalidateCommands)
 
@@ -154,11 +159,26 @@ func CodingSessionWorkflow(ctx workflow.Context, input model.WorkflowInput) (mod
 			var sessionID string
 			ch.Receive(ctx, &sessionID)
 			count := len(state.activeAgents)
-			state.activeAgents = state.activeAgents[:0]
+			state.activeAgents = make(map[string]string)
 			state.addEvent(ctx, model.EventJournal, sessionID, map[string]string{
 				"message": fmt.Sprintf("cleared %d active agent(s) via deregister-all-agents", count),
 			})
 			logger.Info("Active agents cleared", "count", count, "session", sessionID)
+		})
+
+		sel.AddReceive(agentShutDownCh, func(ch workflow.ReceiveChannel, more bool) {
+			var sig struct{ AgentName string }
+			ch.Receive(ctx, &sig)
+			if sig.AgentName == "" {
+				return
+			}
+			if _, ok := state.activeAgents[sig.AgentName]; ok {
+				delete(state.activeAgents, sig.AgentName)
+				state.addEvent(ctx, model.EventJournal, "", map[string]string{
+					"message": fmt.Sprintf("agent shut down: %s", sig.AgentName),
+				})
+				logger.Info("Agent shut down", "agent", sig.AgentName)
+			}
 		})
 
 		sel.AddReceive(commandRanCh, func(ch workflow.ReceiveChannel, more bool) {
@@ -231,7 +251,7 @@ type sessionState struct {
 	iteration       int         // resettable counter for guard checks
 	totalIterations int         // cumulative counter, never reset
 	events          []model.WorkflowEvent
-	activeAgents    []string
+	activeAgents    map[string]string         // agent_type → agent_id; entries added on SubagentStart, cleared by clear-active-agents or COMPLETE
 	commandsRan     map[string]map[string]bool // agent → category → ran
 	startedAt       time.Time
 	lastUpdated     time.Time
@@ -302,6 +322,13 @@ func (s *sessionState) handleTransition(ctx workflow.Context, req model.SignalTr
 		s.totalIterations++
 	}
 
+	// Increment iteration on REVIEWING→DEVELOPING (review reject loop).
+	// This transition bypasses RESPAWN but still starts a new iteration.
+	if req.To == model.PhaseDeveloping && s.phase == model.PhaseReviewing {
+		s.iteration++
+		s.totalIterations++
+	}
+
 	// Apply transition
 	s.phase = req.To
 	s.lastUpdated = workflow.Now(ctx)
@@ -322,7 +349,7 @@ func (s *sessionState) handleTransition(ctx workflow.Context, req model.SignalTr
 	})
 
 	if req.To.IsTerminal() {
-		s.activeAgents = s.activeAgents[:0]
+		s.activeAgents = make(map[string]string)
 		s.doneCh.Send(ctx, true)
 	}
 
@@ -334,31 +361,33 @@ func (s *sessionState) handleHookEvent(ctx workflow.Context, evt model.SignalHoo
 	switch evt.HookType {
 	case "SubagentStart":
 		evtType = model.EventAgentSpawn
-		if agentType, ok := evt.Detail["agent_type"]; ok && agentType != "" {
-			// Store agentType (not agentId) — matches original NTCoding approach.
-			// agentType is stable across respawns (e.g., "developer-1"), unlike agentId.
-			found := false
-			for _, a := range s.activeAgents {
-				if a == agentType {
-					found = true
-					break
-				}
-			}
-			if !found {
-				s.activeAgents = append(s.activeAgents, agentType)
-			}
+		agentType := evt.Detail["agent_type"]
+		agentID := evt.Detail["agent_id"]
+		if agentType != "" {
+			// Overwrite: a new spawn of the same agent_type replaces the old id.
+			// This ensures that when a stale SubagentStop (old agent_id) arrives later,
+			// it will not match the current id and will be ignored.
+			s.activeAgents[agentType] = agentID
 		}
-	case "SubagentStop", "Stop":
+	case "SubagentStop":
 		evtType = model.EventAgentStop
-		if agentType, ok := evt.Detail["agent_type"]; ok && agentType != "" {
-			filtered := s.activeAgents[:0]
-			for _, a := range s.activeAgents {
-				if a != agentType {
-					filtered = append(filtered, a)
-				}
+		agentType := evt.Detail["agent_type"]
+		agentID := evt.Detail["agent_id"]
+		if agentType != "" && isNamedTeammate(agentType) {
+			// Named teammates (developer-N, reviewer-N) persist across Agent tool invocations —
+			// SubagentStop fires per Agent tool call but the teammate process is still alive.
+			// They are removed only by clear-active-agents (RESPAWN) or COMPLETE.
+		} else if agentType != "" {
+			// One-shot/unnamed agents (e.g. Explore) are genuinely done when they stop.
+			// Remove only if agent_id matches to guard against stale stops.
+			if stored, ok := s.activeAgents[agentType]; ok && stored == agentID {
+				delete(s.activeAgents, agentType)
 			}
-			s.activeAgents = filtered
 		}
+	case "Stop":
+		// Log only — a Stop event from Claude Code does not remove agents from the active map.
+		// SubagentStop with the correct agent_id is the authoritative removal signal.
+		evtType = model.EventAgentStop
 	}
 
 	detail := make(map[string]string)
@@ -372,16 +401,29 @@ func (s *sessionState) handleHookEvent(ctx workflow.Context, evt model.SignalHoo
 	s.addEvent(ctx, evtType, evt.SessionID, detail)
 }
 
+// isNamedTeammate returns true if the agent_type represents a persistent named teammate
+// (e.g. "developer-1", "reviewer-2"). Named teammates persist across Agent tool invocations
+// and are only removed via clear-active-agents or COMPLETE. One-shot agents (e.g. "Explore")
+// are removed normally on SubagentStop.
+func isNamedTeammate(agentType string) bool {
+	return strings.HasPrefix(agentType, "developer-") || strings.HasPrefix(agentType, "reviewer-")
+}
+
 func (s *sessionState) status(now time.Time) model.WorkflowStatus {
 	var commandsRan map[string]map[string]bool
 	if len(s.commandsRan) > 0 {
 		commandsRan = s.commandsRan
 	}
+	activeAgents := make([]string, 0, len(s.activeAgents))
+	for agentType := range s.activeAgents {
+		activeAgents = append(activeAgents, agentType)
+	}
+	sort.Strings(activeAgents)
 	return model.WorkflowStatus{
 		Phase:                s.phase,
 		Iteration:            s.iteration,
 		TotalIterations:      s.totalIterations,
-		ActiveAgents:         s.activeAgents,
+		ActiveAgents:         activeAgents,
 		EventCount:           len(s.events),
 		StartedAt:            s.startedAt.Format(time.RFC3339),
 		LastUpdatedAt:        s.lastUpdated.Format(time.RFC3339),

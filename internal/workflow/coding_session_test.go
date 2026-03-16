@@ -173,8 +173,7 @@ func TestReviewRejectLoop(t *testing.T) {
 		model.PhaseRespawn,
 		model.PhaseDeveloping,
 		model.PhaseReviewing,
-		model.PhaseRespawn,  // reject now goes through RESPAWN, not directly to DEVELOPING
-		model.PhaseDeveloping,
+		model.PhaseDeveloping, // reject goes directly to DEVELOPING (no RESPAWN step)
 		model.PhaseReviewing,
 		model.PhaseCommitting,
 		model.PhasePRCreation,
@@ -933,16 +932,12 @@ func TestRespawnGuardActiveAgents(t *testing.T) {
 		var activeAgents []string
 		assert.Equal(t, 0, len(activeAgents), "should allow when no active agents")
 	})
-	t.Run("TeammateStop removes from list", func(t *testing.T) {
-		agents := []string{"dev-1", "rev-1"}
-		// Simulate TeammateStop (SubagentStop event) for dev-1
-		filtered := agents[:0]
-		for _, a := range agents {
-			if a != "dev-1" {
-				filtered = append(filtered, a)
-			}
-		}
-		assert.Equal(t, []string{"rev-1"}, filtered)
+	t.Run("clear-active-agents removes from list", func(t *testing.T) {
+		// Teammates are removed via clear-active-agents signal (during RESPAWN),
+		// NOT by SubagentStop (which fires per Agent tool invocation, not per process exit).
+		agents := map[string]string{"dev-1": "id-1", "rev-1": "id-2"}
+		agents = make(map[string]string) // clear-active-agents bulk-clears
+		assert.Equal(t, 0, len(agents), "clear-active-agents must empty the map")
 	})
 }
 
@@ -955,7 +950,7 @@ func TestRespawnDoesNotAutoClearActiveAgents(t *testing.T) {
 		// Directly test sessionState — no workflow.Context needed.
 		s := &sessionState{
 			phase:        model.PhaseRespawn,
-			activeAgents: []string{"dev-1", "dev-2", "rev-1"},
+			activeAgents: map[string]string{"dev-1": "id-1", "dev-2": "id-2", "rev-1": "id-3"},
 			maxIter:      5,
 			iteration:    1,
 		}
@@ -968,7 +963,7 @@ func TestRespawnDoesNotAutoClearActiveAgents(t *testing.T) {
 	t.Run("guardNoActiveAgents blocks RESPAWN→DEVELOPING when agents still active", func(t *testing.T) {
 		s := &sessionState{
 			phase:        model.PhaseRespawn,
-			activeAgents: []string{"dev-1"},
+			activeAgents: map[string]string{"dev-1": "id-1"},
 			maxIter:      5,
 			iteration:    1,
 		}
@@ -981,7 +976,7 @@ func TestRespawnDoesNotAutoClearActiveAgents(t *testing.T) {
 	t.Run("guardNoActiveAgents passes when agents have stopped", func(t *testing.T) {
 		s := &sessionState{
 			phase:        model.PhaseRespawn,
-			activeAgents: []string{},
+			activeAgents: map[string]string{},
 			maxIter:      5,
 			iteration:    1,
 		}
@@ -990,34 +985,44 @@ func TestRespawnDoesNotAutoClearActiveAgents(t *testing.T) {
 		assert.Empty(t, reason, "guardNoActiveAgents should pass when activeAgents is empty")
 	})
 
-	t.Run("Stop event removes agent so RESPAWN→DEVELOPING is allowed", func(t *testing.T) {
-		// Simulate: agent registers in DEVELOPING via agent_type, sends Stop with agent_type,
-		// then RESPAWN → DEVELOPING succeeds.
+	t.Run("clear-active-agents signal allows RESPAWN→DEVELOPING", func(t *testing.T) {
+		// Simulate: agent registered via SubagentStart, then clear-active-agents is sent
+		// (mimicking wf-client deregister-all-agents during RESPAWN), then RESPAWN→DEVELOPING
+		// succeeds (guardNoActiveAgents passes). SubagentStop no longer removes from activeAgents.
 		env := setupEnv(t)
 
-		// Register the agent via PreToolUse using agent_type, then simulate it stopping via SubagentStop.
+		// SubagentStart registers developer-1.
 		env.RegisterDelayedCallback(func() {
 			env.SignalWorkflow(SignalHookEvent, model.SignalHookEvent{
-				HookType:  "PreToolUse",
+				HookType:  "SubagentStart",
 				SessionID: "test",
-				Tool:      "Edit",
 				Detail:    map[string]string{"agent_type": "developer-1", "agent_id": "dev-agent-1"},
-			})
-		}, 0)
-		env.RegisterDelayedCallback(func() {
-			env.SignalWorkflow(SignalHookEvent, model.SignalHookEvent{
-				HookType:  "SubagentStop",
-				SessionID: "test",
-				Detail:    map[string]string{"agent_type": "developer-1"},
 			})
 		}, 0)
 
 		registerTransitions(env, t, []model.Phase{
 			model.PhaseRespawn,
+		})
+
+		// clear-active-agents during RESPAWN removes all agents so RESPAWN→DEVELOPING is allowed.
+		env.RegisterDelayedCallback(func() {
+			env.SignalWorkflow(SignalClearActiveAgents, "test")
+		}, 0)
+
+		registerTransitions(env, t, []model.Phase{
 			model.PhaseDeveloping,
 			model.PhaseReviewing,
-			model.PhaseRespawn,    // Review reject — agent must stop explicitly (Stop event sent above)
-			model.PhaseDeveloping, // guardNoActiveAgents passes because agent stopped
+			model.PhaseCommitting,
+			model.PhaseRespawn,
+		})
+
+		// clear again for the second RESPAWN→DEVELOPING
+		env.RegisterDelayedCallback(func() {
+			env.SignalWorkflow(SignalClearActiveAgents, "test")
+		}, 0)
+
+		registerTransitions(env, t, []model.Phase{
+			model.PhaseDeveloping,
 			model.PhaseReviewing,
 			model.PhaseCommitting,
 			model.PhasePRCreation,
@@ -1030,31 +1035,30 @@ func TestRespawnDoesNotAutoClearActiveAgents(t *testing.T) {
 		})
 
 		require.True(t, env.IsWorkflowCompleted(),
-			"workflow should complete after agent stops naturally")
+			"workflow should complete after clear-active-agents allows RESPAWN→DEVELOPING")
 		require.NoError(t, env.GetWorkflowError())
 	})
 }
 
-// TestSubagentStartStoresAgentType verifies that SubagentStart stores agent_type
-// (not agent_id) in activeAgents, and SubagentStop removes by agent_type.
+// TestSubagentStartStoresAgentType verifies that SubagentStart stores agent_type→agent_id
+// in activeAgents. SubagentStop no longer removes the entry — teammates are removed only
+// via clear-active-agents signal or COMPLETE phase.
 func TestSubagentStartStoresAgentType(t *testing.T) {
 	env := setupEnv(t)
 
-	// Send SubagentStart with agent_type — should register it.
-	// Then send SubagentStop with agent_type — should deregister it.
-	// Then RESPAWN → DEVELOPING should succeed (no active agents).
+	// Send SubagentStart — should register developer-1 in activeAgents.
+	// SubagentStop is logged but does NOT remove from activeAgents.
+	// clear-active-agents during RESPAWN is the correct removal mechanism.
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(SignalHookEvent, model.SignalHookEvent{
 			HookType:  "SubagentStart",
 			SessionID: "test",
 			Detail:    map[string]string{"agent_type": "developer-1", "agent_id": "some-uuid-abc"},
 		})
-	}, 0)
-	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(SignalHookEvent, model.SignalHookEvent{
 			HookType:  "SubagentStop",
 			SessionID: "test",
-			Detail:    map[string]string{"agent_type": "developer-1"},
+			Detail:    map[string]string{"agent_type": "developer-1", "agent_id": "some-uuid-abc"},
 		})
 	}, 0)
 
@@ -1074,29 +1078,39 @@ func TestSubagentStartStoresAgentType(t *testing.T) {
 
 	require.True(t, env.IsWorkflowCompleted())
 	require.NoError(t, env.GetWorkflowError())
+
+	// developer-1 is still in activeAgents because SubagentStop no longer removes — cleared by COMPLETE.
+	val, err := env.QueryWorkflow(QueryStatus)
+	require.NoError(t, err)
+	var status model.WorkflowStatus
+	require.NoError(t, val.Get(&status))
+	assert.Equal(t, 0, len(status.ActiveAgents),
+		"activeAgents should be empty after COMPLETE phase (terminal clear)")
 }
 
-// TestSubagentStartNoDuplicates verifies that SubagentStart does not add duplicate agent_type.
+// TestSubagentStartNoDuplicates verifies that SubagentStart with the same agent_type overwrites
+// the previous entry (map semantics). SubagentStop is a no-op for activeAgents; teammates remain
+// tracked until cleared by clear-active-agents or COMPLETE.
 func TestSubagentStartNoDuplicates(t *testing.T) {
 	env := setupEnv(t)
 
-	// Send SubagentStart twice with the same agent_type.
-	// Then send SubagentStop once — should deregister it cleanly.
+	// Send SubagentStart twice with the same agent_type but different agent_ids (simulating respawn).
+	// The second start overwrites the first. SubagentStop is ignored for activeAgents tracking.
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(SignalHookEvent, model.SignalHookEvent{
 			HookType:  "SubagentStart",
 			SessionID: "test",
-			Detail:    map[string]string{"agent_type": "developer-1"},
+			Detail:    map[string]string{"agent_type": "developer-1", "agent_id": "uuid-first"},
 		})
 		env.SignalWorkflow(SignalHookEvent, model.SignalHookEvent{
 			HookType:  "SubagentStart",
 			SessionID: "test",
-			Detail:    map[string]string{"agent_type": "developer-1"},
+			Detail:    map[string]string{"agent_type": "developer-1", "agent_id": "uuid-second"},
 		})
 		env.SignalWorkflow(SignalHookEvent, model.SignalHookEvent{
 			HookType:  "SubagentStop",
 			SessionID: "test",
-			Detail:    map[string]string{"agent_type": "developer-1"},
+			Detail:    map[string]string{"agent_type": "developer-1", "agent_id": "uuid-second"},
 		})
 	}, 0)
 
@@ -1121,8 +1135,9 @@ func TestSubagentStartNoDuplicates(t *testing.T) {
 	require.NoError(t, err)
 	var status model.WorkflowStatus
 	require.NoError(t, val.Get(&status))
+	// activeAgents is cleared by terminal COMPLETE phase, not by SubagentStop.
 	assert.Equal(t, 0, len(status.ActiveAgents),
-		"activeAgents should be empty after SubagentStop")
+		"activeAgents should be empty after COMPLETE phase (terminal clear)")
 }
 
 // sendCommandRan is a helper to send a command-ran signal in tests.

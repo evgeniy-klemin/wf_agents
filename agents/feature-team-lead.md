@@ -82,9 +82,9 @@ After a Developer or Reviewer finishes, Claude Code's LSP may report `<new-diagn
 ```
 PLANNING → RESPAWN → DEVELOPING → REVIEWING → COMMITTING → PR_CREATION → FEEDBACK → COMPLETE
               ↑          ↑            │            │                                    │
-              │          └────────────┘ (rejected) │                                    │
-              │                                    │                                    │
-              └────────────────────────────────────┘ (more iterations)                  │
+              │          │            └────────────┘ (rejected, more iterations)        │
+              │          │                                                               │
+              └──────────┘ (COMMITTING → RESPAWN for next planned iteration)            │
               │                                                                         │
               └─────────────────────────────────────────────────────────────────────────┘ (feedback changes)
 
@@ -150,7 +150,23 @@ ${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to RESPAWN --reaso
 
 Announce: `🔄 LEAD: RESPAWN`
 
-Send a `shutdown_request` to Developer and Reviewer teammates (if any are active). Wait for their confirmations that they are shutting down.
+Shutdown protocol (for each active teammate — skip if none active):
+
+1. Send `shutdown_request` to each active teammate (Developer and Reviewer)
+2. Wait for their `shutdown_response` confirmations
+3. Deregister Developer from the workflow:
+   ```bash
+   ${CLAUDE_PLUGIN_ROOT}/bin/wf-client shut-down <workflow-id> --agent developer-N
+   ```
+4. Deregister Reviewer from the workflow:
+   ```bash
+   ${CLAUDE_PLUGIN_ROOT}/bin/wf-client shut-down <workflow-id> --agent reviewer-N
+   ```
+5. Verify `activeAgents` is empty before proceeding:
+   ```bash
+   ${CLAUDE_PLUGIN_ROOT}/bin/wf-client status <workflow-id>
+   ```
+
 - This deliberately clears accumulated context window noise from prior iterations
 - Determine the current iteration task from your plan — this is the ONLY task the Developer will receive
 - Prepare the iteration context (task, iteration number, prior feedback)
@@ -203,13 +219,13 @@ Wait for Reviewer's verdict message.
 ${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to COMMITTING --reason "Review approved"
 ```
 
-**If Reviewer outputs `VERDICT: REJECTED — <issues>`**: transition to RESPAWN (new iteration with clean context)
+**If Reviewer outputs `VERDICT: REJECTED — <issues>`**: transition to DEVELOPING (Developer continues fixing in current session)
 ```bash
-${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to RESPAWN --reason "Review rejected: <issues>"
+${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to DEVELOPING --reason "Review rejected: <issues>"
 ```
-Then follow the RESPAWN protocol (shutdown existing teammates, prepare iteration context with rejection feedback included) and DEVELOPING protocol (spawn fresh teammates).
+Then send the rejection feedback directly to Developer so they can address the issues. Do NOT follow the RESPAWN protocol — teammates stay alive and Developer continues in the current session.
 
-If the RESPAWN transition is DENIED due to max iterations, follow the max-iterations protocol in the COMMITTING section (ask user, reset-iterations if yes, proceed to PR_CREATION if no).
+If the DEVELOPING transition is DENIED due to max iterations, follow the max-iterations protocol in the COMMITTING section (ask user, reset-iterations if yes, transition to BLOCKED or ask user to stop the session if no).
 
 ### 5. COMMITTING (Developer does this on your instruction)
 
