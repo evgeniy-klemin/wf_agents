@@ -104,6 +104,12 @@ teammate_idle:
   - phase: "*"
     checks: []
 
+teammate_permissions:
+  - agent: "developer*"
+    tools: [Edit, Write, NotebookEdit]
+    phases: [DEVELOPING, COMMITTING]
+    message: "File editing only allowed in DEVELOPING and COMMITTING"
+
 lead_idle:
   # Deny lead idle in PLANNING — no teammates to respond
   - phase: PLANNING
