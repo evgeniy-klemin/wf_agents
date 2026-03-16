@@ -88,12 +88,18 @@ guards:
         message: "max iterations reached. Ask the user whether to continue. If yes, run: wf-client reset-iterations <workflow-id>, then retry this transition."
 
 teammate_idle:
-  # In DEVELOPING, developers must not go idle — only reviewers may.
-  - match: DEVELOPING
-    checks:
-      - type: role_check
-        key: developer
-        message: "Developers must not go idle in DEVELOPING — delegate work to a developer teammate or transition the phase."
-  # All other phases: no constraints on teammate idle.
+  # Default: all teammates idle freely in all phases.
+  # Override in .wf-agents.yaml to add per-agent, per-phase checks.
+  # Example (uncomment and adapt):
+  #
+  # - match: DEVELOPING
+  #   agent: "developer*"
+  #   checks:
+  #     - type: command_ran
+  #       category: test
+  #       message: "Run tests before going idle (e.g. 'go test ./...')"
+  # - match: DEVELOPING
+  #   agent: "reviewer*"
+  #   checks: []
   - match: "*"
     checks: []

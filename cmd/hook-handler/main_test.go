@@ -902,23 +902,17 @@ func TestTrackPreToolUse_PipedCommand(t *testing.T) {
 	t.Error("no command-ran signal for lint category from piped command")
 }
 
-// TestEvalTeammateIdleConfig_DeveloperBlockedInDeveloping verifies that a developer
-// going idle in DEVELOPING is denied (default config: role_check on "developer").
-func TestEvalTeammateIdleConfig_DeveloperBlockedInDeveloping(t *testing.T) {
+// TestEvalTeammateIdleConfig_DefaultConfigAllowsAll verifies that the default config
+// (wildcard rule with no checks) allows all agents to idle freely in any phase.
+func TestEvalTeammateIdleConfig_DefaultConfigAllowsAll(t *testing.T) {
 	dir := t.TempDir()
-	reason := evalTeammateIdleConfig(dir, "DEVELOPING", "developer-1", nil)
-	if reason == "" {
-		t.Error("expected denial reason for developer in DEVELOPING, got empty string")
-	}
-}
-
-// TestEvalTeammateIdleConfig_ReviewerAllowedInDeveloping verifies that a reviewer
-// going idle in DEVELOPING is NOT denied by the developer role_check.
-func TestEvalTeammateIdleConfig_ReviewerAllowedInDeveloping(t *testing.T) {
-	dir := t.TempDir()
-	reason := evalTeammateIdleConfig(dir, "DEVELOPING", "reviewer-1", nil)
-	if reason != "" {
-		t.Errorf("reviewer should be allowed to idle in DEVELOPING, got: %q", reason)
+	for _, agent := range []string{"developer-1", "reviewer-1", "team-lead"} {
+		for _, phase := range []string{"DEVELOPING", "REVIEWING", "COMMITTING"} {
+			reason := evalTeammateIdleConfig(dir, phase, agent, nil)
+			if reason != "" {
+				t.Errorf("default config: expected no denial for %s in %s, got: %q", agent, phase, reason)
+			}
+		}
 	}
 }
 
@@ -933,12 +927,15 @@ func TestEvalTeammateIdleConfig_WildcardPhaseAllowsIdle(t *testing.T) {
 }
 
 // TestEvalTeammateIdleConfig_CustomConfig verifies that a project-level .wf-agents.yaml
-// config can add a command_ran check that denies idle when a command hasn't been run.
+// config can override a command_ran check per agent glob.
+// With agent-level matching, overrides use match+agent as the merge key.
 func TestEvalTeammateIdleConfig_CustomConfig(t *testing.T) {
 	dir := t.TempDir()
+	// Override the developer* rule for DEVELOPING to require lint instead of test.
 	writeTempConfig(t, dir, `
 teammate_idle:
   - match: DEVELOPING
+    agent: "developer*"
     checks:
       - type: command_ran
         key: lint

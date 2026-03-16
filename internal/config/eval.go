@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"path"
 	"strings"
 )
 
@@ -16,9 +17,6 @@ type CheckContext interface {
 	OriginPhase() string
 	// CommandsRan tracks which commands have been run (Phase 2 state).
 	CommandsRan() map[string]bool
-	// TeammateName returns the name of the teammate (used by role_check).
-	// Returns "" when the context is not teammate-specific.
-	TeammateName() string
 }
 
 // EvalCheck evaluates a single Check against the given context.
@@ -79,14 +77,6 @@ func EvalCheck(check Check, ctx CheckContext) string {
 		}
 		return check.Message
 
-	case "role_check":
-		// Passes if the teammate name does NOT contain the role key (i.e. check only applies
-		// to teammates whose name contains key). If it does contain the key, return the message.
-		if strings.Contains(strings.ToLower(ctx.TeammateName()), strings.ToLower(check.Key)) {
-			return check.Message
-		}
-		return ""
-
 	default:
 		return fmt.Sprintf("unknown check type %q", check.Type)
 	}
@@ -103,21 +93,56 @@ func EvalChecks(checks []Check, ctx CheckContext) string {
 	return ""
 }
 
-// FindIdleRule returns the first IdleRule from cfg that matches the given phase.
-// Exact phase matches are preferred over wildcard ("*") matches.
+// agentGlobMatch returns true if the agent pattern matches the given name.
+// Matching is case-insensitive glob using path.Match semantics.
+func agentGlobMatch(pattern, name string) bool {
+	matched, err := path.Match(strings.ToLower(pattern), strings.ToLower(name))
+	return err == nil && matched
+}
+
+// FindIdleRule returns the best-matching IdleRule from cfg for the given phase and agentName.
+// Priority (highest to lowest):
+//  1. Exact phase match + agent glob matches agentName
+//  2. Exact phase match + no agent (applies to all agents)
+//  3. Wildcard phase ("*") + agent glob matches agentName
+//  4. Wildcard phase ("*") + no agent
+//
 // Returns nil if no rule matches.
-func FindIdleRule(cfg *Config, phase string) *IdleRule {
-	var wild *IdleRule
+func FindIdleRule(cfg *Config, phase, agentName string) *IdleRule {
+	var exactNoAgent, wildAgent, wildNoAgent *IdleRule
 	for i := range cfg.TeammateIdle {
 		r := &cfg.TeammateIdle[i]
-		if r.Match == phase {
-			return r
+		exactPhase := r.Match == phase
+		wildcardPhase := r.Match == "*"
+		if !exactPhase && !wildcardPhase {
+			continue
 		}
-		if r.Match == "*" && wild == nil {
-			wild = r
+		hasAgent := r.Agent != ""
+		agentMatches := hasAgent && agentGlobMatch(r.Agent, agentName)
+
+		if exactPhase {
+			if agentMatches {
+				return r // highest priority: exact phase + agent match
+			}
+			if !hasAgent && exactNoAgent == nil {
+				exactNoAgent = r
+			}
+		} else { // wildcard phase
+			if agentMatches && wildAgent == nil {
+				wildAgent = r
+			}
+			if !hasAgent && wildNoAgent == nil {
+				wildNoAgent = r
+			}
 		}
 	}
-	return wild
+	if exactNoAgent != nil {
+		return exactNoAgent
+	}
+	if wildAgent != nil {
+		return wildAgent
+	}
+	return wildNoAgent
 }
 
 // FindGuards returns the GuardRules from cfg that match the given from→to transition.

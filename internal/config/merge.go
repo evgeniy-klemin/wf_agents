@@ -79,20 +79,25 @@ func mergeGuards(base, override []GuardRule) []GuardRule {
 	return filtered
 }
 
+func idleRuleKey(r IdleRule) string {
+	return r.Match + "|" + r.Agent
+}
+
 func mergeIdleRules(base, override []IdleRule) []IdleRule {
 	index := make(map[string]int)
 	result := make([]IdleRule, 0, len(base)+len(override))
 
 	for _, r := range base {
-		index[r.Match] = len(result)
+		index[idleRuleKey(r)] = len(result)
 		result = append(result, r)
 	}
 
 	for _, r := range override {
-		if idx, exists := index[r.Match]; exists {
+		k := idleRuleKey(r)
+		if idx, exists := index[k]; exists {
 			result[idx] = r // replace
 		} else {
-			index[r.Match] = len(result)
+			index[k] = len(result)
 			result = append(result, r)
 		}
 	}

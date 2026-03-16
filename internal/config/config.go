@@ -73,7 +73,10 @@ type KV struct {
 
 // IdleRule defines checks that must pass when a teammate goes idle.
 // Match is a phase name or "*" for wildcard matching.
+// Agent is an optional glob pattern matched against the teammate name (case-insensitive).
+// If empty, the rule applies to all agents.
 type IdleRule struct {
 	Match  string  `yaml:"match"`
+	Agent  string  `yaml:"agent,omitempty"`
 	Checks []Check `yaml:"checks"`
 }
