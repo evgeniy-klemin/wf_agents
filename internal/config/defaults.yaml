@@ -32,9 +32,9 @@ guards:
         value: "false"
         message: "no uncommitted changes found — there must be changes to review"
 
-  # REVIEWING → RESPAWN: max iterations check (reject loop)
+  # REVIEWING → DEVELOPING: max iterations check (reject loop)
   - from: REVIEWING
-    to: RESPAWN
+    to: DEVELOPING
     checks:
       - type: max_iterations
         message: "max iterations reached. Ask the user whether to continue. If yes, run: wf-client reset-iterations <workflow-id>, then retry this transition."

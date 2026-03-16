@@ -673,10 +673,10 @@ function renderDiagram(status, preBlockedPhase, timeline, sessionEndTime) {
       ${isNext ? 'class="flow-active"' : ''}/>`;
   }
 
-  // Loop: REVIEWING -> RESPAWN (reject)
+  // Loop: REVIEWING -> DEVELOPING (reject)
   {
     const from = positions['REVIEWING'];
-    const to = positions['RESPAWN'];
+    const to = positions['DEVELOPING'];
     const fx = from.x + nodeW / 2, fy = from.y + nodeH;
     const tx = to.x + nodeW / 2, ty = to.y + nodeH;
     const cy1 = fy + 45, cy2 = ty + 45;

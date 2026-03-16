@@ -101,7 +101,7 @@ var validTransitions = map[model.Phase][]model.Phase{
 	model.PhasePlanning:   {model.PhaseRespawn},
 	model.PhaseRespawn:    {model.PhaseDeveloping},
 	model.PhaseDeveloping: {model.PhaseReviewing},
-	model.PhaseReviewing:  {model.PhaseCommitting, model.PhaseRespawn},
+	model.PhaseReviewing:  {model.PhaseCommitting, model.PhaseDeveloping},
 	model.PhaseCommitting: {model.PhaseRespawn, model.PhasePRCreation},
 	model.PhasePRCreation: {model.PhaseFeedback},
 	model.PhaseFeedback:   {model.PhaseComplete, model.PhaseRespawn},
@@ -566,7 +566,7 @@ func PhaseHint(phase model.Phase) string {
 	case model.PhaseRespawn:
 		return "Only agent management allowed. Transition to DEVELOPING when agents are ready."
 	case model.PhaseReviewing:
-		return "Team Lead must delegate review to Reviewer teammate — do NOT review code directly. If issues found, transition back to DEVELOPING."
+		return "Team Lead must delegate review to Reviewer teammate — do NOT review code directly. If issues found, transition back to DEVELOPING (not RESPAWN)."
 	case model.PhaseCommitting:
 		return "Only git operations are allowed."
 	case model.PhasePRCreation:

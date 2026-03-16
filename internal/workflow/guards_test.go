@@ -9,17 +9,18 @@ import (
 )
 
 // makeState is a test helper to build a minimal sessionState.
-func makeState(phase model.Phase, preBlocked model.Phase, iteration int, maxIter int, activeAgents []string) *sessionState {
-	agents := activeAgents
-	if agents == nil {
-		agents = []string{}
+// agentTypes is a list of agent_type strings; each is added to the activeAgents map with a synthetic id.
+func makeState(phase model.Phase, preBlocked model.Phase, iteration int, maxIter int, agentTypes []string) *sessionState {
+	activeAgents := make(map[string]string)
+	for _, at := range agentTypes {
+		activeAgents[at] = "test-id-" + at
 	}
 	return &sessionState{
 		phase:           phase,
 		preBlockedPhase: preBlocked,
 		iteration:       iteration,
 		maxIter:         maxIter,
-		activeAgents:    agents,
+		activeAgents:    activeAgents,
 	}
 }
 
@@ -267,25 +268,25 @@ func TestValidateTransition(t *testing.T) {
 			evidence: nil,
 		},
 		{
-			name:     "REVIEWING → RESPAWN within maxIter (reject loop)",
+			name:     "REVIEWING → DEVELOPING within maxIter (reject loop)",
 			state:    makeState(model.PhaseReviewing, "", 1, 5, nil),
 			from:     model.PhaseReviewing,
-			to:       model.PhaseRespawn,
+			to:       model.PhaseDeveloping,
 			evidence: nil,
 		},
 		{
-			name:     "REVIEWING → RESPAWN at maxIter DENY",
+			name:     "REVIEWING → DEVELOPING at maxIter DENY",
 			state:    makeState(model.PhaseReviewing, "", 5, 5, nil),
 			from:     model.PhaseReviewing,
-			to:       model.PhaseRespawn,
+			to:       model.PhaseDeveloping,
 			evidence: nil,
 			wantDeny: true,
 		},
 		{
-			name:     "REVIEWING → DEVELOPING not allowed (removed reject loop path)",
+			name:     "REVIEWING → RESPAWN not allowed (reject loop now goes to DEVELOPING)",
 			state:    makeState(model.PhaseReviewing, "", 1, 5, nil),
 			from:     model.PhaseReviewing,
-			to:       model.PhaseDeveloping,
+			to:       model.PhaseRespawn,
 			evidence: nil,
 			wantDeny: true,
 		},

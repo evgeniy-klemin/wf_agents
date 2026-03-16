@@ -24,7 +24,7 @@ func TestDefaultConfig_HasExpectedGuardedTransitions(t *testing.T) {
 	expected := [][2]string{
 		{"RESPAWN", "DEVELOPING"},
 		{"DEVELOPING", "REVIEWING"},
-		{"REVIEWING", "RESPAWN"},
+		{"REVIEWING", "DEVELOPING"},
 		{"COMMITTING", "RESPAWN"},
 		{"COMMITTING", "PR_CREATION"},
 		{"PR_CREATION", "FEEDBACK"},
