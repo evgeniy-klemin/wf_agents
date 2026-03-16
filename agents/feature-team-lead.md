@@ -115,10 +115,14 @@ ${CLAUDE_PLUGIN_ROOT}/bin/wf-client status <session-id>
 
 The PreToolUse hook injects the current phase checklist before every tool call. That checklist is your ONLY source of truth for what to do in the current phase.
 
-- Execute each checklist item in order, top to bottom
-- Do NOT skip items or jump ahead to the transition step
-- Do NOT rely on memory of prior phases — read the injected checklist
-- Complete every item before transitioning
+**CRITICAL — after every transition:**
+1. Each transition MUST be the ONLY tool call in its message — do NOT combine it with other tool calls in the same response
+2. The transition result contains the injected checklist for the new phase — READ it fully before your next action
+3. Execute each checklist item in order, top to bottom
+4. Do NOT skip items or jump ahead based on memory or assumptions
+5. Complete every item before transitioning to the next phase
+
+You do NOT know what the current phase requires until you read the injected checklist. Acting without reading it WILL cause you to skip mandatory steps (e.g., TeamCreate, spawning teammates).
 
 ## Plugin Black Box Rule
 

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/eklemin/wf-agents/internal/model"
+	"github.com/eklemin/wf-agents/internal/noplog"
 	wf "github.com/eklemin/wf-agents/internal/workflow"
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/workflowservice/v1"
@@ -29,6 +30,7 @@ func main() {
 
 	c, err := client.Dial(client.Options{
 		HostPort: "localhost:7233",
+		Logger:   noplog.New(),
 	})
 	if err != nil {
 		log.Fatalf("Failed to connect to Temporal: %v", err)
