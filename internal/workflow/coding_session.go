@@ -246,8 +246,9 @@ func CodingSessionWorkflow(ctx workflow.Context, input model.WorkflowInput) (mod
 
 // sessionState holds the internal mutable state of the workflow.
 type sessionState struct {
-	phase           model.Phase
-	preBlockedPhase model.Phase // remembers state before BLOCKED, for returning
+	phase               model.Phase
+	preBlockedPhase     model.Phase // remembers state before BLOCKED, for returning
+	blockedByPermission bool        // true when BLOCKED was triggered by a PermissionRequest
 	iteration       int         // resettable counter for guard checks
 	totalIterations int         // cumulative counter, never reset
 	events          []model.WorkflowEvent
@@ -395,6 +396,7 @@ func (s *sessionState) handleHookEvent(ctx workflow.Context, evt model.SignalHoo
 		if !s.phase.IsTerminal() && s.phase != model.PhaseBlocked {
 			s.preBlockedPhase = s.phase
 			s.phase = model.PhaseBlocked
+			s.blockedByPermission = true
 			s.lastUpdated = workflow.Now(ctx)
 			s.phaseEnteredAt = workflow.Now(ctx)
 
@@ -414,11 +416,13 @@ func (s *sessionState) handleHookEvent(ctx workflow.Context, evt model.SignalHoo
 		}
 	}
 
-	// Auto-unblock: PostToolUse / PostToolUseFailure (permission resolved, any agent).
-	if s.phase == model.PhaseBlocked && s.preBlockedPhase != "" {
+	// Auto-unblock: PostToolUse / PostToolUseFailure — only if BLOCKED was caused by PermissionRequest.
+	// This prevents PostToolUse from normal tool calls from spuriously unblocking a manually-set BLOCKED.
+	if s.phase == model.PhaseBlocked && s.preBlockedPhase != "" && s.blockedByPermission {
 		if evt.HookType == "PostToolUse" || evt.HookType == "PostToolUseFailure" {
 			from := s.phase
 			s.phase = s.preBlockedPhase
+			s.blockedByPermission = false
 			s.lastUpdated = workflow.Now(ctx)
 			s.phaseEnteredAt = workflow.Now(ctx)
 			s.addEvent(ctx, model.EventTransition, evt.SessionID, map[string]string{

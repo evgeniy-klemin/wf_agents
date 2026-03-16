@@ -546,6 +546,48 @@ func TestFindLeadIdleRulePriority(t *testing.T) {
 	assert.Equal(t, "wildcard", r.Message)
 }
 
+func TestMergeConfigsPreservesLeadIdle(t *testing.T) {
+	base := &Config{
+		LeadIdle: []LeadIdleRule{
+			{Phase: "PLANNING", Deny: true, Message: "No teammates in PLANNING"},
+			{Phase: "*", Deny: false},
+		},
+	}
+	override := &Config{} // no LeadIdle in override
+
+	merged := MergeConfigs(base, override)
+	require.Len(t, merged.LeadIdle, 2, "base LeadIdle rules should be preserved when override has none")
+
+	r := FindLeadIdleRule(merged, "PLANNING")
+	require.NotNil(t, r)
+	assert.True(t, r.Deny)
+	assert.Equal(t, "No teammates in PLANNING", r.Message)
+
+	r = FindLeadIdleRule(merged, "DEVELOPING")
+	require.NotNil(t, r)
+	assert.False(t, r.Deny)
+}
+
+func TestMergeConfigsOverridesLeadIdle(t *testing.T) {
+	base := &Config{
+		LeadIdle: []LeadIdleRule{
+			{Phase: "PLANNING", Deny: true, Message: "base message"},
+			{Phase: "*", Deny: false},
+		},
+	}
+	override := &Config{
+		LeadIdle: []LeadIdleRule{
+			{Phase: "PLANNING", Deny: false, Message: "override allows planning"},
+		},
+	}
+
+	merged := MergeConfigs(base, override)
+	r := FindLeadIdleRule(merged, "PLANNING")
+	require.NotNil(t, r)
+	assert.False(t, r.Deny, "override should replace base for same phase")
+	assert.Equal(t, "override allows planning", r.Message)
+}
+
 func TestDefaultConfig_HasLeadIdleRules(t *testing.T) {
 	cfg, err := DefaultConfig()
 	require.NoError(t, err)
