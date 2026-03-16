@@ -2,17 +2,21 @@
 # Copy to .wf-agents.yaml in your target project and customize.
 # Merged on top of plugin defaults (internal/config/defaults.yaml).
 #
-# teammate_idle rules match by PHASE NAME (e.g. DEVELOPING, REVIEWING, "*").
-# Exact phase matches take priority over the wildcard ("*") fallback.
+# teammate_idle rules match by PHASE NAME and optional AGENT GLOB.
+# Priority: exact phase+agent > exact phase+no agent > wildcard phase+agent > wildcard phase+no agent.
 
 teammate_idle:
-  # Override the DEVELOPING rule: require tests to have run before any agent goes idle.
-  # (Replaces the default DEVELOPING rule from defaults.yaml.)
-  - match: DEVELOPING
+  # In DEVELOPING, require developers to have run tests before going idle.
+  - phase: DEVELOPING
+    agent: "developer*"
     checks:
       - type: command_ran
         category: test
         message: "Run tests before going idle (e.g. 'go test ./...')"
+  # In DEVELOPING, reviewers idle freely.
+  - phase: DEVELOPING
+    agent: "reviewer*"
+    checks: []
   # In REVIEWING, all agents idle freely.
-  - match: REVIEWING
+  - phase: REVIEWING
     checks: []

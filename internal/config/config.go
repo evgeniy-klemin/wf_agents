@@ -49,7 +49,7 @@ type Check struct {
 	// Type is one of: evidence, no_active_agents, max_iterations, command_ran
 	Type string `yaml:"type"`
 
-	// Key is the evidence map key (used by evidence and command_ran checks).
+	// Key is the evidence map key (used by evidence checks).
 	Key string `yaml:"key,omitempty"`
 
 	// Value is the expected value (used by evidence check).
@@ -72,8 +72,11 @@ type KV struct {
 }
 
 // IdleRule defines checks that must pass when a teammate goes idle.
-// Match is a phase name or "*" for wildcard matching.
+// Phase is a phase name or "*" for wildcard matching.
+// Agent is an optional glob pattern matched against the teammate name (case-insensitive).
+// If empty, the rule applies to all agents.
 type IdleRule struct {
-	Match  string  `yaml:"match"`
+	Phase  string  `yaml:"phase"`
+	Agent  string  `yaml:"agent,omitempty"`
 	Checks []Check `yaml:"checks"`
 }

@@ -665,8 +665,7 @@ func temporalHost() string {
 
 // idleCheckContext implements config.CheckContext for teammate idle evaluation.
 type idleCheckContext struct {
-	teammateName string
-	commandsRan  map[string]bool
+	commandsRan map[string]bool
 }
 
 func (c *idleCheckContext) Evidence() map[string]string  { return nil }
@@ -675,7 +674,6 @@ func (c *idleCheckContext) Iteration() int               { return 0 }
 func (c *idleCheckContext) MaxIterations() int           { return 0 }
 func (c *idleCheckContext) OriginPhase() string          { return "" }
 func (c *idleCheckContext) CommandsRan() map[string]bool { return c.commandsRan }
-func (c *idleCheckContext) TeammateName() string         { return c.teammateName }
 
 // queryAgentCommands fetches the command tracking state for a specific agent via Temporal query.
 func queryAgentCommands(ctx context.Context, c client.Client, workflowID, agentName string) map[string]bool {
@@ -813,10 +811,10 @@ func evalTeammateIdleConfig(projectDir, phase, teammateName string, commandsRan 
 		fmt.Fprintf(os.Stderr, "Warning: failed to load config: %v\n", err)
 		return ""
 	}
-	rule := config.FindIdleRule(cfg, phase)
+	rule := config.FindIdleRule(cfg, phase, teammateName)
 	if rule == nil {
 		return ""
 	}
-	ctx := &idleCheckContext{teammateName: teammateName, commandsRan: commandsRan}
+	ctx := &idleCheckContext{commandsRan: commandsRan}
 	return config.EvalChecks(rule.Checks, ctx)
 }
