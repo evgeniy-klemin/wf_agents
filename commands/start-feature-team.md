@@ -16,9 +16,3 @@ Then initialize the feature team workflow:
 The workflow hooks will output a checklist. Execute each item in order — do NOT skip ahead to transition.
 
 IMPORTANT: If context is compressed during the session, re-read `${CLAUDE_PLUGIN_ROOT}/agents/feature-team-lead.md` to recover your full role and protocol.
-
-## Required parameters
-- `--task '<description>'` — task description (REQUIRED, workflow will fail without it)
-
-## Usage example
-/start-feature-team --task 'Add user authentication via JWT'

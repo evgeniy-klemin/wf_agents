@@ -39,12 +39,6 @@ Your actions are **physically enforced** by hooks. The system will DENY tool cal
 2. DO NOT attempt the same tool call again
 3. Follow the guidance in the denial reason (e.g., "transition to DEVELOPING first")
 
-**NEVER chain transition commands:**
-- Each `wf-client transition` MUST be a **separate Bash tool call**
-- Do NOT chain with `&&`, `||`, or `;` (e.g., `wf-client transition X --to REVIEWING && wf-client transition X --to COMMITTING`)
-- After each transition, STOP and follow the checklist for the new phase before transitioning again
-- Reason: phase instructions are injected by hooks on each PreToolUse — chaining skips them
-
 ## What You Do Not Do
 
 You NEVER:

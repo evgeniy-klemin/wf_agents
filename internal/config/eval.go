@@ -157,44 +157,6 @@ func FindLeadIdleRule(cfg *Config, phase string) *LeadIdleRule {
 	return wildcard
 }
 
-// FindTeammatePermission returns the first matching permission rule for the given
-// phase, agent name, tool name, and bash command. Returns nil if no rule matches.
-// Matching: agent glob (or empty=all), tool in Tools list OR bashCmd matches a Bash prefix.
-func FindTeammatePermission(cfg *Config, phase, agentName, toolName, bashCmd string) *TeammatePermission {
-	for i := range cfg.TeammatePermissions {
-		r := &cfg.TeammatePermissions[i]
-		// Check agent glob
-		if r.Agent != "" && !agentGlobMatch(r.Agent, agentName) {
-			continue
-		}
-		// Check tool name match
-		toolMatches := false
-		for _, t := range r.Tools {
-			if t == toolName {
-				toolMatches = true
-				break
-			}
-		}
-		// Check bash command prefix match
-		bashMatches := false
-		if bashCmd != "" {
-			for _, prefix := range r.Bash {
-				if strings.HasPrefix(bashCmd, prefix) {
-					rest := bashCmd[len(prefix):]
-					if rest == "" || rest[0] == ' ' || rest[0] == '\t' || rest[0] == '|' || rest[0] == ';' || rest[0] == '&' || rest[0] == '\n' {
-						bashMatches = true
-						break
-					}
-				}
-			}
-		}
-		if toolMatches || bashMatches {
-			return r
-		}
-	}
-	return nil
-}
-
 // FindGuards returns the GuardRules from cfg that match the given from→to transition.
 // Exact matches (no wildcards) are returned before wildcard matches.
 // Both from and to can be "*" in rules for wildcard matching.

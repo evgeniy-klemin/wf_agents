@@ -4,21 +4,10 @@ package config
 
 // Config is the top-level configuration structure.
 type Config struct {
-	Tracking             TrackingConfig       `yaml:"tracking"`
-	Guards               []GuardRule          `yaml:"guards"`
-	TeammateIdle         []IdleRule           `yaml:"teammate_idle"`
-	LeadIdle             []LeadIdleRule       `yaml:"lead_idle"`
-	TeammatePermissions  []TeammatePermission `yaml:"teammate_permissions"`
-}
-
-// TeammatePermission restricts tool usage for teammates by phase and agent name.
-// Each rule: agent glob + tools/bash patterns + allowed phases. First matching rule wins.
-type TeammatePermission struct {
-	Agent   string   `yaml:"agent,omitempty"` // glob pattern, e.g. "developer*"
-	Tools   []string `yaml:"tools,omitempty"` // tool names: Edit, Write, NotebookEdit, ...
-	Bash    []string `yaml:"bash,omitempty"`  // bash command prefixes: "git commit", ...
-	Phases  []string `yaml:"phases"`          // allowed phases
-	Message string   `yaml:"message,omitempty"`
+	Tracking     TrackingConfig `yaml:"tracking"`
+	Guards       []GuardRule    `yaml:"guards"`
+	TeammateIdle []IdleRule     `yaml:"teammate_idle"`
+	LeadIdle     []LeadIdleRule `yaml:"lead_idle"`
 }
 
 // LeadIdleRule controls whether the Team Lead can idle/stop in a given phase.

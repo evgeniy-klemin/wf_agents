@@ -23,9 +23,6 @@ func MergeConfigs(base, override *Config) *Config {
 	// Merge lead_idle
 	result.LeadIdle = mergeLeadIdleRules(base.LeadIdle, override.LeadIdle)
 
-	// Merge teammate_permissions — override replaces base for same agent+tool key; new entries append
-	result.TeammatePermissions = mergeTeammatePermissions(base.TeammatePermissions, override.TeammatePermissions)
-
 	return result
 }
 
@@ -108,30 +105,6 @@ func mergeLeadIdleRules(base, override []LeadIdleRule) []LeadIdleRule {
 
 func idleRuleKey(r IdleRule) string {
 	return r.Phase + "|" + r.Agent
-}
-
-func mergeTeammatePermissions(base, override []TeammatePermission) []TeammatePermission {
-	type key struct{ agent string }
-	index := make(map[key]int)
-	result := make([]TeammatePermission, 0, len(base)+len(override))
-
-	for _, r := range base {
-		k := key{r.Agent}
-		index[k] = len(result)
-		result = append(result, r)
-	}
-
-	for _, r := range override {
-		k := key{r.Agent}
-		if idx, exists := index[k]; exists {
-			result[idx] = r // replace
-		} else {
-			index[k] = len(result)
-			result = append(result, r)
-		}
-	}
-
-	return result
 }
 
 func mergeIdleRules(base, override []IdleRule) []IdleRule {
