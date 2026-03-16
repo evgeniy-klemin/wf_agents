@@ -185,8 +185,15 @@ func main() {
 			trackPreToolUse(ctx, c, workflowID, input)
 		}
 
-		// Check if tool is allowed in this phase
-		decision := wf.CheckToolPermission(phase, input.ToolName, input.ToolInput, input.AgentID, status.ActiveAgents)
+		// Check if tool is allowed in this phase.
+		// Use agent name (TeammateName || AgentType, e.g. "developer-1") for permission
+		// matching — same approach as trackPreToolUse. Fallback to AgentID (UUID) so
+		// IsTeammate() still returns true for teammates with no name/type.
+		agentName := resolveAgentName(input)
+		if agentName == "" {
+			agentName = input.AgentID
+		}
+		decision := wf.CheckToolPermission(phase, input.ToolName, input.ToolInput, agentName, status.ActiveAgents)
 
 		if decision.Denied {
 			// Record denial in Temporal
