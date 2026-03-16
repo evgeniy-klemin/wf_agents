@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 
+	"github.com/eklemin/wf-agents/internal/noplog"
 	wf "github.com/eklemin/wf-agents/internal/workflow"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
@@ -13,6 +14,7 @@ const taskQueue = "coding-session"
 func main() {
 	c, err := client.Dial(client.Options{
 		HostPort: "localhost:7233",
+		Logger:   noplog.New(),
 	})
 	if err != nil {
 		log.Fatalf("Failed to connect to Temporal: %v", err)

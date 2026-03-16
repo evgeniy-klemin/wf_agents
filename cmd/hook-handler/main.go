@@ -13,6 +13,7 @@ import (
 
 	"github.com/eklemin/wf-agents/internal/config"
 	"github.com/eklemin/wf-agents/internal/model"
+	"github.com/eklemin/wf-agents/internal/noplog"
 	wf "github.com/eklemin/wf-agents/internal/workflow"
 	enums "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/client"
@@ -157,6 +158,7 @@ func main() {
 
 	c, err := client.Dial(client.Options{
 		HostPort: temporalHost(),
+		Logger:   noplog.New(),
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: cannot connect to Temporal: %v\n", err)
