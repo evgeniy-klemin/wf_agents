@@ -312,6 +312,102 @@ func TestIsAllowedGitInPlanning_Fetch(t *testing.T) {
 	assert.True(t, isAllowedGitInPlanning("git fetch origin main"), "git fetch with args should be allowed in PLANNING")
 }
 
+// TestTeammatePermissions verifies config-driven per-phase/per-agent tool restrictions.
+func TestTeammatePermissions(t *testing.T) {
+	activeAgents := []string{"developer-1"}
+
+	makeInput := func(cmd string) []byte {
+		if cmd == "" {
+			return []byte(`{}`)
+		}
+		b, _ := json.Marshal(map[string]string{"command": cmd})
+		return b
+	}
+	makeFileInput := func(path string) []byte {
+		b, _ := json.Marshal(map[string]string{"file_path": path})
+		return b
+	}
+
+	// developer-1 Edit allowed in DEVELOPING
+	t.Run("developer Edit allowed in DEVELOPING", func(t *testing.T) {
+		result := CheckToolPermission(model.PhaseDeveloping, "Edit", makeFileInput("/project/main.go"), "developer-1", activeAgents)
+		assert.False(t, result.Denied)
+	})
+
+	// developer-1 Edit allowed in COMMITTING
+	t.Run("developer Edit allowed in COMMITTING", func(t *testing.T) {
+		result := CheckToolPermission(model.PhaseCommitting, "Edit", makeFileInput("/project/main.go"), "developer-1", activeAgents)
+		assert.False(t, result.Denied)
+	})
+
+	// developer-1 Edit denied in REVIEWING
+	t.Run("developer Edit denied in REVIEWING", func(t *testing.T) {
+		result := CheckToolPermission(model.PhaseReviewing, "Edit", makeFileInput("/project/main.go"), "developer-1", activeAgents)
+		assert.True(t, result.Denied)
+		assert.Contains(t, result.Reason, "REVIEWING")
+	})
+
+	// developer-1 Edit denied in FEEDBACK
+	t.Run("developer Edit denied in FEEDBACK", func(t *testing.T) {
+		result := CheckToolPermission(model.PhaseFeedback, "Edit", makeFileInput("/project/main.go"), "developer-1", activeAgents)
+		assert.True(t, result.Denied)
+		assert.Contains(t, result.Reason, "FEEDBACK")
+	})
+
+	// developer-1 Edit denied in PR_CREATION
+	t.Run("developer Edit denied in PR_CREATION", func(t *testing.T) {
+		result := CheckToolPermission(model.PhasePRCreation, "Edit", makeFileInput("/project/main.go"), "developer-1", activeAgents)
+		assert.True(t, result.Denied)
+		assert.Contains(t, result.Reason, "PR_CREATION")
+	})
+
+	// Claude infra files (plan/memory) bypass rules
+	t.Run("developer Edit plan file bypasses permission rule", func(t *testing.T) {
+		result := CheckToolPermission(model.PhaseReviewing, "Edit", makeFileInput("/home/user/.claude/plans/plan.md"), "developer-1", activeAgents)
+		assert.False(t, result.Denied)
+	})
+
+	t.Run("developer Edit memory file bypasses permission rule", func(t *testing.T) {
+		result := CheckToolPermission(model.PhaseReviewing, "Edit", makeFileInput("/home/user/.claude/projects/myproject/memory/notes.md"), "developer-1", activeAgents)
+		assert.False(t, result.Denied)
+	})
+
+	// No matching rule (reviewer-1 with Edit) → tool allowed (default open)
+	t.Run("reviewer Edit has no matching rule - allowed", func(t *testing.T) {
+		reviewerAgents := []string{"reviewer-1"}
+		result := CheckToolPermission(model.PhaseReviewing, "Edit", makeFileInput("/project/main.go"), "reviewer-1", reviewerAgents)
+		assert.False(t, result.Denied)
+	})
+
+	// developer-1 Write denied in REVIEWING
+	t.Run("developer Write denied in REVIEWING", func(t *testing.T) {
+		result := CheckToolPermission(model.PhaseReviewing, "Write", makeFileInput("/project/main.go"), "developer-1", activeAgents)
+		assert.True(t, result.Denied)
+	})
+
+	// developer-1 NotebookEdit denied in FEEDBACK
+	t.Run("developer NotebookEdit denied in FEEDBACK", func(t *testing.T) {
+		result := CheckToolPermission(model.PhaseFeedback, "NotebookEdit", makeInput(""), "developer-1", activeAgents)
+		assert.True(t, result.Denied)
+	})
+
+	// Regression: agent name vs UUID — glob "developer*" must match agent name, not UUID.
+	// hook-handler must pass resolveAgentName() (e.g. "developer-1"), not raw agent_id (UUID).
+	t.Run("UUID as agentID does not match developer glob - rule not found - allowed", func(t *testing.T) {
+		// If UUID is passed instead of agent name, glob "developer*" won't match,
+		// no rule is found, and the tool is allowed by default — this is the bug.
+		result := CheckToolPermission(model.PhaseReviewing, "Edit", makeFileInput("/project/main.go"), "a8b02535bf2798948", activeAgents)
+		assert.False(t, result.Denied, "UUID does not match glob — no rule found, default open")
+	})
+
+	t.Run("agent name developer-1 matches glob and is denied in REVIEWING", func(t *testing.T) {
+		// When agent name is passed correctly, glob "developer*" matches and the rule applies.
+		result := CheckToolPermission(model.PhaseReviewing, "Edit", makeFileInput("/project/main.go"), "developer-1", activeAgents)
+		assert.True(t, result.Denied, "agent name matches glob — rule applies, denied in REVIEWING")
+		assert.Contains(t, result.Reason, "REVIEWING")
+	})
+}
+
 // TestTeammateBashAutoApprove verifies that teammates get Bash commands auto-approved
 // when the command is not denied, even if the command is not in the auto-approve list.
 func TestTeammateBashAutoApprove(t *testing.T) {
