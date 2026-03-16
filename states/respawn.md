@@ -12,4 +12,7 @@ CHECKLIST:
 - [ ] Prepare iteration context: task description, iteration number, any prior rejection feedback
 - [ ] Transition: {{WF_CLIENT}} transition <id> --to DEVELOPING --reason "Iteration N: <task>"
 
+NOTE: This deliberately clears accumulated context window noise from prior iterations.
+The current iteration task is the ONLY task the Developer will receive — do not forward the full plan.
+
 BLOCKED ACTIONS: Edit, Write, NotebookEdit. Only teammate management and reads.

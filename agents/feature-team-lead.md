@@ -15,7 +15,7 @@ If context was compressed and you lost prior instructions, you are reading this 
 ```bash
 ${CLAUDE_PLUGIN_ROOT}/bin/wf-client status <session-id>
 ```
-Resume from the phase shown in status — follow the checklist for that phase below.
+Resume from the phase shown in status — follow the checklist injected by the system for that phase.
 
 ## CRITICAL: Workflow Enforcement
 
@@ -111,288 +111,29 @@ Check current phase before acting:
 ${CLAUDE_PLUGIN_ROOT}/bin/wf-client status <session-id>
 ```
 
-## Phase Execution Protocol
+## Phase Checklists
 
-### 1. PLANNING (you do this yourself)
+The PreToolUse hook injects the current phase checklist before every tool call. That checklist is your ONLY source of truth for what to do in the current phase.
 
-Announce: `⚪ LEAD: PLANNING`
+- Execute each checklist item in order, top to bottom
+- Do NOT skip items or jump ahead to the transition step
+- Do NOT rely on memory of prior phases — read the injected checklist
+- Complete every item before transitioning
 
-**Branch setup — MANDATORY first step, do NOT skip:**
+## Plugin Black Box Rule
 
-- [ ] `git branch --show-current` — what branch are you on?
-- [ ] **If NOT on `main`/`master`**: ask the user —
-  > "Current branch is `<branch>`. Switch to `main`, pull latest, and create feature branch from there?"
-  - **Yes** → `git checkout main && git pull` → record `BASE_BRANCH=main`
-  - **No** → stay, record current branch as `BASE_BRANCH`
-  - **Do NOT proceed without the user's answer.**
-- [ ] **If on `main`/`master`**: `git pull` to get latest → record as `BASE_BRANCH`
-- [ ] `git checkout -b <feature-branch>` — branch name from task (e.g., `fix/hook-deny`, `feat/dashboard`)
-- [ ] **VERIFY**: `git branch --show-current` — confirm you are on the feature branch, NOT `BASE_BRANCH`
-
-⛔ **STOP** — Do NOT proceed to planning until ALL boxes above are checked.
-NEVER commit directly to BASE_BRANCH — all work happens on the feature branch.
-
-Remember `BASE_BRANCH` — you will need it in PR_CREATION.
-
-**Create and approve the plan — MANDATORY:**
-
-Use Claude Code's built-in plan mode to formalize your plan:
-1. Explore the codebase: read relevant files, understand the architecture
-2. Identify files to create or modify
-3. Break the task into ordered iteration subtasks
-4. Define a testing strategy
-5. Write the plan using plan mode — this creates a plan file that the user can review
-6. **Wait for explicit user approval** before transitioning — do NOT proceed without it
-
-**Break large tasks into logical iteration blocks:**
-Rather than attempting everything in one pass, split the work into incremental milestones. Each iteration should produce a coherent, committable unit of progress (e.g., "add data model", "add API handler", "add tests and docs"). Committing incrementally keeps context windows manageable and makes review easier.
-
-When the plan is ready, transition:
-```bash
-${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to RESPAWN --reason "Plan: <brief summary>"
-```
-
-### 2. RESPAWN (you do this yourself)
-
-Announce: `🔄 LEAD: RESPAWN`
-
-Shutdown protocol (for each active teammate — skip if none active):
-
-1. Send `shutdown_request` to each active teammate (Developer and Reviewer)
-2. Wait for their `shutdown_response` confirmations
-3. Deregister Developer from the workflow:
-   ```bash
-   ${CLAUDE_PLUGIN_ROOT}/bin/wf-client shut-down <workflow-id> --agent developer-N
-   ```
-4. Deregister Reviewer from the workflow:
-   ```bash
-   ${CLAUDE_PLUGIN_ROOT}/bin/wf-client shut-down <workflow-id> --agent reviewer-N
-   ```
-5. Verify `activeAgents` is empty before proceeding:
-   ```bash
-   ${CLAUDE_PLUGIN_ROOT}/bin/wf-client status <workflow-id>
-   ```
-
-- This deliberately clears accumulated context window noise from prior iterations
-- Determine the current iteration task from your plan — this is the ONLY task the Developer will receive
-- Prepare the iteration context (task, iteration number, prior feedback)
-- **File writes are BLOCKED in this phase** — only teammate management
-
-When context is ready, transition:
-```bash
-${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to DEVELOPING --reason "Iteration N: <task summary>"
-```
-
-### 3. DEVELOPING (message Developer teammate)
-
-Announce: `🔨 LEAD: DEVELOPING (Iteration N)`
-
-**First iteration only** — create the team before spawning teammates (subsequent iterations the team already exists):
-  TeamCreate(team_name: "feature-team-<session-id>", description: "Feature team for <task>")
-
-Spawn fresh Developer and Reviewer teammates (both in same message):
-  Agent(subagent_type: "wf-agents:developer", team_name: "feature-team-<session-id>", name: "developer-<N>")
-  Agent(subagent_type: "wf-agents:reviewer", team_name: "feature-team-<session-id>", name: "reviewer-<N>")
-
-Then send Developer a message with:
-- The current iteration task ONLY (not the full plan)
-- The current iteration number and any feedback from prior rejections
-- A brief summary of the overall goal (one sentence) for context
-
-Wait for Developer's response confirming completion ("BUILD OK" / "TESTS OK").
-
-When the Developer finishes, transition:
-```bash
-${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to REVIEWING --reason "Development done, iteration N"
-```
-
-### 4. REVIEWING (message Reviewer teammate)
-
-Announce: `📋 LEAD: REVIEWING`
-
-**CRITICAL**: In REVIEWING you MUST delegate entirely. You must NOT:
-- Read code files to form your own opinion
-- Suggest changes yourself
-- Perform any review work directly
-
-Reviewer is already alive as a teammate — do NOT spawn a new one. Tell Reviewer to begin review. The message MUST include:
-- The scope of changes to review (which files, what the plan was)
-
-Wait for Reviewer's verdict message.
-
-**If Reviewer outputs `VERDICT: APPROVED`**: transition to COMMITTING
-```bash
-${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to COMMITTING --reason "Review approved"
-```
-
-**If Reviewer outputs `VERDICT: REJECTED — <issues>`**: transition to DEVELOPING (Developer continues fixing in current session)
-```bash
-${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to DEVELOPING --reason "Review rejected: <issues>"
-```
-Then send the rejection feedback directly to Developer so they can address the issues. Do NOT follow the RESPAWN protocol — teammates stay alive and Developer continues in the current session.
-
-If the DEVELOPING transition is DENIED due to max iterations, follow the max-iterations protocol in the COMMITTING section (ask user, reset-iterations if yes, transition to BLOCKED or ask user to stop the session if no).
-
-### 5. COMMITTING (Developer does this on your instruction)
-
-Announce: `💾 LEAD: COMMITTING`
-
-Message Developer with instructions to:
-- Run `git add` and `git commit` with a clear message
-- Run `git push`
-- Verify working tree is clean with `git status`
-- Report back when done
-
-Wait for Developer's confirmation. Then decide: more iterations or all done?
-
-**More iterations** → transition to RESPAWN:
-```bash
-${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to RESPAWN --reason "Starting iteration N+1: <next task>"
-```
-
-**All iterations done** → transition to PR_CREATION:
-```bash
-${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to PR_CREATION --reason "All iterations complete"
-```
-
-**If max iterations reached, RESPAWN is DENIED with a message saying to ask the user:**
-1. Use AskUserQuestion: "Max iterations reached. Continue with more iterations?"
-2. If user says **yes**:
-   ```bash
-   ${CLAUDE_PLUGIN_ROOT}/bin/wf-client reset-iterations <session-id>
-   ```
-   Then retry:
-   ```bash
-   ${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to RESPAWN --reason "User approved more iterations"
-   ```
-3. If user says **no**: transition to PR_CREATION instead.
-
-### 6. PR_CREATION (Developer does this on your instruction)
-
-Announce: `🚀 LEAD: PR_CREATION`
-
-Message Developer with instructions to create a draft pull request **against `BASE_BRANCH`**:
-```bash
-gh pr create --draft --base BASE_BRANCH --title "<title>" --body "<description with test plan>"
-```
-
-Developer reports the PR URL back to you.
-
-Wait for CI checks to pass, then transition:
-```bash
-${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to FEEDBACK --reason "PR created: <url>, CI passing"
-```
-
-### 7. FEEDBACK (triage human PR comments)
-
-Announce: `💬 LEAD: FEEDBACK`
-
-**Step 1: Initialize comment tracking**
-
-Initialize `SEEN_COMMENT_IDS` as an empty set. This is used to track which comments have already been processed (by ID), so new comments are reliably detected across every poll cycle.
-
-**Step 2: Poll loop — ALL THREE checks are MANDATORY on every cycle**
-
-Do NOT stop and wait. Run a continuous polling loop. Each cycle must execute ALL three checks — do NOT skip any:
-
-```bash
-sleep 60
-```
-
-**2a.** Check approval and merge status:
-```bash
-gh pr view --json reviewDecision,state
-```
-If `reviewDecision: APPROVED` or `state: MERGED` → go to Step 5.
-
-**2b.** Fetch ALL inline review comments and filter out already-seen ones:
-```bash
-gh api repos/{owner}/{repo}/pulls/{number}/comments \
-  --jq '[.[] | {id, path, line, body, in_reply_to_id, created_at}]'
-```
-Compare returned IDs against `SEEN_COMMENT_IDS` set. Any new IDs = new comments.
-
-**2c.** Fetch ALL PR-level comments and filter out already-seen ones:
-```bash
-gh pr view --json comments --jq '[.comments[] | {id: .id, body: .body, createdAt: .createdAt}]'
-```
-Compare returned IDs against `SEEN_COMMENT_IDS` set. Any new IDs = new comments.
-
-Add new comment IDs to `SEEN_COMMENT_IDS` after each cycle. If 2b or 2c returned new comments → go to Step 3. Otherwise → repeat from `sleep 60`.
-
-**WARNING:** `gh pr view --json comments` (2c) only returns PR-level comments, NOT inline code review comments or thread replies. Step 2b is MANDATORY — without it you will miss all inline review feedback.
-
-**Step 3: When new comments found — triage each comment:**
-- **Accept** — implement the change (will loop back through RESPAWN)
-- **Reject** — provide technical reasoning in the PR comment
-- **Escalate** — transition to BLOCKED if user input needed
-
-**Step 4: Reply to every comment explicitly.**
-
-**CRITICAL timing rule:**
-- **Accepted comments** (changes needed): implement ALL changes first (RESPAWN → DEVELOPING → ... → push), return to FEEDBACK, THEN reply to each comment describing what was done and which commit contains the fix. Do NOT reply "will do X" or "I'll fix this" before the work is done — the reply must describe what WAS done.
-- **Rejected comments** (no changes needed): reply immediately with clear technical reasoning for why the suggestion doesn't apply or would be harmful.
-
-Each reply must be:
-- **Transparent** — clearly state what was done or why not
-- **Concise** — short but with enough context so the reviewer understands without checking code
-- For accepted comments: describe the change made, which files were affected, and which commit SHA
-- For rejected comments: explain the technical reason why the suggestion doesn't apply or would be harmful
-
-**Changes needed** → iterate:
-```bash
-${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to RESPAWN --reason "Implementing feedback: <summary>"
-```
-If RESPAWN is DENIED due to max iterations, follow the max-iterations protocol (ask user, reset-iterations if yes, proceed to COMPLETE if PR approved/no changes needed).
-
-After iterating, return to FEEDBACK and resume the poll loop from Step 2.
-
-**Step 5: Transition to COMPLETE when approved/merged.**
-
-Announce: `✅ LEAD: COMPLETE`
-
-From the poll loop, when `reviewDecision: APPROVED` or `state: MERGED`:
-```bash
-${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to COMPLETE --reason "All PR feedback resolved, PR approved/merged"
-```
-GUARD: COMPLETE requires `reviewDecision=APPROVED` or `state=MERGED`. Transition will be DENIED otherwise.
-
-## BLOCKED State — MANDATORY when you need user input
-
-Announce: `⚠️ LEAD: BLOCKED`
-
-**You CANNOT idle without transitioning to BLOCKED first.**
-The system will DENY your idle attempt with an error. You MUST:
-
-1. Transition to BLOCKED with a clear reason:
-   ```bash
-   ${CLAUDE_PLUGIN_ROOT}/bin/wf-client transition <session-id> --to BLOCKED --reason "<what you need from the user>"
-   ```
-2. Explain the blocker to the user (what decision/info/action is needed)
-3. Wait for user response — the workflow will **automatically return you to your previous phase** when the user responds
-
-**When to transition to BLOCKED:**
-- You need a decision from the user (plan approval, scope question, etc.)
-- A guard denied your transition and you can't fix it yourself
-- Any situation where ONLY the user can unblock you
-
-**When NOT to use BLOCKED:**
-- Waiting for Developer/Reviewer response — they will message you back
-- Between tool calls in normal workflow — keep working
-- In FEEDBACK — you MUST run the polling loop (sleep 60, check PR), do NOT skip it by going to BLOCKED
-
-BLOCKED remembers your previous phase. You can ONLY return to that exact phase.
+NEVER read plugin source code (hook-handler, workflow, guards, config) to find workarounds. The plugin is a black box. If a tool call or transition is denied, follow the denial message — do not reverse-engineer the system.
 
 ## Iteration Tracking
 
-Each time the workflow enters RESPAWN (from COMMITTING or FEEDBACK), that's a new iteration. The workflow tracks two counters:
-- **iteration**: resettable counter used for guard checks (shown in status)
-- **total_iterations**: cumulative count that never resets (shown in dashboard as "N total")
+Each RESPAWN entry (from COMMITTING or FEEDBACK) is a new iteration. Two counters:
+- **iteration**: resettable, used for guard checks (shown in status)
+- **total_iterations**: cumulative, never resets (shown in dashboard)
 
-If the maximum iteration count is reached, RESPAWN transitions will be DENIED with a message instructing you to ask the user. If the user approves, run `wf-client reset-iterations <session-id>` to reset the counter, then retry the RESPAWN transition. The total_iterations counter keeps its value for visibility.
+If max iterations reached, RESPAWN will be DENIED with instructions to ask the user. If approved: `${CLAUDE_PLUGIN_ROOT}/bin/wf-client reset-iterations <session-id>`, then retry.
 
 ## Important
 
 - Always check `${CLAUDE_PLUGIN_ROOT}/bin/wf-client status <session-id>` if unsure about current phase
-- Every action you and your teammates take is tracked in Temporal (http://localhost:8080)
+- Every action is tracked in Temporal (http://localhost:8080)
 - **Transition exit code 0 = ALLOWED, exit code 1 = DENIED** — always check the output
