@@ -69,7 +69,12 @@ func EvalCheck(check Check, ctx CheckContext) string {
 
 	case "command_ran":
 		cmds := ctx.CommandsRan()
-		if cmds[check.Key] {
+		// Prefer Category; fall back to Key for backwards compatibility.
+		key := check.Category
+		if key == "" {
+			key = check.Key
+		}
+		if cmds[key] {
 			return ""
 		}
 		return check.Message

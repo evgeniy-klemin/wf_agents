@@ -271,6 +271,25 @@ func TestEvalCheck_CommandRanFail_CategoryNotSet(t *testing.T) {
 	assert.Equal(t, "tests not run", EvalCheck(c, ctx))
 }
 
+func TestEvalCheck_CommandRanPass_Category(t *testing.T) {
+	c := Check{Type: "command_ran", Category: "lint", Message: "lint not run"}
+	ctx := &simpleCtx{commandsRan: map[string]bool{"lint": true}}
+	assert.Empty(t, EvalCheck(c, ctx))
+}
+
+func TestEvalCheck_CommandRanFail_Category(t *testing.T) {
+	c := Check{Type: "command_ran", Category: "lint", Message: "lint not run"}
+	ctx := &simpleCtx{commandsRan: map[string]bool{"test": true}}
+	assert.Equal(t, "lint not run", EvalCheck(c, ctx))
+}
+
+func TestEvalCheck_CommandRan_CategoryTakesPrecedenceOverKey(t *testing.T) {
+	// When both Category and Key are set, Category wins.
+	c := Check{Type: "command_ran", Category: "lint", Key: "test", Message: "lint not run"}
+	ctx := &simpleCtx{commandsRan: map[string]bool{"test": true}} // only Key is in map
+	assert.Equal(t, "lint not run", EvalCheck(c, ctx))
+}
+
 func TestEvalCheck_UnknownTypeFailsSafe(t *testing.T) {
 	c := Check{Type: "totally_unknown"}
 	ctx := &simpleCtx{}

@@ -1,14 +1,18 @@
 # Project-level overrides for wf-agents plugin.
 # Copy to .wf-agents.yaml in your target project and customize.
 # Merged on top of plugin defaults (internal/config/defaults.yaml).
+#
+# teammate_idle rules match by PHASE NAME (e.g. DEVELOPING, REVIEWING, "*").
+# Exact phase matches take priority over the wildcard ("*") fallback.
 
 teammate_idle:
-  # Developer must run lint before going idle
-  - match: "developer*"
+  # Override the DEVELOPING rule: require lint to have run before any agent goes idle.
+  # (Replaces the default DEVELOPING rule from defaults.yaml.)
+  - match: DEVELOPING
     checks:
       - type: command_ran
         category: lint
-        message: "Run lint before going idle"
-  # Reviewer idles freely (no extra checks)
-  - match: "reviewer*"
+        message: "Run lint before going idle (e.g. 'make lint')"
+  # In REVIEWING, all agents idle freely.
+  - match: REVIEWING
     checks: []

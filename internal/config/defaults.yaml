@@ -88,12 +88,12 @@ guards:
         message: "max iterations reached. Ask the user whether to continue. If yes, run: wf-client reset-iterations <workflow-id>, then retry this transition."
 
 teammate_idle:
-  # Developer cannot go idle in DEVELOPING without finishing work.
+  # In DEVELOPING, developers must not go idle — only reviewers may.
   - match: DEVELOPING
     checks:
       - type: role_check
         key: developer
-        message: "Developer cannot go idle in DEVELOPING without finishing work. Complete your task and message the Team Lead."
+        message: "Developers must not go idle in DEVELOPING — delegate work to a developer teammate or transition the phase."
   # All other phases: no constraints on teammate idle.
   - match: "*"
     checks: []

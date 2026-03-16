@@ -54,9 +54,11 @@ func mergeGuards(base, override []GuardRule) []GuardRule {
 				// Remove all rules for this from+to pair
 				result[idx] = GuardRule{From: r.From, To: r.To, Disabled: true}
 			} else {
-				// Append checks to existing rule
+				// Deep copy base Checks before appending to avoid mutating the base slice.
 				existing := result[idx]
-				existing.Checks = append(existing.Checks, r.Checks...)
+				merged := make([]Check, len(existing.Checks), len(existing.Checks)+len(r.Checks))
+				copy(merged, existing.Checks)
+				existing.Checks = append(merged, r.Checks...)
 				result[idx] = existing
 			}
 		} else {
