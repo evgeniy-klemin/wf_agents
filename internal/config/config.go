@@ -7,6 +7,15 @@ type Config struct {
 	Tracking     TrackingConfig `yaml:"tracking"`
 	Guards       []GuardRule    `yaml:"guards"`
 	TeammateIdle []IdleRule     `yaml:"teammate_idle"`
+	LeadIdle     []LeadIdleRule `yaml:"lead_idle"`
+}
+
+// LeadIdleRule controls whether the Team Lead can idle/stop in a given phase.
+// Phase is a phase name or "*" for wildcard matching.
+type LeadIdleRule struct {
+	Phase   string `yaml:"phase"`
+	Deny    bool   `yaml:"deny"`
+	Message string `yaml:"message,omitempty"`
 }
 
 // TrackingConfig maps category name to its tracking configuration.

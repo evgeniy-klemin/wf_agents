@@ -140,6 +140,23 @@ func FindIdleRule(cfg *Config, phase, agentName string) *IdleRule {
 	return wildNoAgent
 }
 
+// FindLeadIdleRule returns the best-matching LeadIdleRule for the given phase.
+// Exact phase match takes priority over wildcard ("*").
+// Returns nil if no rule matches.
+func FindLeadIdleRule(cfg *Config, phase string) *LeadIdleRule {
+	var wildcard *LeadIdleRule
+	for i := range cfg.LeadIdle {
+		r := &cfg.LeadIdle[i]
+		if r.Phase == phase {
+			return r // exact match
+		}
+		if r.Phase == "*" && wildcard == nil {
+			wildcard = r
+		}
+	}
+	return wildcard
+}
+
 // FindGuards returns the GuardRules from cfg that match the given from→to transition.
 // Exact matches (no wildcards) are returned before wildcard matches.
 // Both from and to can be "*" in rules for wildcard matching.

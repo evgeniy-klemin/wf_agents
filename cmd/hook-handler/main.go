@@ -323,14 +323,11 @@ func main() {
 		isTeammate := input.TeammateName != "" || input.AgentID != ""
 
 		if !isTeammate {
-			// This is the Team Lead going idle.
-			// Lead can only idle in BLOCKED or COMPLETE.
-			if phase != model.PhaseBlocked && phase != model.PhaseComplete {
+			// This is the Team Lead going idle — use config-driven deny rules.
+			if msg := evalLeadStopConfig(input.CWD, string(phase)); msg != "" {
 				pluginRoot := os.Getenv("CLAUDE_PLUGIN_ROOT")
-				reason := fmt.Sprintf(
-					"DENIED: Lead cannot idle in %s. You MUST transition to BLOCKED before stopping. "+
-						"Run: %s/bin/wf-client transition <session-id> --to BLOCKED --reason \"<why you need the user>\"",
-					phase, pluginRoot)
+				reason := fmt.Sprintf("DENIED: %s Run: %s/bin/wf-client transition <session-id> --to BLOCKED --reason \"<why>\"",
+					msg, pluginRoot)
 				fmt.Fprintf(os.Stderr, "%s\n", reason)
 				logResponse(input.SessionID, "TeammateIdle", 2, map[string]string{
 					"action": "keep_working",
@@ -359,17 +356,13 @@ func main() {
 			Detail:    detail,
 		})
 
-		// Deny Stop from Team Lead in phases where no teammates will respond.
-		// In DEVELOPING/REVIEWING/COMMITTING/PR_CREATION the lead can idle-wait for teammate responses.
-		// Returning exit code 2 forces the lead to keep working.
+		// Deny Stop from Team Lead if config says so for this phase.
 		isTeammate := input.TeammateName != "" || input.AgentID != ""
 		if !isTeammate {
 			phase := queryPhase(ctx, c, workflowID)
-			if phase == model.PhasePlanning || phase == model.PhaseFeedback {
-				reason := fmt.Sprintf(
-					"DENIED: Lead cannot stop in %s. You MUST transition to BLOCKED before stopping. "+
-						"Run: %s/bin/wf-client transition <session-id> --to BLOCKED --reason \"<why you need the user>\"",
-					phase, os.Getenv("CLAUDE_PLUGIN_ROOT"))
+			if msg := evalLeadStopConfig(input.CWD, string(phase)); msg != "" {
+				reason := fmt.Sprintf("DENIED: %s Run: %s/bin/wf-client transition <session-id> --to BLOCKED --reason \"<why>\"",
+					msg, os.Getenv("CLAUDE_PLUGIN_ROOT"))
 				fmt.Fprintf(os.Stderr, "%s\n", reason)
 				logResponse(input.SessionID, "Stop", 2, map[string]string{
 					"action": "keep_working",
@@ -849,4 +842,23 @@ func evalTeammateIdleConfig(projectDir, phase, teammateName string, commandsRan 
 	}
 	ctx := &idleCheckContext{commandsRan: commandsRan}
 	return config.EvalChecks(rule.Checks, ctx)
+}
+
+// evalLeadStopConfig loads the project config and checks whether the Team Lead is allowed
+// to stop/idle in the given phase. Returns a non-empty denial message if stopping is denied.
+func evalLeadStopConfig(projectDir, phase string) string {
+	cfg, err := config.LoadConfig(projectDir)
+	if err != nil {
+		// Config load failure: allow stop to avoid blocking the lead unexpectedly.
+		fmt.Fprintf(os.Stderr, "Warning: failed to load config: %v\n", err)
+		return ""
+	}
+	rule := config.FindLeadIdleRule(cfg, phase)
+	if rule == nil || !rule.Deny {
+		return ""
+	}
+	if rule.Message != "" {
+		return rule.Message
+	}
+	return fmt.Sprintf("Lead cannot stop in %s — transition to BLOCKED first", phase)
 }

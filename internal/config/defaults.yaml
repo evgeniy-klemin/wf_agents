@@ -103,3 +103,16 @@ teammate_idle:
   #   checks: []
   - phase: "*"
     checks: []
+
+lead_idle:
+  # Deny lead idle in PLANNING — no teammates to respond
+  - phase: PLANNING
+    deny: true
+    message: "No teammates in PLANNING — transition to BLOCKED before stopping"
+  # Deny lead idle in FEEDBACK — teammates idle/absent
+  - phase: FEEDBACK
+    deny: true
+    message: "Transition to BLOCKED or continue polling"
+  # Allow in all other phases
+  - phase: "*"
+    deny: false
