@@ -359,6 +359,26 @@ func main() {
 			Detail:    detail,
 		})
 
+		// Deny Stop from Team Lead unless in BLOCKED or COMPLETE.
+		// TeammateIdle is unreliable for the lead (main session), so Stop
+		// is the reliable signal. Returning exit code 2 forces the lead to keep working.
+		isTeammate := input.TeammateName != "" || input.AgentID != ""
+		if !isTeammate {
+			phase := queryPhase(ctx, c, workflowID)
+			if phase != model.PhaseBlocked && phase != model.PhaseComplete {
+				reason := fmt.Sprintf(
+					"DENIED: Lead cannot stop in %s. You MUST transition to BLOCKED before stopping. "+
+						"Run: %s/bin/wf-client transition <session-id> --to BLOCKED --reason \"<why you need the user>\"",
+					phase, os.Getenv("CLAUDE_PLUGIN_ROOT"))
+				fmt.Fprintf(os.Stderr, "%s\n", reason)
+				logResponse(input.SessionID, "Stop", 2, map[string]string{
+					"action": "keep_working",
+					"reason": reason,
+				})
+				os.Exit(2)
+			}
+		}
+
 	case "SessionStart":
 		detail["source"] = input.Source
 		detail["model"] = input.Model

@@ -1727,3 +1727,4 @@ func TestNoDoubleBlockOnPermissionRequest(t *testing.T) {
 	assert.Equal(t, model.PhaseDeveloping, s.preBlockedPhase, "preBlockedPhase should NOT be overwritten")
 	assert.Empty(t, s.events, "no transition event should be emitted when already BLOCKED")
 }
+
