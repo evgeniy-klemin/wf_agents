@@ -359,13 +359,13 @@ func main() {
 			Detail:    detail,
 		})
 
-		// Deny Stop from Team Lead unless in BLOCKED or COMPLETE.
-		// TeammateIdle is unreliable for the lead (main session), so Stop
-		// is the reliable signal. Returning exit code 2 forces the lead to keep working.
+		// Deny Stop from Team Lead in phases where no teammates will respond.
+		// In DEVELOPING/REVIEWING/COMMITTING/PR_CREATION the lead can idle-wait for teammate responses.
+		// Returning exit code 2 forces the lead to keep working.
 		isTeammate := input.TeammateName != "" || input.AgentID != ""
 		if !isTeammate {
 			phase := queryPhase(ctx, c, workflowID)
-			if phase != model.PhaseBlocked && phase != model.PhaseComplete {
+			if phase == model.PhasePlanning || phase == model.PhaseFeedback {
 				reason := fmt.Sprintf(
 					"DENIED: Lead cannot stop in %s. You MUST transition to BLOCKED before stopping. "+
 						"Run: %s/bin/wf-client transition <session-id> --to BLOCKED --reason \"<why you need the user>\"",
