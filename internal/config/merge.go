@@ -20,6 +20,9 @@ func MergeConfigs(base, override *Config) *Config {
 	// Merge teammate_idle
 	result.TeammateIdle = mergeIdleRules(base.TeammateIdle, override.TeammateIdle)
 
+	// Merge lead_idle
+	result.LeadIdle = mergeLeadIdleRules(base.LeadIdle, override.LeadIdle)
+
 	return result
 }
 
@@ -77,6 +80,27 @@ func mergeGuards(base, override []GuardRule) []GuardRule {
 		}
 	}
 	return filtered
+}
+
+func mergeLeadIdleRules(base, override []LeadIdleRule) []LeadIdleRule {
+	index := make(map[string]int)
+	result := make([]LeadIdleRule, 0, len(base)+len(override))
+
+	for _, r := range base {
+		index[r.Phase] = len(result)
+		result = append(result, r)
+	}
+
+	for _, r := range override {
+		if idx, exists := index[r.Phase]; exists {
+			result[idx] = r // replace
+		} else {
+			index[r.Phase] = len(result)
+			result = append(result, r)
+		}
+	}
+
+	return result
 }
 
 func idleRuleKey(r IdleRule) string {

@@ -1358,13 +1358,14 @@ func TestNoUnblockOnUserPromptSubmit(t *testing.T) {
 // exact phase before BLOCKED (preBlockedPhase), tested with FEEDBACK as the pre-blocked phase.
 func TestAutoUnblockPreservesPreBlockedPhase(t *testing.T) {
 	s := &sessionState{
-		phase:           model.PhaseBlocked,
-		preBlockedPhase: model.PhaseFeedback,
-		events:          make([]model.WorkflowEvent, 0),
-		activeAgents:    make(map[string]string),
-		commandsRan:     make(map[string]map[string]bool),
-		maxIter:         5,
-		iteration:       1,
+		phase:               model.PhaseBlocked,
+		preBlockedPhase:     model.PhaseFeedback,
+		blockedByPermission: true,
+		events:              make([]model.WorkflowEvent, 0),
+		activeAgents:        make(map[string]string),
+		commandsRan:         make(map[string]map[string]bool),
+		maxIter:             5,
+		iteration:           1,
 	}
 
 	evt := model.SignalHookEvent{
@@ -1373,11 +1374,12 @@ func TestAutoUnblockPreservesPreBlockedPhase(t *testing.T) {
 		Detail:    map[string]string{"agent_type": "developer-1"},
 	}
 
-	// Simulate auto-unblock from BLOCKED via PostToolUse
-	if s.phase == model.PhaseBlocked && s.preBlockedPhase != "" {
+	// Simulate auto-unblock from BLOCKED via PostToolUse (only when blockedByPermission)
+	if s.phase == model.PhaseBlocked && s.preBlockedPhase != "" && s.blockedByPermission {
 		if evt.HookType == "PostToolUse" || evt.HookType == "PostToolUseFailure" {
 			from := s.phase
 			s.phase = s.preBlockedPhase
+			s.blockedByPermission = false
 			s.events = append(s.events, model.WorkflowEvent{
 				Type:      model.EventTransition,
 				SessionID: evt.SessionID,
@@ -1467,16 +1469,17 @@ func TestAutoBlockOnPermissionRequest(t *testing.T) {
 }
 
 // TestAutoUnblockOnPostToolUseAfterPermissionRequest verifies that PostToolUse while in BLOCKED
-// (from a PermissionRequest) returns to preBlockedPhase.
+// (from a PermissionRequest, blockedByPermission=true) returns to preBlockedPhase.
 func TestAutoUnblockOnPostToolUseAfterPermissionRequest(t *testing.T) {
 	s := &sessionState{
-		phase:           model.PhaseBlocked,
-		preBlockedPhase: model.PhaseDeveloping,
-		events:          make([]model.WorkflowEvent, 0),
-		activeAgents:    make(map[string]string),
-		commandsRan:     make(map[string]map[string]bool),
-		maxIter:         5,
-		iteration:       1,
+		phase:               model.PhaseBlocked,
+		preBlockedPhase:     model.PhaseDeveloping,
+		blockedByPermission: true,
+		events:              make([]model.WorkflowEvent, 0),
+		activeAgents:        make(map[string]string),
+		commandsRan:         make(map[string]map[string]bool),
+		maxIter:             5,
+		iteration:           1,
 	}
 
 	evt := model.SignalHookEvent{
@@ -1486,34 +1489,26 @@ func TestAutoUnblockOnPostToolUseAfterPermissionRequest(t *testing.T) {
 		Detail:    map[string]string{"agent_type": "developer-1"},
 	}
 
-	// Simulate the extended auto-unblock logic
-	isTeamLead := evt.Detail["agent_id"] == ""
-	shouldUnblock := false
-	if isTeamLead && evt.HookType == "UserPromptSubmit" {
-		shouldUnblock = true
-	}
-	if evt.HookType == "PostToolUse" || evt.HookType == "PostToolUseFailure" {
-		shouldUnblock = true
-	}
-	if s.phase == model.PhaseBlocked && s.preBlockedPhase != "" && shouldUnblock {
-		from := s.phase
-		s.phase = s.preBlockedPhase
-		reason := "auto: user responded"
+	// Simulate auto-unblock (only when blockedByPermission)
+	if s.phase == model.PhaseBlocked && s.preBlockedPhase != "" && s.blockedByPermission {
 		if evt.HookType == "PostToolUse" || evt.HookType == "PostToolUseFailure" {
-			reason = "auto: permission resolved"
+			from := s.phase
+			s.phase = s.preBlockedPhase
+			s.blockedByPermission = false
+			s.events = append(s.events, model.WorkflowEvent{
+				Type:      model.EventTransition,
+				SessionID: evt.SessionID,
+				Detail: map[string]string{
+					"from":   string(from),
+					"to":     string(s.preBlockedPhase),
+					"reason": "auto: permission resolved",
+				},
+			})
 		}
-		s.events = append(s.events, model.WorkflowEvent{
-			Type:      model.EventTransition,
-			SessionID: evt.SessionID,
-			Detail: map[string]string{
-				"from":   string(from),
-				"to":     string(s.preBlockedPhase),
-				"reason": reason,
-			},
-		})
 	}
 
 	assert.Equal(t, model.PhaseDeveloping, s.phase, "phase should return to DEVELOPING after PostToolUse")
+	assert.False(t, s.blockedByPermission, "blockedByPermission should be cleared after unblock")
 
 	hasUnblock := false
 	for _, e := range s.events {
@@ -1531,13 +1526,14 @@ func TestAutoUnblockOnPostToolUseAfterPermissionRequest(t *testing.T) {
 // (user denied the permission) while in BLOCKED also returns to preBlockedPhase.
 func TestAutoUnblockOnPostToolUseFailureAfterPermissionRequest(t *testing.T) {
 	s := &sessionState{
-		phase:           model.PhaseBlocked,
-		preBlockedPhase: model.PhaseDeveloping,
-		events:          make([]model.WorkflowEvent, 0),
-		activeAgents:    make(map[string]string),
-		commandsRan:     make(map[string]map[string]bool),
-		maxIter:         5,
-		iteration:       1,
+		phase:               model.PhaseBlocked,
+		preBlockedPhase:     model.PhaseDeveloping,
+		blockedByPermission: true,
+		events:              make([]model.WorkflowEvent, 0),
+		activeAgents:        make(map[string]string),
+		commandsRan:         make(map[string]map[string]bool),
+		maxIter:             5,
+		iteration:           1,
 	}
 
 	evt := model.SignalHookEvent{
@@ -1547,45 +1543,36 @@ func TestAutoUnblockOnPostToolUseFailureAfterPermissionRequest(t *testing.T) {
 		Detail:    map[string]string{"agent_type": "developer-1"},
 	}
 
-	// Simulate the extended auto-unblock logic
-	isTeamLead := evt.Detail["agent_id"] == ""
-	shouldUnblock := false
-	if isTeamLead && evt.HookType == "UserPromptSubmit" {
-		shouldUnblock = true
-	}
-	if evt.HookType == "PostToolUse" || evt.HookType == "PostToolUseFailure" {
-		shouldUnblock = true
-	}
-	if s.phase == model.PhaseBlocked && s.preBlockedPhase != "" && shouldUnblock {
-		from := s.phase
-		s.phase = s.preBlockedPhase
-		reason := "auto: user responded"
+	// Simulate auto-unblock (only when blockedByPermission)
+	if s.phase == model.PhaseBlocked && s.preBlockedPhase != "" && s.blockedByPermission {
 		if evt.HookType == "PostToolUse" || evt.HookType == "PostToolUseFailure" {
-			reason = "auto: permission resolved"
+			from := s.phase
+			s.phase = s.preBlockedPhase
+			s.blockedByPermission = false
+			s.events = append(s.events, model.WorkflowEvent{
+				Type:      model.EventTransition,
+				SessionID: evt.SessionID,
+				Detail: map[string]string{
+					"from":   string(from),
+					"to":     string(s.preBlockedPhase),
+					"reason": "auto: permission resolved",
+				},
+			})
 		}
-		s.events = append(s.events, model.WorkflowEvent{
-			Type:      model.EventTransition,
-			SessionID: evt.SessionID,
-			Detail: map[string]string{
-				"from":   string(from),
-				"to":     string(s.preBlockedPhase),
-				"reason": reason,
-			},
-		})
 	}
 
 	assert.Equal(t, model.PhaseDeveloping, s.phase, "phase should return to DEVELOPING after PostToolUseFailure")
 
-	hasUnblock := false
+	hasUnlock := false
 	for _, e := range s.events {
 		if e.Type == model.EventTransition && e.Detail["from"] == "BLOCKED" && e.Detail["to"] == "DEVELOPING" {
 			if e.Detail["reason"] == "auto: permission resolved" {
-				hasUnblock = true
+				hasUnlock = true
 				break
 			}
 		}
 	}
-	assert.True(t, hasUnblock, "should have auto-unblock transition event after PostToolUseFailure")
+	assert.True(t, hasUnlock, "should have auto-unblock transition event after PostToolUseFailure")
 }
 
 // TestNoDoubleBlockOnPermissionRequest verifies that a PermissionRequest while already in BLOCKED
@@ -1637,5 +1624,48 @@ func TestNoDoubleBlockOnPermissionRequest(t *testing.T) {
 	assert.Equal(t, model.PhaseBlocked, s.phase, "phase should remain BLOCKED")
 	assert.Equal(t, model.PhaseDeveloping, s.preBlockedPhase, "preBlockedPhase should NOT be overwritten")
 	assert.Empty(t, s.events, "no transition event should be emitted when already BLOCKED")
+}
+
+// TestNoUnblockOnPostToolUseWithoutPermissionRequest verifies that PostToolUse does NOT
+// auto-unblock when BLOCKED was set manually (blockedByPermission=false).
+func TestNoUnblockOnPostToolUseWithoutPermissionRequest(t *testing.T) {
+	s := &sessionState{
+		phase:               model.PhaseBlocked,
+		preBlockedPhase:     model.PhaseDeveloping,
+		blockedByPermission: false, // manual BLOCKED, not from PermissionRequest
+		events:              make([]model.WorkflowEvent, 0),
+		activeAgents:        make(map[string]string),
+		commandsRan:         make(map[string]map[string]bool),
+		maxIter:             5,
+		iteration:           1,
+	}
+
+	evt := model.SignalHookEvent{
+		HookType:  "PostToolUse",
+		SessionID: "test",
+		Tool:      "Bash",
+		Detail:    map[string]string{"agent_type": "developer-1"},
+	}
+
+	// Simulate auto-unblock (only when blockedByPermission)
+	if s.phase == model.PhaseBlocked && s.preBlockedPhase != "" && s.blockedByPermission {
+		if evt.HookType == "PostToolUse" || evt.HookType == "PostToolUseFailure" {
+			from := s.phase
+			s.phase = s.preBlockedPhase
+			s.blockedByPermission = false
+			s.events = append(s.events, model.WorkflowEvent{
+				Type:      model.EventTransition,
+				SessionID: evt.SessionID,
+				Detail: map[string]string{
+					"from":   string(from),
+					"to":     string(s.preBlockedPhase),
+					"reason": "auto: permission resolved",
+				},
+			})
+		}
+	}
+
+	assert.Equal(t, model.PhaseBlocked, s.phase, "PostToolUse should NOT unblock when blockedByPermission is false")
+	assert.Empty(t, s.events, "no transition event should be emitted for PostToolUse on manual BLOCKED")
 }
 
