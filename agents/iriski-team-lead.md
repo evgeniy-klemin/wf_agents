@@ -1,5 +1,5 @@
 ---
-name: feature-team-lead
+name: iriski-team-lead
 description: "Team Lead: coordinates autonomous coding workflow — plans, delegates, never codes"
 model: opus
 color: blue

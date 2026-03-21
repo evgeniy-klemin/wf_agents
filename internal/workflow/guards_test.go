@@ -41,7 +41,15 @@ func TestValidateTransition(t *testing.T) {
 			state:    makeState(model.PhaseCommitting, "", 1, 5, nil),
 			from:     model.PhaseCommitting,
 			to:       model.PhasePRCreation,
-			evidence: map[string]string{"working_tree_clean": "true"},
+			evidence: map[string]string{"working_tree_clean": "true", "branch_pushed": "true"},
+		},
+		{
+			name:     "COMMITTING clean tree branch not pushed → PR_CREATION DENY",
+			state:    makeState(model.PhaseCommitting, "", 1, 5, nil),
+			from:     model.PhaseCommitting,
+			to:       model.PhasePRCreation,
+			evidence: map[string]string{"working_tree_clean": "true", "branch_pushed": "false"},
+			wantDeny: true,
 		},
 		{
 			name:     "COMMITTING dirty tree → PR_CREATION DENY",
@@ -123,22 +131,23 @@ func TestValidateTransition(t *testing.T) {
 		},
 
 		// ---------------------------------------------------------------
-		// PR_CREATION → FEEDBACK: requires PR checks pass
+		// PR_CREATION → FEEDBACK: no guard (ci_passed check is commented out in config)
 		// ---------------------------------------------------------------
 		{
 			name:     "PR_CREATION checks pass → FEEDBACK ALLOW",
 			state:    makeState(model.PhasePRCreation, "", 1, 5, nil),
 			from:     model.PhasePRCreation,
 			to:       model.PhaseFeedback,
-			evidence: map[string]string{"pr_checks_pass": "true"},
+			evidence: map[string]string{"ci_passed": "true"},
 		},
 		{
-			name:     "PR_CREATION checks fail → FEEDBACK DENY",
+			// ci_passed check is disabled (when: "" in config) — transition always allowed.
+			name:     "PR_CREATION checks fail → FEEDBACK ALLOW (no guard)",
 			state:    makeState(model.PhasePRCreation, "", 1, 5, nil),
 			from:     model.PhasePRCreation,
 			to:       model.PhaseFeedback,
-			evidence: map[string]string{"pr_checks_pass": "false"},
-			wantDeny: true,
+			evidence: map[string]string{"ci_passed": "false"},
+			wantDeny: false,
 		},
 
 		// ---------------------------------------------------------------
@@ -149,21 +158,21 @@ func TestValidateTransition(t *testing.T) {
 			state:    makeState(model.PhaseFeedback, "", 1, 5, nil),
 			from:     model.PhaseFeedback,
 			to:       model.PhaseComplete,
-			evidence: map[string]string{"pr_approved": "true", "pr_merged": "false"},
+			evidence: map[string]string{"review_approved": "true", "merged": "false"},
 		},
 		{
 			name:     "FEEDBACK PR merged → COMPLETE ALLOW",
 			state:    makeState(model.PhaseFeedback, "", 1, 5, nil),
 			from:     model.PhaseFeedback,
 			to:       model.PhaseComplete,
-			evidence: map[string]string{"pr_approved": "false", "pr_merged": "true"},
+			evidence: map[string]string{"review_approved": "false", "merged": "true"},
 		},
 		{
 			name:     "FEEDBACK neither approved nor merged → COMPLETE DENY",
 			state:    makeState(model.PhaseFeedback, "", 1, 5, nil),
 			from:     model.PhaseFeedback,
 			to:       model.PhaseComplete,
-			evidence: map[string]string{"pr_approved": "false", "pr_merged": "false"},
+			evidence: map[string]string{"review_approved": "false", "merged": "false"},
 			wantDeny: true,
 		},
 		{
@@ -251,15 +260,35 @@ func TestValidateTransition(t *testing.T) {
 		},
 
 		// ---------------------------------------------------------------
-		// No guards for other transitions
+		// PLANNING → RESPAWN: clean working tree required
 		// ---------------------------------------------------------------
 		{
-			name:     "PLANNING → RESPAWN no guards",
+			name:     "PLANNING clean tree → RESPAWN ALLOW",
+			state:    makeState(model.PhasePlanning, "", 1, 5, nil),
+			from:     model.PhasePlanning,
+			to:       model.PhaseRespawn,
+			evidence: map[string]string{"working_tree_clean": "true"},
+		},
+		{
+			name:     "PLANNING dirty tree → RESPAWN DENY",
+			state:    makeState(model.PhasePlanning, "", 1, 5, nil),
+			from:     model.PhasePlanning,
+			to:       model.PhaseRespawn,
+			evidence: map[string]string{"working_tree_clean": "false"},
+			wantDeny: true,
+		},
+		{
+			name:     "PLANNING no evidence → RESPAWN DENY",
 			state:    makeState(model.PhasePlanning, "", 1, 5, nil),
 			from:     model.PhasePlanning,
 			to:       model.PhaseRespawn,
 			evidence: nil,
+			wantDeny: true,
 		},
+
+		// ---------------------------------------------------------------
+		// No guards for other transitions
+		// ---------------------------------------------------------------
 		{
 			name:     "REVIEWING → COMMITTING no guards",
 			state:    makeState(model.PhaseReviewing, "", 1, 5, nil),

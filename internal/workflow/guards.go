@@ -29,13 +29,13 @@ type sessionCheckContext struct {
 	originPhase string
 }
 
-func (c *sessionCheckContext) Evidence() map[string]string    { return c.evidence }
-func (c *sessionCheckContext) ActiveAgentCount() int          { return len(c.state.activeAgents) }
-func (c *sessionCheckContext) Iteration() int                 { return c.state.iteration }
-func (c *sessionCheckContext) MaxIterations() int             { return c.state.maxIter }
-func (c *sessionCheckContext) OriginPhase() string            { return c.originPhase }
-func (c *sessionCheckContext) CommandsRan() map[string]bool   { return nil }
-func (c *sessionCheckContext) TeammateName() string           { return "" }
+func (c *sessionCheckContext) Evidence() map[string]string  { return c.evidence }
+func (c *sessionCheckContext) ActiveAgentCount() int        { return len(c.state.activeAgents) }
+func (c *sessionCheckContext) Iteration() int               { return c.state.iteration }
+func (c *sessionCheckContext) MaxIterations() int           { return c.state.maxIter }
+func (c *sessionCheckContext) OriginPhase() string          { return c.originPhase }
+func (c *sessionCheckContext) CommandsRan() map[string]bool { return nil }
+func (c *sessionCheckContext) TeammateName() string         { return "" }
 
 // validateTransition checks whether the transition from→to is allowed given the current
 // session state and evidence. Returns "" to allow, or a non-empty denial reason.
@@ -70,7 +70,12 @@ func validateTransition(s *sessionState, from, to model.Phase, evidence map[stri
 	fromStr, toStr := string(from), string(to)
 
 	// Validate that this transition exists in the state machine.
-	if !isValidTransition(from, to) {
+	// Prefer flow snapshot; fall back to guardConfig for workflows started without a snapshot.
+	if s.flow != nil {
+		if !s.flow.IsValidTransition(fromStr, toStr) {
+			return fmt.Sprintf("transition %s → %s is not allowed", from, to)
+		}
+	} else if !guardConfig.IsValidTransition(fromStr, toStr) {
 		return fmt.Sprintf("transition %s → %s is not allowed", from, to)
 	}
 
@@ -95,38 +100,14 @@ func validateTransition(s *sessionState, from, to model.Phase, evidence map[stri
 	return ""
 }
 
-// validTransitions is the set of allowed phase transitions in the state machine.
-// BLOCKED transitions are handled specially in validateTransition and not listed here.
-var validTransitions = map[model.Phase][]model.Phase{
-	model.PhasePlanning:   {model.PhaseRespawn},
-	model.PhaseRespawn:    {model.PhaseDeveloping},
-	model.PhaseDeveloping: {model.PhaseReviewing},
-	model.PhaseReviewing:  {model.PhaseCommitting, model.PhaseDeveloping},
-	model.PhaseCommitting: {model.PhaseRespawn, model.PhasePRCreation},
-	model.PhasePRCreation: {model.PhaseFeedback},
-	model.PhaseFeedback:   {model.PhaseComplete, model.PhaseRespawn},
-}
-
-// isValidTransition returns true if from→to is a defined state machine transition.
-func isValidTransition(from, to model.Phase) bool {
-	for _, allowed := range validTransitions[from] {
-		if allowed == to {
-			return true
-		}
-	}
-	return false
-}
-
 // --- Tool permission enforcement ---
 //
 // Rules:
-// - Team Lead (main agent, not a teammate): Edit/Write/NotebookEdit are always forbidden —
-//   Team Lead must delegate file changes to Developer teammate.
+// - Team Lead (main agent, not a teammate): file-writing tools (Edit/Write/NotebookEdit) are
+//   always forbidden — Team Lead must delegate file changes to Developer teammate.
 // - PLANNING and RESPAWN: all file writes (Edit/Write/NotebookEdit) are forbidden for everyone.
 // - Global: git commit, git push, git checkout, git add are forbidden in ALL phases
-//   except per-phase exemptions:
-//     PLANNING: git checkout allowed
-//     COMMITTING: git add, git commit, git push allowed
+//   except per-phase whitelists from config.
 // - No other tool restrictions (BLOCKED, COMPLETE, etc. have no enforcement)
 
 // ToolPermissionResult indicates whether a tool use is allowed.
@@ -136,25 +117,24 @@ type ToolPermissionResult struct {
 	Reason  string
 }
 
-// fileWritingTools are tools that modify files.
-var fileWritingTools = map[string]bool{
-	"Edit": true, "Write": true, "NotebookEdit": true,
+// isFileWritingTool returns true if the tool modifies files, using config.
+func isFileWritingTool(toolName string) bool {
+	for _, t := range guardConfig.FileWritingTools() {
+		if t == toolName {
+			return true
+		}
+	}
+	return false
 }
 
-// forbiddenGitCommands are git subcommands forbidden globally by default.
-var forbiddenGitCommands = []string{"git commit", "git push", "git checkout", "git add"}
-
-// gitExemptions lists which git commands are allowed per phase.
-var gitExemptions = map[model.Phase][]string{
-	model.PhasePlanning:   {"git checkout"},
-	model.PhaseCommitting: {"git add", "git commit", "git push"},
-}
-
-// readOnlyTools are tools that only read state and never modify files.
-var readOnlyTools = map[string]bool{
-	"Read": true, "Glob": true, "Grep": true,
-	"WebFetch": true, "WebSearch": true,
-	"ToolSearch": true, "LSP": true,
+// isReadOnlyTool returns true if the tool is read-only, using config.
+func isReadOnlyTool(toolName string) bool {
+	for _, t := range guardConfig.ReadOnlyTools() {
+		if t == toolName {
+			return true
+		}
+	}
+	return false
 }
 
 // isClaudeInfraFile returns true if toolInput contains a file_path that points to
@@ -187,7 +167,7 @@ func CheckToolPermission(
 	// Team Lead cannot edit PROJECT files directly — but CAN write plan/memory files
 	// (Claude Code infra: plan mode and memory system). Must delegate project file changes
 	// to Developer teammate.
-	if isTeamLead && fileWritingTools[toolName] && !isClaudeInfraFile(toolInput) {
+	if isTeamLead && guardConfig.LeadFileWritesDenied() && isFileWritingTool(toolName) && !isClaudeInfraFile(toolInput) {
 		return ToolPermissionResult{
 			Denied: true,
 			Reason: "Team Lead cannot edit files directly — delegate to Developer teammate",
@@ -195,13 +175,21 @@ func CheckToolPermission(
 	}
 
 	// Read-only tools are always allowed — explicitly auto-approve to bypass permission prompts
-	if readOnlyTools[toolName] {
+	if isReadOnlyTool(toolName) {
 		return ToolPermissionResult{Denied: false, Allowed: true}
+	}
+
+	// MCP Jira read tools: auto-approve in any phase (read-only context extraction)
+	if strings.HasPrefix(toolName, "mcp__") {
+		if strings.Contains(toolName, "Atlassian__getJiraIssue") ||
+			strings.Contains(toolName, "Atlassian__searchJiraIssues") {
+			return ToolPermissionResult{Denied: false, Allowed: true}
+		}
 	}
 
 	// PLANNING and RESPAWN: project file writes forbidden, but plan/memory files allowed
 	// so that Claude Code's plan mode and memory system continue to function.
-	if (phase == model.PhasePlanning || phase == model.PhaseRespawn) && fileWritingTools[toolName] && !isClaudeInfraFile(toolInput) {
+	if (phase == model.PhasePlanning || phase == model.PhaseRespawn) && isFileWritingTool(toolName) && !isClaudeInfraFile(toolInput) {
 		return ToolPermissionResult{
 			Denied: true,
 			Reason: fmt.Sprintf("File writes are forbidden in %s phase. %s", phase, PhaseHint(phase)),
@@ -212,7 +200,9 @@ func CheckToolPermission(
 	if !isTeamLead && !isClaudeInfraFile(toolInput) {
 		bashCmd := ""
 		if toolName == "Bash" {
-			var input struct{ Command string `json:"command"` }
+			var input struct {
+				Command string `json:"command"`
+			}
 			json.Unmarshal(toolInput, &input)
 			bashCmd = strings.TrimSpace(input.Command)
 		}
@@ -264,42 +254,11 @@ func IsTeammate(agentID string, activeAgents []string) bool {
 	return agentID != ""
 }
 
-// safeGitSubcommands are read-only git subcommands allowed in PLANNING.
-// For multi-word subcommands like "stash list", only the exact combination is allowed
-// (handled separately in isAllowedGitInPlanning).
-var safeGitSubcommands = map[string]bool{
-	"status": true, "log": true, "diff": true, "show": true,
-	"branch": true, "remote": true, "tag": true, "describe": true,
-	"rev-parse": true, "ls-files": true, "ls-tree": true,
-	"blame": true, "shortlog": true,
-	"config": true, "help": true, "version": true,
-	"checkout": true, // allowed in PLANNING for branch creation
-	"pull": true, "fetch": true,
-}
-
-// safeGitStashSubcommands are the stash sub-operations that are read-only.
-var safeGitStashSubcommands = map[string]bool{
-	"list": true, "show": true,
-}
-
-// autoApproveBashPrefixes is a narrow list of commands safe to auto-approve
-// (bypass permission prompts) in any phase. Much smaller than safeBashPrefixes
-// which is used for PLANNING whitelist only.
-var autoApproveBashPrefixes = []string{
-	"go test", "go vet", "go build", "go list", "go mod", "go clean",
-	"npm test", "npm run lint", "cargo test", "cargo check",
-	"python -m pytest", "pytest",
-	"wf-client",
-	// Read-only shell utilities safe to auto-approve in any phase
-	"ls", "cat", "head", "tail", "wc", "file",
-	"grep", "rg", "awk", "sort", "uniq", "diff",
-	"echo", "printf", "true", "false", "test", "[",
-	"pwd",
-	"jq", "yq", "gofmt",
-}
-
+// isAutoApproveBashCommand returns true if the command matches a safe command from config.
+// Tries both exact prefix match and basename matching for absolute paths.
 func isAutoApproveBashCommand(cmd string) bool {
-	for _, prefix := range autoApproveBashPrefixes {
+	safeCommands := guardConfig.SafeCommands()
+	for _, prefix := range safeCommands {
 		if matchesBashPrefix(cmd, prefix) {
 			return true
 		}
@@ -312,7 +271,7 @@ func isAutoApproveBashCommand(cmd string) bool {
 		if rest != "" {
 			cmdWithBase = base + " " + rest
 		}
-		for _, prefix := range autoApproveBashPrefixes {
+		for _, prefix := range safeCommands {
 			if matchesBashPrefix(cmdWithBase, prefix) {
 				return true
 			}
@@ -322,6 +281,8 @@ func isAutoApproveBashCommand(cmd string) bool {
 }
 
 // autoApproveGitSubcommands are git subcommands safe to auto-approve (truly read-only).
+// These are kept in Go because they represent a fixed set of read-only git operations
+// that bypass the permission prompt without needing to be in the PLANNING whitelist.
 var autoApproveGitSubcommands = map[string]bool{
 	"status": true, "log": true, "diff": true, "show": true,
 	"branch": true, "remote": true, "tag": true,
@@ -351,25 +312,34 @@ func isAutoApproveGitCommand(seg string) bool {
 	return autoApproveGitSubcommands[parts[idx]]
 }
 
-// safeBashPrefixes are read-only bash commands allowed in PLANNING.
-var safeBashPrefixes = []string{
-	"ls", "cat", "head", "tail", "less", "more", "wc", "file",
-	"find", "grep", "rg", "ag", "awk", "sort", "uniq", "diff",
-	"which", "where", "type", "command", "echo", "printf",
-	"pwd", "cd", "tree", "stat", "du", "df",
-	"gh pr view", "gh pr list", "gh pr checks", "gh pr diff",
-	"gh issue view", "gh issue list",
-	"gh api", "gh repo view",
-	"go test", "go vet", "go build", "go list", "go mod",
-	"npm test", "npm run lint", "npx", "yarn test",
-	"make", "cargo test", "cargo check", "cargo clippy",
-	"python -m pytest", "pytest", "python -c",
-	"jq", "yq", "curl", "wget",
-	"env", "printenv", "set", "export",
-	"date", "uname", "whoami", "hostname",
-	"true", "false", "test", "[",
-	"wf-client",
+// isPhaseWhitelistedCommand returns true if the command matches the phase whitelist from config.
+func isPhaseWhitelistedCommand(phase model.Phase, cmd string) bool {
+	whitelist := guardConfig.PhaseWhitelist(string(phase))
+	for _, prefix := range whitelist {
+		if matchesBashPrefix(cmd, prefix) {
+			return true
+		}
+	}
+	// Also try basename matching for absolute paths
+	firstWord, rest, _ := strings.Cut(cmd, " ")
+	if strings.Contains(firstWord, "/") {
+		base := filepath.Base(firstWord)
+		cmdWithBase := base
+		if rest != "" {
+			cmdWithBase = base + " " + rest
+		}
+		for _, prefix := range whitelist {
+			if matchesBashPrefix(cmdWithBase, prefix) {
+				return true
+			}
+		}
+	}
+	return false
 }
+
+// forbiddenGitCommands are git subcommands forbidden globally by default.
+// These are kept in Go as a fixed set that the config-driven whitelists override per-phase.
+var forbiddenGitCommands = []string{"git commit", "git push", "git checkout", "git add"}
 
 // checkBashPermission enforces bash command restrictions per phase.
 func checkBashPermission(phase model.Phase, toolInput json.RawMessage) ToolPermissionResult {
@@ -389,9 +359,26 @@ func checkBashPermission(phase model.Phase, toolInput json.RawMessage) ToolPermi
 		return checkPlanningBash(cmd)
 	}
 
-	// Other phases: blacklist approach — block specific git commands.
+	// PR_CREATION: auto-approve commands matching safe_commands + PR_CREATION whitelist
+	if phase == model.PhasePRCreation {
+		allApproved := true
+		for _, segment := range splitBashCommands(cmd) {
+			seg := strings.TrimSpace(segment)
+			if seg == "" {
+				continue
+			}
+			if !isAutoApproveBashCommand(seg) && !isAutoApproveGitCommand(seg) && !isPhaseWhitelistedCommand(phase, seg) {
+				allApproved = false
+				break
+			}
+		}
+		if allApproved {
+			return ToolPermissionResult{Denied: false, Allowed: true}
+		}
+	}
+
+	// Other phases: blacklist approach — block specific git commands unless in phase whitelist.
 	// Split on pipes/chains so "git add . && git commit" is caught.
-	exemptions := gitExemptions[phase]
 	allSegmentsSafe := true
 	for _, segment := range splitBashCommands(cmd) {
 		seg := strings.TrimSpace(segment)
@@ -400,14 +387,7 @@ func checkBashPermission(phase model.Phase, toolInput json.RawMessage) ToolPermi
 		}
 		for _, forbidden := range forbiddenGitCommands {
 			if matchesBashPrefix(seg, forbidden) {
-				exempted := false
-				for _, ex := range exemptions {
-					if ex == forbidden {
-						exempted = true
-						break
-					}
-				}
-				if !exempted {
+				if !isPhaseWhitelistedCommand(phase, forbidden) {
 					return ToolPermissionResult{
 						Denied: true,
 						Reason: fmt.Sprintf("%q is not allowed in %s phase. %s", forbidden, phase, PhaseHint(phase)),
@@ -438,7 +418,15 @@ func checkBashPermission(phase model.Phase, toolInput json.RawMessage) ToolPermi
 	return ToolPermissionResult{Denied: false}
 }
 
+// safeGitStashSubcommands are the stash sub-operations that are read-only.
+// Kept in Go because the stash sub-operation check requires multi-word parsing
+// that cannot be expressed as simple prefix matching.
+var safeGitStashSubcommands = map[string]bool{
+	"list": true, "show": true,
+}
+
 // checkPlanningBash uses a whitelist: only safe read-only commands in PLANNING.
+// Combines safe_commands (global defaults) and PLANNING phase whitelist from config.
 func checkPlanningBash(cmd string) ToolPermissionResult {
 	// Handle pipes/chains: check each sub-command
 	for _, segment := range splitBashCommands(cmd) {
@@ -460,6 +448,15 @@ func checkPlanningBash(cmd string) ToolPermissionResult {
 			continue
 		}
 
+		// gofmt can write files (-w flag) — deny explicitly in PLANNING even though
+		// it is in safe_commands for auto-approval in DEVELOPING/REVIEWING phases.
+		if matchesBashPrefix(seg, "gofmt") {
+			return ToolPermissionResult{
+				Denied: true,
+				Reason: fmt.Sprintf("gofmt is only allowed in DEVELOPING and REVIEWING phases, current phase: %s", model.PhasePlanning),
+			}
+		}
+
 		if isSafeBashCommand(seg) {
 			continue
 		}
@@ -476,7 +473,9 @@ func checkPlanningBash(cmd string) ToolPermissionResult {
 	return ToolPermissionResult{Denied: false}
 }
 
-// isAllowedGitInPlanning checks if a git command is safe (read-only) for PLANNING.
+// isAllowedGitInPlanning checks if a git command is allowed in PLANNING.
+// Git commands are checked against the PLANNING phase whitelist from config,
+// with special handling for "git stash" which requires a safe sub-operation.
 func isAllowedGitInPlanning(cmd string) bool {
 	parts := strings.Fields(cmd)
 	if len(parts) < 2 {
@@ -506,33 +505,28 @@ func isAllowedGitInPlanning(cmd string) bool {
 		return safeGitStashSubcommands[parts[idx+1]]
 	}
 
-	return safeGitSubcommands[subCmd]
+	// Check against safe_commands (global defaults) — covers git status, log, diff, etc.
+	if isAutoApproveBashCommand(cmd) {
+		return true
+	}
+
+	// Check against PLANNING phase whitelist — covers git checkout, pull, fetch, etc.
+	return isPhaseWhitelistedCommand(model.PhasePlanning, cmd)
 }
 
-// isSafeBashCommand checks if a command matches any safe prefix for PLANNING.
+// isSafeBashCommand checks if a non-git command matches any safe prefix for PLANNING.
+// Checks both safe_commands (global) and PLANNING whitelist from config.
 // It first tries matching the command as-is, then strips path components from
 // the first word so that "/usr/bin/ls -la" matches prefix "ls" and
 // "/path/to/bin/wf-client status" matches prefix "wf-client".
 func isSafeBashCommand(cmd string) bool {
-	// First try matching as-is
-	for _, prefix := range safeBashPrefixes {
-		if matchesBashPrefix(cmd, prefix) {
-			return true
-		}
+	// Check global safe_commands
+	if isAutoApproveBashCommand(cmd) {
+		return true
 	}
-	// If first word contains a path, try matching by basename
-	firstWord, rest, _ := strings.Cut(cmd, " ")
-	if strings.Contains(firstWord, "/") {
-		base := filepath.Base(firstWord)
-		cmdWithBase := base
-		if rest != "" {
-			cmdWithBase = base + " " + rest
-		}
-		for _, prefix := range safeBashPrefixes {
-			if matchesBashPrefix(cmdWithBase, prefix) {
-				return true
-			}
-		}
+	// Check PLANNING phase whitelist
+	if isPhaseWhitelistedCommand(model.PhasePlanning, cmd) {
+		return true
 	}
 	return false
 }
@@ -588,27 +582,12 @@ func truncateCmd(s string, max int) string {
 }
 
 // PhaseHint returns a short guidance message for denied actions in a phase.
+// BLOCKED hint is hardcoded since BLOCKED is not a config-driven phase.
 func PhaseHint(phase model.Phase) string {
-	switch phase {
-	case model.PhasePlanning:
-		return "Transition to RESPAWN first."
-	case model.PhaseRespawn:
-		return "Only agent management allowed. Transition to DEVELOPING when agents are ready."
-	case model.PhaseReviewing:
-		return "Team Lead must delegate review to Reviewer teammate — do NOT review code directly. If issues found, transition back to DEVELOPING (not RESPAWN)."
-	case model.PhaseCommitting:
-		return "Only git operations are allowed."
-	case model.PhasePRCreation:
-		return "Only PR creation commands allowed."
-	case model.PhaseFeedback:
-		return "Triage PR comments. For accepted comments: implement changes first (RESPAWN → DEVELOPING → ... → push), return to FEEDBACK, THEN reply describing what was done and which commit. For rejected comments: reply immediately with technical reasoning. Do NOT reply 'will do X' before doing X — the reply must describe what WAS done."
-	case model.PhaseComplete:
-		return "Workflow is complete. No further actions needed."
-	case model.PhaseBlocked:
-		return "Waiting for human intervention. Transition back to the pre-blocked phase when unblocked."
-	default:
-		return ""
+	if phase == model.PhaseBlocked {
+		return "You are blocked. Waiting for user to unblock."
 	}
+	return guardConfig.PhaseHint(string(phase))
 }
 
 // matchesBashPrefix checks if a bash command starts with the given prefix at a word boundary.

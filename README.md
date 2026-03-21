@@ -4,6 +4,40 @@
 
 Event-sourced state machine for autonomous Claude Code coding sessions. Tracks development phases, enforces rules via hooks, and provides a real-time web dashboard.
 
+## Known Issues
+
+### Kitty terminal freezes with teammates
+
+On macOS, kitty terminal freezes when Agent Teams teammates are running in background. The only confirmed fix is `kitty-unstick` — a script that periodically sends a no-op escape sequence to prevent hanging.
+
+**Install:**
+```bash
+install -m 755 /dev/stdin ~/.local/bin/kitty-unstick << 'SCRIPT'
+#!/usr/bin/env bash
+# Periodically resizes kitty split to prevent freezes
+# when Claude Code teammates are running.
+# Usage: kitty-unstick [interval_seconds]
+
+INTERVAL="${1:-30}"
+
+echo "Kitty anti-freeze running (every ${INTERVAL}s). Ctrl+C to stop."
+
+while sleep "$INTERVAL"; do
+  sock=$(ls /tmp/kitty-* 2>/dev/null | head -1)
+  if [ -n "$sock" ]; then
+    kitty @ --to "unix:$sock" resize-window -i 1 -a horizontal 2>/dev/null
+    kitty @ --to "unix:$sock" resize-window -i -1 -a horizontal 2>/dev/null
+  fi
+done
+SCRIPT
+```
+
+Run in a separate terminal tab before starting Claude Code:
+```bash
+kitty-unstick        # default 30 sec interval
+kitty-unstick 15     # custom interval
+```
+
 ## Concept
 
 Claude Code runs autonomously. wf-agents is the observer and enforcer:
@@ -15,7 +49,9 @@ Claude Code runs autonomously. wf-agents is the observer and enforcer:
 
 Inspired by [NTCoding/autonomous-claude-agent-team](https://github.com/NTCoding/autonomous-claude-agent-team).
 
-## Phases
+## Phases (default workflow example)
+
+Phases are defined in `workflow/defaults.yaml` and are fully configurable. The default workflow ships with these phases:
 
 ```
 PLANNING → RESPAWN → DEVELOPING → REVIEWING → COMMITTING → PR_CREATION → FEEDBACK → COMPLETE
@@ -34,7 +70,7 @@ Any phase → BLOCKED (pause) → returns to original phase
 | **DEVELOPING** | Developer teammate | TDD: tests → code → refactor. Teammates spawned here via TeamCreate + Agent |
 | **REVIEWING** | Reviewer teammate | git diff, checklist, tests, linting → APPROVED/REJECTED |
 | **COMMITTING** | Developer teammate (on Lead's instruction) | git commit + push. Lead decides: more iterations or PR |
-| **PR_CREATION** | Developer teammate (on Lead's instruction) | `gh pr create --draft`, wait for CI |
+| **PR_CREATION** | Developer teammate (on Lead's instruction) | `glab mr create`, wait for CI |
 | **FEEDBACK** | Team Lead | Validate PR comments, reply to each explicitly |
 | **COMPLETE** | — | Terminal state |
 | **BLOCKED** | — | Pause, waiting for user input |
@@ -42,14 +78,14 @@ Any phase → BLOCKED (pause) → returns to original phase
 ## Quick Start
 
 ```bash
-# 0. Enable Agent Teams (in Claude Code settings.json)
-# "env": { "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1" }
+# 0. Enable Agent Teams in ~/.claude/settings.json:
+# { "env": { "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1" } }
 
 # 1. Infrastructure
 docker compose up -d              # Temporal Server + UI
 
 # 2. Build
-make install                      # bin/{worker,wf-client,hook-handler,wf-web}
+make install                      # bin/{worker,wf-client,hook-handler,wf-web,feedback-poll}
 
 # 3. Worker
 make worker                       # start Temporal worker
@@ -59,7 +95,7 @@ cd /path/to/target-project
 claude --plugin-dir /path/to/wf_agents
 
 # 5. Inside Claude Code, start the workflow
-/wf-agents:start-feature-team --task "Implement feature X"
+/wf-agents:start-iriski-team --task "Implement feature X"
 
 # 6. Web dashboard (optional)
 make web                          # http://localhost:8090
@@ -67,82 +103,88 @@ make web                          # http://localhost:8090
 
 ## Enforcement
 
-### PLANNING — whitelist approach
-Only read-only operations allowed: `Read`, `Glob`, `Grep`, `git status/log/diff/branch/checkout`, `gh`, test commands.
-All Write/Edit and unsafe bash commands are blocked.
+All permissions, guards, and idle rules are defined declaratively in `workflow/defaults.yaml`. The Go code is a generic executor — no phases, transitions, or permissions are hardcoded.
 
-### RESPAWN — write ban
-Edit/Write/NotebookEdit are blocked. Only agent management and reads allowed.
+### How it works
 
-### Global git restrictions
-`git commit/push/checkout` are forbidden everywhere, except:
-- PLANNING: `git checkout` allowed (branch creation)
-- COMMITTING: `git commit`, `git push` allowed
+`workflow/defaults.yaml` defines:
 
-### Phase-specific bash restrictions
-- `gofmt` only allowed in DEVELOPING and REVIEWING (denied in all other phases)
-- Bash commands chained with `&&` are split and each segment checked independently
+- **Phases** — start/stop, display metadata, instructions:
+  ```yaml
+  phases:
+    start: PLANNING
+    stop: [COMPLETE]
+    DEVELOPING:
+      display: { label: "Developing", icon: "code", color: "#10b981" }
+      instructions: developing.md
+  ```
 
-### Iteration limits
-Soft limit (default 5). When max reached, guard denies RESPAWN with instructions to ask the user. If user confirms: `wf-client reset-iterations <id>` resets the guard counter. `totalIterations` preserved for dashboard display.
+- **Permissions** — safe commands, whitelists, role restrictions:
+  ```yaml
+  defaults:
+    permissions:
+      safe_commands: [ls, cat, git status, go test, ...]
+      lead:
+        file_writes: deny
+  COMMITTING:
+    permissions:
+      whitelist: [git add, git commit, git push]
+  ```
 
-### BLOCKED Enforcement
-- Lead **cannot idle** in any phase except BLOCKED or COMPLETE (enforced by TeammateIdle hook)
-- Lead must explicitly transition to BLOCKED with a reason before stopping
-- `UserPromptSubmit` from user while BLOCKED → automatic return to pre-blocked phase
+- **Transitions** — allowed paths with `when` guards:
+  ```yaml
+  transitions:
+    DEVELOPING:
+      - to: REVIEWING
+        when: not working_tree_clean
+        message: "no changes to review"
+  ```
 
-## Guards (transition preconditions)
+- **Idle rules** — per-phase, per-agent enforcement:
+  ```yaml
+  DEVELOPING:
+    idle:
+      - agent: "developer*"
+        checks:
+          - { type: command_ran, category: test, message: "Run tests before going idle" }
+  ```
 
-| Transition | Condition |
-|------------|-----------|
-| COMMITTING → any | `working_tree_clean = true` |
-| DEVELOPING → REVIEWING | `working_tree_clean = false` (changes exist) |
-| PR_CREATION → FEEDBACK | `pr_checks_pass = true` |
-| FEEDBACK → COMPLETE | `pr_approved = true` OR `pr_merged = true` |
-| RESPAWN → DEVELOPING | `activeAgents == 0` (old teammates shut down) |
+- **Tracking** — command categories with patterns:
+  ```yaml
+  tracking:
+    test:
+      patterns: ["go test", "npm test", "pytest"]
+      invalidate_on_file_change: true
+  ```
 
-## CLI
+### Project overrides
 
-```bash
-wf-client start --session my-task --task "Implement feature X"
-wf-client status my-task
-wf-client timeline my-task
-wf-client transition my-task --to DEVELOPING --reason "Plan ready"
-wf-client list
-wf-client reset-iterations my-task    # reset iteration counter (soft limit)
-```
+Projects can override defaults by placing a `.wf-agents/workflow.yaml` in their root. Override rules:
+- Phases: merge by name (override replaces fields, not the whole object)
+- Transitions: override replaces transitions for the specified phase
+- Tracking/idle/permissions: append or override per existing merge logic
+
+Phase instructions can also be overridden per-phase by placing a `.wf-agents/<PHASE>.md` file (e.g. `.wf-agents/DEVELOPING.md`) in the project root. This replaces the default phase instructions for that phase.
+
+### Key enforcement behaviors
+
+- **File writes** — Team Lead never edits files. Developer teammates can only edit in DEVELOPING and COMMITTING phases
+- **Git operations** — `git commit/push` only allowed in COMMITTING phase whitelist
+- **Bash splitting** — commands chained with `&&`, `||`, `|`, `;` are split and each segment checked independently
+- **BLOCKED phase** — any phase can transition to BLOCKED (pause); returns to pre-blocked phase on user input
+- **Iteration limits** — soft limit (default 5). `wf-client reset-iterations <id>` resets counter; `totalIterations` preserved for dashboard
 
 ## Architecture
 
 ```
 Claude Code  ──hooks──►  hook-handler  ──signals──►  Temporal Workflow
                               │                            │
-                         enforce rules              track state, guards
+                         enforce rules              track state + guards
                               │                            │
-                         deny/allow                  event timeline
+                         deny/allow                  event sourcing
                               │                            │
-                         inject context              web dashboard
+                         inject phase               web dashboard
+                         instructions               (localhost:8090)
 ```
 
-- **hook-handler** — Go binary invoked by Claude Code hooks, bridges events to Temporal, loads phase instructions from `states/*.md`
-- **Temporal workflow** — event store + state machine, NOT an orchestrator
-- **wf-client** — CLI for managing transitions
-- **wf-web** — web dashboard with phase diagram, timeline, stuck detection
-
-## Project Structure
-
-```
-cmd/
-  worker/          Temporal worker
-  client/          CLI (start, status, transition, reset-iterations, ...)
-  hook-handler/    Hooks → Temporal signals + permission enforcement
-  web/             Web dashboard (Go + embedded HTML)
-internal/
-  model/           Phase, events, workflow types
-  workflow/        State machine, guards, event sourcing
-hooks/             hooks.json — plugin hook configuration
-agents/            Agent definitions (developer, reviewer, feature-team-lead)
-states/            Phase instructions (*.md) — loaded at runtime by hook-handler
-commands/          Slash commands (start-feature-team, workflow, status)
-.claude-plugin/    Plugin manifest
-```
+The hook-handler is the bridge between Claude Code and the Temporal workflow. Every tool call triggers a hook → hook-handler checks permissions from `workflow/defaults.yaml` → allows or denies → sends signals to Temporal for state tracking.

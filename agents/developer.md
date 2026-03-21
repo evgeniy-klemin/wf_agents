@@ -37,7 +37,7 @@ Before signaling done, you MUST:
 - Run the full test suite and verify all tests pass
 - Print "BUILD OK" and "TESTS OK" with the actual commands run, so the Team Lead has clear evidence to proceed
 
-Then message the Team Lead with your completion summary.
+**CRITICAL: You MUST send a completion summary to the Team Lead via SendMessage before going idle.** Include "BUILD OK" / "TESTS OK" with actual commands run. The workflow cannot continue until you report back. If you go idle without sending SendMessage, the system will deny your idle and remind you.
 
 Go idle and wait for further instructions (shutdown_request or next task).
 

@@ -94,10 +94,10 @@ func loadRawLogEvents(t *testing.T, path string) []claudeHookInputTest {
 // simulateActiveAgentsSlice simulates the CURRENT (buggy) []string activeAgents logic.
 //
 // The race condition it fails on:
-//   1. SubagentStart at=X id=A  → X added to active
-//   2. SubagentStart at=X id=B  → X already in active (no-op)
-//   3. SubagentStop  at=X id=A  → removes X from active (BUG: removes regardless of id)
-//   4. PreToolUse    at=X id=B  → X not in active → VIOLATION
+//  1. SubagentStart at=X id=A  → X added to active
+//  2. SubagentStart at=X id=B  → X already in active (no-op)
+//  3. SubagentStop  at=X id=A  → removes X from active (BUG: removes regardless of id)
+//  4. PreToolUse    at=X id=B  → X not in active → VIOLATION
 //
 // Returns the agent_types that should be active but weren't during PreToolUse.
 func simulateActiveAgentsSlice(events []claudeHookInputTest) []string {
@@ -237,4 +237,3 @@ func TestActiveAgentsMapFixWorks(t *testing.T) {
 	assert.Empty(t, violations,
 		"map-based fix should produce zero violations for the race condition; got %d", len(violations))
 }
-

@@ -280,16 +280,16 @@ func TestAllowWithContextOutputNoContinueField(t *testing.T) {
 // TestPhaseInstructionsNonEmpty verifies that phaseInstructions returns non-empty content
 // for all phases, and that no {{...}} placeholders remain unresolved.
 func TestPhaseInstructionsNonEmpty(t *testing.T) {
-	// Find the project root by locating the states directory.
+	// Find the project root by locating the workflow directory.
 	// The test binary runs from the package directory, so we go up two levels.
 	projectRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatalf("cannot determine project root: %v", err)
 	}
-	// Verify the states directory exists at the expected location.
-	statesDir := filepath.Join(projectRoot, "states")
-	if _, err := os.Stat(statesDir); err != nil {
-		t.Fatalf("states directory not found at %s: %v", statesDir, err)
+	// Verify the workflow directory exists at the expected location.
+	workflowDir := filepath.Join(projectRoot, "workflow")
+	if _, err := os.Stat(workflowDir); err != nil {
+		t.Fatalf("workflow directory not found at %s: %v", workflowDir, err)
 	}
 
 	// Set CLAUDE_PLUGIN_ROOT so phaseInstructions can locate the state files.
@@ -315,7 +315,7 @@ func TestPhaseInstructionsNonEmpty(t *testing.T) {
 
 	for _, phase := range phases {
 		t.Run(string(phase), func(t *testing.T) {
-			result := phaseInstructions(phase)
+			result := phaseInstructions(phase, "")
 
 			if strings.TrimSpace(result) == "" {
 				t.Errorf("phaseInstructions(%s) returned empty string", phase)
@@ -335,9 +335,35 @@ func TestPhaseInstructionsFallbackOnMissingFile(t *testing.T) {
 	t.Setenv("CLAUDE_PLUGIN_ROOT", "/nonexistent/path")
 
 	// Should not panic, should return a non-empty fallback string.
-	result := phaseInstructions(model.PhasePlanning)
+	result := phaseInstructions(model.PhasePlanning, "")
 	if strings.TrimSpace(result) == "" {
 		t.Error("phaseInstructions fallback must return non-empty string")
+	}
+}
+
+// TestPhaseInstructionsProjectOverride verifies that a project-level .wf-agents/<PHASE>.md
+// overrides the plugin's workflow/<PHASE>.md.
+func TestPhaseInstructionsProjectOverride(t *testing.T) {
+	projectRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("cannot determine project root: %v", err)
+	}
+	t.Setenv("CLAUDE_PLUGIN_ROOT", projectRoot)
+
+	// Create a temp project dir with a .wf-agents/PLANNING.md override.
+	projectDir := t.TempDir()
+	wfAgentsDir := filepath.Join(projectDir, ".wf-agents")
+	if err := os.MkdirAll(wfAgentsDir, 0755); err != nil {
+		t.Fatalf("cannot create .wf-agents dir: %v", err)
+	}
+	overrideContent := "PROJECT OVERRIDE CONTENT FOR PLANNING"
+	if err := os.WriteFile(filepath.Join(wfAgentsDir, "PLANNING.md"), []byte(overrideContent), 0644); err != nil {
+		t.Fatalf("cannot write override file: %v", err)
+	}
+
+	result := phaseInstructions(model.PhasePlanning, projectDir)
+	if !strings.Contains(result, overrideContent) {
+		t.Errorf("phaseInstructions should use project override, got: %s", result)
 	}
 }
 
@@ -640,10 +666,14 @@ func (m *mockSignaler) SignalWorkflow(_ context.Context, workflowID, _ string, s
 	return m.err
 }
 
-// writeTempConfig writes a .wf-agents.yaml file to dir and returns the dir path.
+// writeTempConfig writes a .wf-agents/workflow.yaml file to dir and returns the dir path.
 func writeTempConfig(t *testing.T, dir, yamlContent string) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, ".wf-agents.yaml"), []byte(yamlContent), 0o644); err != nil {
+	wfAgentsDir := filepath.Join(dir, ".wf-agents")
+	if err := os.MkdirAll(wfAgentsDir, 0o755); err != nil {
+		t.Fatalf("writeTempConfig: mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(wfAgentsDir, "workflow.yaml"), []byte(yamlContent), 0o644); err != nil {
 		t.Fatalf("writeTempConfig: %v", err)
 	}
 }
@@ -703,13 +733,13 @@ func TestTrackPreToolUse_NoSignalWhenNoAgentIdentity(t *testing.T) {
 	dir := t.TempDir()
 	mock := &mockSignaler{}
 	input := claudeHookInput{
-		SessionID:    "sess-2",
+		SessionID:     "sess-2",
 		HookEventName: "PreToolUse",
-		TeammateName: "",
-		AgentType:    "",
-		ToolName:     "Bash",
-		ToolInput:    bashInput(t, "make lint"),
-		CWD:          dir,
+		TeammateName:  "",
+		AgentType:     "",
+		ToolName:      "Bash",
+		ToolInput:     bashInput(t, "make lint"),
+		CWD:           dir,
 	}
 	trackPreToolUse(context.Background(), mock, "coding-session-abc", input)
 	if len(mock.signals) != 0 {
@@ -724,11 +754,11 @@ func TestTrackPreToolUse_EditSendsInvalidateCommands(t *testing.T) {
 	dir := t.TempDir()
 	mock := &mockSignaler{}
 	input := claudeHookInput{
-		SessionID:    "sess-3",
+		SessionID:     "sess-3",
 		HookEventName: "PreToolUse",
-		AgentType:    "developer-1",
-		ToolName:     "Edit",
-		CWD:          dir,
+		AgentType:     "developer-1",
+		ToolName:      "Edit",
+		CWD:           dir,
 	}
 	trackPreToolUse(context.Background(), mock, "coding-session-abc", input)
 
@@ -761,11 +791,11 @@ func TestTrackPreToolUse_WriteSendsInvalidateCommands(t *testing.T) {
 	dir := t.TempDir()
 	mock := &mockSignaler{}
 	input := claudeHookInput{
-		SessionID:    "sess-4",
+		SessionID:     "sess-4",
 		HookEventName: "PreToolUse",
-		AgentType:    "reviewer-1",
-		ToolName:     "Write",
-		CWD:          dir,
+		AgentType:     "reviewer-1",
+		ToolName:      "Write",
+		CWD:           dir,
 	}
 	trackPreToolUse(context.Background(), mock, "coding-session-abc", input)
 
@@ -903,16 +933,52 @@ func TestTrackPreToolUse_PipedCommand(t *testing.T) {
 }
 
 // TestEvalTeammateIdleConfig_DefaultConfigAllowsAll verifies that the default config
-// (wildcard rule with no checks) allows all agents to idle freely in any phase.
+// allows non-developer agents and developers outside DEVELOPING to idle freely,
+// except reviewer* in REVIEWING which requires a send_message check.
+// developer* in DEVELOPING has idle checks (lint+test) — those are enforced by default.
 func TestEvalTeammateIdleConfig_DefaultConfigAllowsAll(t *testing.T) {
 	dir := t.TempDir()
-	for _, agent := range []string{"developer-1", "reviewer-1", "team-lead"} {
-		for _, phase := range []string{"DEVELOPING", "REVIEWING", "COMMITTING"} {
-			reason := evalTeammateIdleConfig(dir, phase, agent, nil)
-			if reason != "" {
-				t.Errorf("default config: expected no denial for %s in %s, got: %q", agent, phase, reason)
-			}
+
+	// team-lead can idle freely in all phases.
+	for _, phase := range []string{"DEVELOPING", "REVIEWING", "COMMITTING"} {
+		reason := evalTeammateIdleConfig(dir, phase, "team-lead", nil)
+		if reason != "" {
+			t.Errorf("default config: expected no denial for team-lead in %s, got: %q", phase, reason)
 		}
+	}
+
+	// reviewer-1 in REVIEWING is denied (must send completion summary).
+	reason := evalTeammateIdleConfig(dir, "REVIEWING", "reviewer-1", nil)
+	if reason == "" {
+		t.Error("default config: expected denial for reviewer-1 in REVIEWING (send_message check)")
+	}
+
+	// reviewer-1 in other phases can idle freely.
+	for _, phase := range []string{"DEVELOPING", "COMMITTING"} {
+		reason := evalTeammateIdleConfig(dir, phase, "reviewer-1", nil)
+		if reason != "" {
+			t.Errorf("default config: expected no denial for reviewer-1 in %s, got: %q", phase, reason)
+		}
+	}
+
+	// developer-1 in non-DEVELOPING phases should idle freely.
+	for _, phase := range []string{"REVIEWING", "COMMITTING"} {
+		reason := evalTeammateIdleConfig(dir, phase, "developer-1", nil)
+		if reason != "" {
+			t.Errorf("default config: expected no denial for developer-1 in %s, got: %q", phase, reason)
+		}
+	}
+
+	// developer-1 in DEVELOPING has lint+test idle checks — denial expected without commands ran.
+	reason = evalTeammateIdleConfig(dir, "DEVELOPING", "developer-1", nil)
+	if reason == "" {
+		t.Error("default config: expected denial for developer-1 in DEVELOPING (lint+test not run)")
+	}
+
+	// developer-1 in DEVELOPING allowed when lint, test, and SendMessage have run.
+	reason = evalTeammateIdleConfig(dir, "DEVELOPING", "developer-1", map[string]bool{"lint": true, "test": true, "_sent_message": true})
+	if reason != "" {
+		t.Errorf("default config: expected no denial for developer-1 in DEVELOPING with lint+test ran, got: %q", reason)
 	}
 }
 
@@ -923,6 +989,43 @@ func TestEvalTeammateIdleConfig_WildcardPhaseAllowsIdle(t *testing.T) {
 	reason := evalTeammateIdleConfig(dir, "REVIEWING", "developer-1", nil)
 	if reason != "" {
 		t.Errorf("all teammates should be allowed to idle in REVIEWING (wildcard), got: %q", reason)
+	}
+}
+
+// TestTrackPreToolUse_EditSendsFileChangedSignal verifies that an Edit tool also sends
+// a SignalCommandRan with category "_file_changed".
+func TestTrackPreToolUse_EditSendsFileChangedSignal(t *testing.T) {
+	dir := t.TempDir()
+	mock := &mockSignaler{}
+	input := claudeHookInput{
+		SessionID:     "sess-fc1",
+		HookEventName: "PreToolUse",
+		AgentType:     "developer-1",
+		ToolName:      "Edit",
+		CWD:           dir,
+	}
+	trackPreToolUse(context.Background(), mock, "coding-session-abc", input)
+
+	for _, s := range mock.signals {
+		if s.signalName == "command-ran" {
+			sig, ok := s.arg.(model.SignalCommandRan)
+			if ok && sig.Category == "_file_changed" {
+				return
+			}
+		}
+	}
+	t.Error("no command-ran signal with category _file_changed was sent for Edit tool")
+}
+
+// TestMatchesAnyPattern_PathPrefixedCommand verifies that "/usr/local/bin/golangci-lint run ./..."
+// matches the "golangci-lint" pattern despite the absolute path prefix.
+func TestMatchesAnyPattern_PathPrefixedCommand(t *testing.T) {
+	patterns := []string{"golangci-lint"}
+	if !matchesAnyPattern("/usr/local/bin/golangci-lint run ./...", patterns) {
+		t.Error("path-prefixed golangci-lint should match pattern 'golangci-lint'")
+	}
+	if !matchesAnyPattern("/usr/bin/go test ./...", []string{"go test"}) {
+		t.Error("path-prefixed 'go test' should match pattern 'go test'")
 	}
 }
 

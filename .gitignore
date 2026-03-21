@@ -4,5 +4,8 @@ bin/
 .DS_Store
 /client
 TODO.md
-# Project-specific wf-agents config (copy from .wf-agents.yaml.example)
-.wf-agents.yaml
+# Project-specific wf-agents config directory (workflow.yaml overrides + per-phase .md overrides)
+.wf-agents/
+# Local Claude Code settings (machine-specific, not for version control)
+.claude/settings.local.json
+.claude/scheduled_tasks.lock

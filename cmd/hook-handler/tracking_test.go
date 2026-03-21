@@ -136,10 +136,14 @@ func TestMatchesAnyPattern_DefaultConfigPatterns(t *testing.T) {
 // evalTeammateIdleConfig
 // ---------------------------------------------------------------------------
 
-// writeIdleConfig writes a .wf-agents.yaml with custom teammate_idle rules to dir.
+// writeIdleConfig writes a .wf-agents/workflow.yaml with custom teammate_idle rules to dir.
 func writeIdleConfig(t *testing.T, dir, yaml string) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, ".wf-agents.yaml"), []byte(yaml), 0o644); err != nil {
+	wfAgentsDir := filepath.Join(dir, ".wf-agents")
+	if err := os.MkdirAll(wfAgentsDir, 0o755); err != nil {
+		t.Fatalf("writeIdleConfig: mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(wfAgentsDir, "workflow.yaml"), []byte(yaml), 0o644); err != nil {
 		t.Fatalf("writeIdleConfig: %v", err)
 	}
 }
@@ -188,11 +192,11 @@ teammate_idle:
 }
 
 // TestEvalTeammateIdleConfig_ReviewerFree verifies that a reviewer going idle in
-// REVIEWING is not denied (wildcard rule has no checks).
+// REVIEWING is denied until they send a completion summary via SendMessage.
 func TestEvalTeammateIdleConfig_ReviewerFree(t *testing.T) {
 	dir := t.TempDir()
 	reason := evalTeammateIdleConfig(dir, "REVIEWING", "reviewer-1", nil)
-	if reason != "" {
-		t.Errorf("reviewer should be free to idle in REVIEWING, got: %q", reason)
+	if reason == "" {
+		t.Error("reviewer should be denied idle in REVIEWING until send_message check passes")
 	}
 }

@@ -41,14 +41,16 @@ func loadFullTimeline(t *testing.T, path string) []fullTimelineEntry {
 // e2eEvidence returns the guard evidence required for the given transition.
 func e2eEvidence(from, to string) map[string]string {
 	switch from + "→" + to {
+	case "PLANNING→RESPAWN":
+		return map[string]string{"working_tree_clean": "true"}
 	case "DEVELOPING→REVIEWING":
 		return map[string]string{"working_tree_clean": "false"}
 	case "COMMITTING→PR_CREATION", "COMMITTING→RESPAWN":
 		return map[string]string{"working_tree_clean": "true"}
 	case "PR_CREATION→FEEDBACK":
-		return map[string]string{"pr_checks_pass": "true"}
+		return map[string]string{"ci_passed": "true"}
 	case "FEEDBACK→COMPLETE":
-		return map[string]string{"pr_approved": "true"}
+		return map[string]string{"review_approved": "true"}
 	default:
 		return map[string]string{}
 	}

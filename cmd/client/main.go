@@ -6,14 +6,17 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
 	"time"
 
+	"github.com/eklemin/wf-agents/internal/config"
 	"github.com/eklemin/wf-agents/internal/model"
 	"github.com/eklemin/wf-agents/internal/noplog"
+	"github.com/eklemin/wf-agents/internal/platform"
+	"github.com/eklemin/wf-agents/internal/session"
+	internaltemporal "github.com/eklemin/wf-agents/internal/temporal"
 	wf "github.com/eklemin/wf-agents/internal/workflow"
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/workflowservice/v1"
@@ -29,7 +32,7 @@ func main() {
 	}
 
 	c, err := client.Dial(client.Options{
-		HostPort: "localhost:7233",
+		HostPort: internaltemporal.Host(),
 		Logger:   noplog.New(),
 	})
 	if err != nil {
@@ -128,6 +131,18 @@ func cmdStart(ctx context.Context, c client.Client, args []string) {
 	if input.TaskDescription == "" {
 		log.Fatal("--task is required")
 	}
+
+	// Snapshot the flow topology (phases + transitions) at session start.
+	// Uses LoadConfig to merge embedded defaults with project-level .wf-agents.yaml.
+	projectDir := input.RepoPath
+	if projectDir == "" {
+		projectDir, _ = os.Getwd()
+	}
+	cfg, err := config.LoadConfig(projectDir)
+	if err != nil {
+		log.Fatalf("Failed to load config: %v", err)
+	}
+	input.Flow = config.ExtractFlowSnapshot(cfg)
 
 	workflowID := "coding-session-" + input.SessionID
 	opts := buildStartOptions(workflowID, taskQueue)
@@ -418,35 +433,20 @@ func cmdList(ctx context.Context, c client.Client) {
 }
 
 func resolveWorkflowID(id string) string {
-	// Allow short IDs without the prefix
-	if len(id) > 0 && id[0] != 'c' {
-		return "coding-session-" + id
-	}
-	return id
+	return session.ResolveWorkflowID(id)
 }
 
-// collectEvidence gathers local git/PR state to send with the transition request.
-// The Temporal workflow uses this evidence for guard validation.
-// Evidence is best-effort: failures result in missing keys, not errors.
-func collectEvidence() map[string]string {
-	evidence := make(map[string]string)
-
-	// git working tree status
-	if out, err := runCmd(10*time.Second, "git", "status", "--porcelain"); err == nil {
-		if strings.TrimSpace(out) == "" {
-			evidence["working_tree_clean"] = "true"
-		} else {
-			evidence["working_tree_clean"] = "false"
-		}
-	}
-
+// collectGitHubEvidence populates evidence map using GitHub's gh CLI.
+func collectGitHubEvidence(evidence map[string]string, runner platform.CmdRunner) {
 	// PR checks status via JSON — reliable parsing of check states.
 	// Empty array or no PR = no CI configured → pass (don't block).
-	if out, err := runCmd(15*time.Second, "gh", "pr", "checks", "--json", "name,state"); err == nil {
-		var checks []struct{ State string `json:"state"` }
+	if out, err := runner(15*time.Second, "gh", "pr", "checks", "--json", "name,state"); err == nil {
+		var checks []struct {
+			State string `json:"state"`
+		}
 		if json.Unmarshal([]byte(out), &checks) == nil {
 			if len(checks) == 0 {
-				evidence["pr_checks_pass"] = "true"
+				evidence["ci_passed"] = "true"
 				evidence["pr_checks_detail"] = "no CI checks configured"
 			} else {
 				allPass := true
@@ -457,34 +457,34 @@ func collectEvidence() map[string]string {
 					}
 				}
 				if allPass {
-					evidence["pr_checks_pass"] = "true"
+					evidence["ci_passed"] = "true"
 				} else {
-					evidence["pr_checks_pass"] = "false"
+					evidence["ci_passed"] = "false"
 					evidence["pr_checks_detail"] = fmt.Sprintf("%d checks, some not passed", len(checks))
 				}
 			}
 		} else {
-			evidence["pr_checks_pass"] = "true"
+			evidence["ci_passed"] = "true"
 			evidence["pr_checks_detail"] = "could not parse checks"
 		}
 	} else {
 		// gh pr checks failed entirely (no PR, no git remote, etc.) → don't block
-		evidence["pr_checks_pass"] = "true"
+		evidence["ci_passed"] = "true"
 		evidence["pr_checks_detail"] = "no PR found or gh unavailable"
 	}
 
 	// PR review approval and merge status — for FEEDBACK → COMPLETE.
 	// Allows completion if PR is approved OR already merged.
-	if out, err := runCmd(10*time.Second, "gh", "pr", "view", "--json", "reviewDecision,state"); err == nil {
+	if out, err := runner(10*time.Second, "gh", "pr", "view", "--json", "reviewDecision,state"); err == nil {
 		var pr struct {
 			ReviewDecision string `json:"reviewDecision"`
 			State          string `json:"state"`
 		}
 		if json.Unmarshal([]byte(out), &pr) == nil {
 			if pr.ReviewDecision == "APPROVED" {
-				evidence["pr_approved"] = "true"
+				evidence["review_approved"] = "true"
 			} else {
-				evidence["pr_approved"] = "false"
+				evidence["review_approved"] = "false"
 				if pr.ReviewDecision != "" {
 					evidence["pr_approved_detail"] = pr.ReviewDecision
 				} else {
@@ -492,15 +492,119 @@ func collectEvidence() map[string]string {
 				}
 			}
 			if pr.State == "MERGED" {
-				evidence["pr_merged"] = "true"
+				evidence["merged"] = "true"
 			} else {
-				evidence["pr_merged"] = "false"
+				evidence["merged"] = "false"
 			}
 		}
 	} else {
-		evidence["pr_approved"] = "false"
+		evidence["review_approved"] = "false"
 		evidence["pr_approved_detail"] = "no PR found"
-		evidence["pr_merged"] = "false"
+		evidence["merged"] = "false"
+	}
+}
+
+// collectGitLabEvidence populates evidence map using GitLab's glab CLI.
+func collectGitLabEvidence(evidence map[string]string, runner platform.CmdRunner) {
+	out, err := runner(15*time.Second, "glab", "mr", "view", "-F", "json")
+	if err != nil {
+		// No MR or glab unavailable — use permissive defaults
+		evidence["ci_passed"] = "true"
+		evidence["review_approved"] = "false"
+		evidence["merged"] = "false"
+		return
+	}
+
+	var mr struct {
+		HeadPipeline *struct {
+			Status string `json:"status"`
+		} `json:"head_pipeline"`
+		ApprovedBy []interface{} `json:"approved_by"`
+		State      string        `json:"state"`
+	}
+
+	if json.Unmarshal([]byte(out), &mr) != nil {
+		// Malformed JSON — use permissive defaults
+		evidence["ci_passed"] = "true"
+		evidence["review_approved"] = "false"
+		evidence["merged"] = "false"
+		return
+	}
+
+	// CI pipeline status
+	if mr.HeadPipeline == nil {
+		evidence["ci_passed"] = "true"
+	} else {
+		switch mr.HeadPipeline.Status {
+		case "success", "skipped", "":
+			evidence["ci_passed"] = "true"
+		default:
+			evidence["ci_passed"] = "false"
+		}
+	}
+
+	// Review approval
+	if len(mr.ApprovedBy) > 0 {
+		evidence["review_approved"] = "true"
+	} else {
+		evidence["review_approved"] = "false"
+	}
+
+	// Merge status
+	if mr.State == "merged" {
+		evidence["merged"] = "true"
+	} else {
+		evidence["merged"] = "false"
+	}
+}
+
+// collectBranchPushedEvidence checks whether the local HEAD matches the upstream
+// tracking branch HEAD, setting evidence["branch_pushed"] to "true" or "false".
+func collectBranchPushedEvidence(evidence map[string]string, runner platform.CmdRunner) {
+	localHead, err := runner(5*time.Second, "git", "rev-parse", "HEAD")
+	if err != nil {
+		return
+	}
+	remoteHead, err := runner(5*time.Second, "git", "rev-parse", "@{u}")
+	if err != nil {
+		// No upstream tracking branch — not pushed
+		evidence["branch_pushed"] = "false"
+		return
+	}
+	if strings.TrimSpace(localHead) == strings.TrimSpace(remoteHead) {
+		evidence["branch_pushed"] = "true"
+	} else {
+		evidence["branch_pushed"] = "false"
+	}
+}
+
+// collectEvidence gathers local git/PR state to send with the transition request.
+// The Temporal workflow uses this evidence for guard validation.
+// Evidence is best-effort: failures result in missing keys, not errors.
+func collectEvidence() map[string]string {
+	evidence := make(map[string]string)
+
+	// git working tree status — platform-agnostic
+	if out, err := platform.RunCmd(10*time.Second, "git", "status", "--porcelain"); err == nil {
+		if strings.TrimSpace(out) == "" {
+			evidence["working_tree_clean"] = "true"
+		} else {
+			evidence["working_tree_clean"] = "false"
+		}
+	}
+
+	collectBranchPushedEvidence(evidence, platform.RunCmd)
+
+	switch platform.DetectPlatform() {
+	case "github":
+		collectGitHubEvidence(evidence, platform.RunCmd)
+	case "gitlab":
+		collectGitLabEvidence(evidence, platform.RunCmd)
+	default:
+		// Unknown platform — use permissive defaults so we don't block
+		evidence["ci_passed"] = "true"
+		evidence["review_approved"] = "false"
+		evidence["merged"] = "false"
 	}
 
 	return evidence
@@ -553,14 +657,6 @@ func removeSessionMarker(sessionID string) {
 			os.Remove(filepath.Join(dir, entry.Name()))
 		}
 	}
-}
-
-func runCmd(timeout time.Duration, name string, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, name, args...)
-	out, err := cmd.CombinedOutput()
-	return string(out), err
 }
 
 func firstLine(s string) string {

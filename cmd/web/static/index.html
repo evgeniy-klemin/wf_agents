@@ -139,44 +139,22 @@ let selectedRunID = null; // disambiguates multiple runs with the same workflow 
 let workflowsCache = []; // cached list from last loadWorkflows
 let currentFilter = 'all';
 let refreshTimer = null;
+let workflowConfig = null; // loaded from /api/workflow-config
 
-// ---- Phase definitions ----
-const PHASES = [
-  { id: 'PLANNING',    label: 'Planning',    icon: 'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2' },
-  { id: 'RESPAWN',     label: 'Respawn',     icon: 'M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15' },
-  { id: 'DEVELOPING',  label: 'Developing',  icon: 'M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4' },
-  { id: 'REVIEWING',   label: 'Reviewing',   icon: 'M15 12a3 3 0 11-6 0 3 3 0 016 0z M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z' },
-  { id: 'COMMITTING',  label: 'Committing',  icon: 'M5 13l4 4L19 7' },
-  { id: 'PR_CREATION', label: 'PR Creation', icon: 'M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4' },
-  { id: 'FEEDBACK',    label: 'Feedback',    icon: 'M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z' },
-  { id: 'COMPLETE',    label: 'Complete',    icon: 'M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z' },
-];
-
-// Transitions: [from, to] pairs (including loops)
-const TRANSITIONS = [
-  ['PLANNING', 'RESPAWN'],
-  ['RESPAWN', 'DEVELOPING'],
-  ['DEVELOPING', 'REVIEWING'],
-  ['REVIEWING', 'COMMITTING'],
-  ['REVIEWING', 'DEVELOPING'],      // reject loop
-  ['COMMITTING', 'RESPAWN'],        // more iterations loop
-  ['COMMITTING', 'PR_CREATION'],    // all iterations done
-  ['PR_CREATION', 'FEEDBACK'],
-  ['FEEDBACK', 'COMPLETE'],
-  ['FEEDBACK', 'RESPAWN'],          // iterate on feedback
-];
-
-const PHASE_COLORS = {
-  PLANNING:    { bg: '#4f46e5', ring: '#6366f1', text: '#e0e7ff' },
-  RESPAWN:     { bg: '#7c3aed', ring: '#8b5cf6', text: '#ede9fe' },
-  DEVELOPING:  { bg: '#2563eb', ring: '#3b82f6', text: '#dbeafe' },
-  REVIEWING:   { bg: '#9333ea', ring: '#a855f7', text: '#f3e8ff' },
-  COMMITTING:  { bg: '#0891b2', ring: '#06b6d4', text: '#cffafe' },
-  PR_CREATION: { bg: '#d97706', ring: '#f59e0b', text: '#fef3c7' },
-  FEEDBACK:    { bg: '#0d9488', ring: '#14b8a6', text: '#ccfbf1' },
-  COMPLETE:    { bg: '#16a34a', ring: '#22c55e', text: '#dcfce7' },
-  BLOCKED:     { bg: '#dc2626', ring: '#ef4444', text: '#fee2e2' },
+// ---- Phase definitions (populated from /api/workflow-config) ----
+// PHASES: [{id, label, icon}] in display order
+// TRANSITIONS: [[from, to, label?]] pairs derived from config
+// PHASE_COLORS: {id: {bg, ring, text}}
+// PHASE_LABELS: {id: label}
+let PHASES = [];
+let TRANSITIONS = [];
+let PHASE_COLORS = {
+  // BLOCKED is not a configurable phase but used for display
+  BLOCKED: { bg: '#dc2626', ring: '#ef4444', text: '#fee2e2' },
 };
+let PHASE_LABELS = { BLOCKED: 'Blocked' };
+let START_PHASE = ''; // populated from config (phases.start)
+let ITER_RESET_PHASE = ''; // phase that marks a new iteration (second phase in order, e.g. RESPAWN)
 
 const EVENT_ICONS = {
   transition:  { color: '#6366f1', symbol: '&#x2192;' },
@@ -314,32 +292,55 @@ async function selectWorkflow(wfID, runID) {
     }
   });
 
+  // Load per-workflow flow config (snapshotted at session start), fallback to global
+  const runParam = runID ? `?run_id=${encodeURIComponent(runID)}` : '';
+  try {
+    const perWfConfig = await apiGet(`/api/workflows/${encodeURIComponent(wfID)}/config${runParam}`);
+    applyWorkflowConfig(perWfConfig);
+  } catch (e) {
+    console.warn('Per-workflow config unavailable, using global config', e);
+    if (workflowConfig) applyWorkflowConfig(workflowConfig);
+  }
+
   await loadWorkflowDetail(wfID, runID);
 }
 
 async function loadWorkflowDetail(wfID, runID) {
+  const runParam = runID ? `?run_id=${encodeURIComponent(runID)}` : '';
+  let status = null;
+  let timeline = { events: [] };
+
+  // Load status (required)
   try {
-    const runParam = runID ? `?run_id=${encodeURIComponent(runID)}` : '';
-    const [status, timeline] = await Promise.all([
-      apiGet(`/api/workflows/${encodeURIComponent(wfID)}/status${runParam}`),
-      apiGet(`/api/workflows/${encodeURIComponent(wfID)}/timeline${runParam}`),
-    ]);
-
-    // Determine session end time: for finished sessions use last_updated_at, otherwise now
-    const wfEntry = workflowsCache.find(w => w.workflow_id === wfID);
-    const isFinished = status.phase === 'COMPLETE' || (wfEntry && wfEntry.status !== 'RUNNING');
-    const sessionEndTime = isFinished && status.last_updated_at
-      ? new Date(status.last_updated_at).getTime()
-      : Date.now();
-
-    renderStatusBar(wfID, status, timeline, sessionEndTime);
-    renderDiagram(status, status.pre_blocked_phase, timeline, sessionEndTime);
-    renderPhaseHistory(timeline, sessionEndTime);
-    renderTimeline(timeline, status);
+    status = await apiGet(`/api/workflows/${encodeURIComponent(wfID)}/status${runParam}`);
   } catch (e) {
-    console.error('Failed to load workflow detail:', e);
-    document.getElementById('wf-title').textContent = 'Error loading workflow';
+    console.error('Failed to load workflow status:', e);
+    document.getElementById('wf-title').textContent = 'Error loading workflow status';
+    return;
   }
+
+  // Load timeline (optional — may fail for large sessions)
+  try {
+    timeline = await apiGet(`/api/workflows/${encodeURIComponent(wfID)}/timeline${runParam}`);
+  } catch (e) {
+    console.warn('Timeline unavailable (session too large?), showing status only:', e);
+    // Use event_count from status to show truncation info
+    if (status.event_count) {
+      timeline = { events: [], total_events: status.event_count };
+    }
+  }
+
+  // Determine session end time: for finished sessions use last_updated_at, otherwise now
+  const wfEntry = workflowsCache.find(w => w.workflow_id === wfID);
+  const isFinished = status.phase === 'COMPLETE' || (wfEntry && wfEntry.status !== 'RUNNING');
+  const sessionEndTime = isFinished && status.last_updated_at
+    ? new Date(status.last_updated_at).getTime()
+    : Date.now();
+
+  renderStatusBar(wfID, status, timeline, sessionEndTime);
+  renderDiagram(status, status.pre_blocked_phase, timeline, sessionEndTime);
+  renderPhaseHistory(timeline, sessionEndTime);
+  renderTimeline(timeline, status);
 }
 
 // ---- Status Bar ----
@@ -348,7 +349,7 @@ function renderStatusBar(wfID, status, timeline, sessionEndTime) {
   document.getElementById('wf-title').textContent = sessionID;
 
   const badge = document.getElementById('wf-phase-badge');
-  const pc = PHASE_COLORS[status.phase] || PHASE_COLORS.PLANNING;
+  const pc = PHASE_COLORS[status.phase] || PHASES[0] && PHASE_COLORS[PHASES[0].id] || { bg: '#334155', ring: '#475569', text: '#f1f5f9' };
   const phaseDisplay = status.phase === 'BLOCKED' && status.pre_blocked_phase
     ? `BLOCKED (${phaseName(status.pre_blocked_phase)})`
     : phaseName(status.phase);
@@ -430,9 +431,10 @@ function computePhaseDurations(timeline, endTime) {
     durations[currentPhase] = (durations[currentPhase] || 0) + (now - phaseStart);
   }
 
-  // If no transitions yet, the first event marks PLANNING start
+  // If no transitions yet, the first event marks the start phase
   if (!currentPhase && events.length > 0) {
-    durations['PLANNING'] = now - new Date(events[0].timestamp).getTime();
+    const phase = START_PHASE || (PHASES[0] && PHASES[0].id) || 'PLANNING';
+    durations[phase] = now - new Date(events[0].timestamp).getTime();
   }
 
   return durations;
@@ -466,7 +468,8 @@ function computePhaseSegments(timeline, endTime) {
   // No transitions yet
   if (!currentPhase && events.length > 0) {
     sessionStart = new Date(events[0].timestamp).getTime();
-    segments.push({ phase: 'PLANNING', startMs: 0, durationMs: now - sessionStart });
+    const phase = START_PHASE || (PHASES[0] && PHASES[0].id) || 'PLANNING';
+    segments.push({ phase, startMs: 0, durationMs: now - sessionStart });
   }
 
   return { segments, sessionStart };
@@ -493,7 +496,7 @@ function renderPhaseHistory(timeline, sessionEndTime) {
   const iterBoundaries = [];
   let cumMs = 0;
   for (const s of segments) {
-    if (s.phase === 'RESPAWN' && cumMs > 0) {
+    if (s.phase === ITER_RESET_PHASE && ITER_RESET_PHASE && cumMs > 0) {
       iterNum++;
       iterBoundaries.push({ pct: (cumMs / totalMs) * 100, label: `Iter ${iterNum}` });
     }
@@ -657,7 +660,14 @@ function renderDiagram(status, preBlockedPhase, timeline, sessionEndTime) {
   });
 
   // Draw connections first (behind nodes)
-  // Forward arrows
+  // Separate transitions into forward-adjacent and backward (loop) arrows.
+  // "Forward-adjacent" = consecutive phases in display order (the main flow line).
+  const adjacentForwardSet = new Set();
+  for (let i = 0; i < PHASES.length - 1; i++) {
+    adjacentForwardSet.add(`${PHASES[i].id}->${PHASES[i+1].id}`);
+  }
+
+  // Draw the main forward (adjacent) flow lines
   for (let i = 0; i < PHASES.length - 1; i++) {
     const from = positions[PHASES[i].id];
     const to = positions[PHASES[i + 1].id];
@@ -673,46 +683,42 @@ function renderDiagram(status, preBlockedPhase, timeline, sessionEndTime) {
       ${isNext ? 'class="flow-active"' : ''}/>`;
   }
 
-  // Loop: REVIEWING -> DEVELOPING (reject)
-  {
-    const from = positions['REVIEWING'];
-    const to = positions['DEVELOPING'];
-    const fx = from.x + nodeW / 2, fy = from.y + nodeH;
-    const tx = to.x + nodeW / 2, ty = to.y + nodeH;
-    const cy1 = fy + 45, cy2 = ty + 45;
-    html += `<path d="M${fx},${fy} C${fx},${cy1} ${tx},${cy2} ${tx},${ty}"
-      fill="none" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="4 3"
-      marker-end="url(#arrow-loop)" opacity="0.7"/>`;
-    html += `<text x="${(fx + tx) / 2}" y="${Math.max(cy1, cy2) + 14}" text-anchor="middle"
-      fill="#f59e0b" font-size="10" opacity="0.8">reject</text>`;
+  // Draw backward (loop) and non-adjacent forward transitions from TRANSITIONS
+  // Group loops by span to stagger their vertical offset and avoid overlap
+  const loopsBySpan = {};
+  for (const [fromId, toId, label] of TRANSITIONS) {
+    if (adjacentForwardSet.has(`${fromId}->${toId}`)) continue; // already drawn as main flow
+    if (!positions[fromId] || !positions[toId]) continue;
+    const fromIdx = mainOrder.indexOf(fromId);
+    const toIdx = mainOrder.indexOf(toId);
+    const isBackward = toIdx < fromIdx;
+    if (!isBackward) continue; // skip non-adjacent forward transitions for now
+    const span = Math.abs(fromIdx - toIdx);
+    if (!loopsBySpan[span]) loopsBySpan[span] = [];
+    loopsBySpan[span].push({ fromId, toId, label });
   }
 
-  // Loop: COMMITTING -> RESPAWN (more iterations)
-  {
-    const from = positions['COMMITTING'];
-    const to = positions['RESPAWN'];
-    const fx = from.x + nodeW / 2, fy = from.y + nodeH;
-    const tx = to.x + nodeW / 2, ty = to.y + nodeH;
-    const cy1 = fy + 55, cy2 = ty + 55;
-    html += `<path d="M${fx},${fy} C${fx},${cy1} ${tx},${cy2} ${tx},${ty}"
-      fill="none" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="4 3"
-      marker-end="url(#arrow-loop)" opacity="0.7"/>`;
-    html += `<text x="${(fx + tx) / 2}" y="${Math.max(cy1, cy2) + 14}" text-anchor="middle"
-      fill="#f59e0b" font-size="10" opacity="0.8">more iterations</text>`;
-  }
-
-  // Loop: FEEDBACK -> RESPAWN (iterate on feedback)
-  {
-    const from = positions['FEEDBACK'];
-    const to = positions['RESPAWN'];
-    const fx = from.x + nodeW / 2, fy = from.y + nodeH;
-    const tx = to.x + nodeW / 2, ty = to.y + nodeH;
-    const cy1 = fy + 75, cy2 = ty + 75;
-    html += `<path d="M${fx},${fy} C${fx},${cy1} ${tx},${cy2} ${tx},${ty}"
-      fill="none" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="4 3"
-      marker-end="url(#arrow-loop)" opacity="0.7"/>`;
-    html += `<text x="${(fx + tx) / 2}" y="${Math.max(cy1, cy2) + 14}" text-anchor="middle"
-      fill="#f59e0b" font-size="10" opacity="0.8">feedback changes</text>`;
+  // Assign a depth offset per span to prevent overlapping loops
+  let depthCounter = 0;
+  const depthStep = 20;
+  const baseDepth = 40;
+  for (const span of Object.keys(loopsBySpan).sort((a, b) => b - a)) {
+    for (const { fromId, toId, label } of loopsBySpan[span]) {
+      const from = positions[fromId];
+      const to = positions[toId];
+      const fx = from.x + nodeW / 2, fy = from.y + nodeH;
+      const tx = to.x + nodeW / 2, ty = to.y + nodeH;
+      const depth = baseDepth + depthCounter * depthStep;
+      const cy1 = fy + depth, cy2 = ty + depth;
+      html += `<path d="M${fx},${fy} C${fx},${cy1} ${tx},${cy2} ${tx},${ty}"
+        fill="none" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="4 3"
+        marker-end="url(#arrow-loop)" opacity="0.7"/>`;
+      if (label) {
+        html += `<text x="${(fx + tx) / 2}" y="${Math.max(cy1, cy2) + 14}" text-anchor="middle"
+          fill="#f59e0b" font-size="10" opacity="0.8">${esc(label)}</text>`;
+      }
+      depthCounter++;
+    }
   }
 
   // Draw main phase nodes
@@ -888,11 +894,88 @@ function formatEventDetail(ev) {
   }
 }
 
-const PHASE_LABELS = {
-  PLANNING: 'Planning', RESPAWN: 'Respawn', DEVELOPING: 'Developing',
-  REVIEWING: 'Reviewing', COMMITTING: 'Committing', PR_CREATION: 'PR Creation',
-  FEEDBACK: 'Feedback', COMPLETE: 'Complete', BLOCKED: 'Blocked',
+// icon SVG paths by icon name (used when config specifies icon names)
+const ICON_PATHS = {
+  'clipboard':        'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2',
+  'refresh':          'M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15',
+  'code':             'M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4',
+  'search':           'M15 12a3 3 0 11-6 0 3 3 0 016 0z M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z',
+  'git-commit':       'M5 13l4 4L19 7',
+  'git-pull-request': 'M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4',
+  'message-circle':   'M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z',
+  'check-circle':     'M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z',
 };
+const DEFAULT_ICON = 'M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z';
+
+// applyWorkflowConfig builds PHASES, PHASE_COLORS, PHASE_LABELS, TRANSITIONS from config data.
+function applyWorkflowConfig(cfg) {
+  if (!cfg || !cfg.phases || !cfg.phases.phases) return;
+
+  const phasesMap = cfg.phases.phases;
+  const order = cfg.phases.phase_order || Object.keys(phasesMap);
+
+  // Build PHASES array in display order
+  PHASES = order.map(id => {
+    const pc = phasesMap[id] || {};
+    const display = pc.display || {};
+    const iconName = display.icon || '';
+    return {
+      id,
+      label: display.label || id,
+      icon: ICON_PATHS[iconName] || DEFAULT_ICON,
+    };
+  });
+
+  // Build PHASE_LABELS
+  for (const id of order) {
+    const display = (phasesMap[id] || {}).display || {};
+    PHASE_LABELS[id] = display.label || id;
+  }
+
+  // Build PHASE_COLORS — derive bg/ring/text from a single config color hex
+  for (const id of order) {
+    const display = (phasesMap[id] || {}).display || {};
+    if (display.color) {
+      const hex = display.color;
+      PHASE_COLORS[id] = { bg: hex, ring: hex, text: '#f1f5f9' };
+    }
+  }
+
+  // Build TRANSITIONS from cfg.transitions map: {from: [{to, label},...]}
+  TRANSITIONS = [];
+  const transMap = cfg.transitions || {};
+  for (const from of Object.keys(transMap)) {
+    for (const t of transMap[from]) {
+      TRANSITIONS.push([from, t.to, t.label || '']);
+    }
+  }
+
+  // Set start and iteration-reset phases from config
+  START_PHASE = cfg.phases.start || (order[0] || '');
+  // The iteration-reset phase is the second phase in the order (the one workflows return to when looping)
+  ITER_RESET_PHASE = order[1] || '';
+}
+
+async function loadWorkflowConfig() {
+  try {
+    workflowConfig = await apiGet('/api/workflow-config');
+    applyWorkflowConfig(workflowConfig);
+  } catch (e) {
+    // Config load failure is fatal — show error state so user knows phases are unavailable.
+    console.error('Failed to load workflow config:', e);
+    showConfigError(e.message || 'Unknown error');
+  }
+}
+
+function showConfigError(msg) {
+  const el = document.getElementById('workflow-list');
+  if (el) el.innerHTML = `<div class="text-sm text-red-400 p-4 text-center">Config error:<br><span class="text-xs text-red-300">${esc(msg)}</span></div>`;
+  const emptyState = document.getElementById('empty-state');
+  if (emptyState) {
+    emptyState.querySelector('p').textContent = 'Failed to load workflow config — dashboard unavailable';
+  }
+}
+
 function phaseName(p) { return PHASE_LABELS[p] || p; }
 
 // Human-readable description for hook events without a tool
@@ -1022,6 +1105,7 @@ function startAutoRefresh() {
 
 // ---- Init ----
 (async () => {
+  await loadWorkflowConfig();
   await loadWorkflows();
   startAutoRefresh();
 })();

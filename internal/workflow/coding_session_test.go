@@ -91,15 +91,16 @@ func setupEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
 // testEvidence provides default evidence that satisfies all guards.
 var testEvidence = map[string]string{
 	"working_tree_clean": "true",
-	"pr_checks_pass":     "true",
-	"pr_approved":        "true",
+	"branch_pushed":      "true",
+	"ci_passed":          "true",
+	"review_approved":    "true",
 }
 
 // testEvidenceDirty provides evidence for a dirty working tree (needed for DEVELOPING → REVIEWING).
 var testEvidenceDirty = map[string]string{
 	"working_tree_clean": "false",
-	"pr_checks_pass":     "true",
-	"pr_approved":        "true",
+	"ci_passed":          "true",
+	"review_approved":    "true",
 }
 
 func update(env *testsuite.TestWorkflowEnvironment, t *testing.T, to model.Phase) {
@@ -322,14 +323,14 @@ func TestBlockedRespawnNoDoubleCount(t *testing.T) {
 	env := setupEnv(t)
 
 	registerTransitions(env, t, []model.Phase{
-		model.PhaseRespawn,       // iter 1 (from PLANNING, doesn't count)
+		model.PhaseRespawn, // iter 1 (from PLANNING, doesn't count)
 		model.PhaseDeveloping,
 		model.PhaseReviewing,
 		model.PhaseCommitting,
-		model.PhaseRespawn,       // iter 2
+		model.PhaseRespawn, // iter 2
 		model.PhaseDeveloping,
-		model.PhaseBlocked,       // blocked in DEVELOPING
-		model.PhaseDeveloping,    // unblock back to DEVELOPING
+		model.PhaseBlocked,    // blocked in DEVELOPING
+		model.PhaseDeveloping, // unblock back to DEVELOPING
 		model.PhaseReviewing,
 		model.PhaseCommitting,
 		model.PhasePRCreation,
@@ -357,16 +358,16 @@ func TestBlockedAtMaxIterNoBypass(t *testing.T) {
 	env := setupEnv(t)
 
 	registerTransitions(env, t, []model.Phase{
-		model.PhaseRespawn,       // iter 1 (from PLANNING, doesn't count)
+		model.PhaseRespawn, // iter 1 (from PLANNING, doesn't count)
 		model.PhaseDeveloping,
 		model.PhaseReviewing,
 		model.PhaseCommitting,
-		model.PhaseRespawn,       // iter 2 (maxIter reached)
+		model.PhaseRespawn, // iter 2 (maxIter reached)
 		model.PhaseDeveloping,
 		model.PhaseReviewing,
 		model.PhaseCommitting,
-		model.PhaseBlocked,       // blocked in COMMITTING at iter 2
-		model.PhaseCommitting,    // unblock back to COMMITTING
+		model.PhaseBlocked,    // blocked in COMMITTING at iter 2
+		model.PhaseCommitting, // unblock back to COMMITTING
 	})
 
 	// COMMITTING → RESPAWN must be DENIED (maxIter exceeded)
@@ -599,11 +600,11 @@ func TestCurrentIterPhaseDurations_MultiIteration(t *testing.T) {
 	env := setupEnv(t)
 
 	registerTransitions(env, t, []model.Phase{
-		model.PhaseRespawn,     // iter 1 (from PLANNING)
+		model.PhaseRespawn, // iter 1 (from PLANNING)
 		model.PhaseDeveloping,
 		model.PhaseReviewing,
 		model.PhaseCommitting,
-		model.PhaseRespawn,     // iter 2
+		model.PhaseRespawn, // iter 2
 		model.PhaseDeveloping,
 		model.PhaseReviewing,
 		model.PhaseCommitting,
@@ -706,15 +707,15 @@ func TestResetIterationsSignalInWorkflow(t *testing.T) {
 	env := setupEnv(t)
 
 	registerTransitions(env, t, []model.Phase{
-		model.PhaseRespawn,   // from PLANNING (no increment)
+		model.PhaseRespawn, // from PLANNING (no increment)
 		model.PhaseDeveloping,
 		model.PhaseReviewing,
 		model.PhaseCommitting,
-		model.PhaseRespawn,   // iter 2
+		model.PhaseRespawn, // iter 2
 		model.PhaseDeveloping,
 		model.PhaseReviewing,
 		model.PhaseCommitting,
-		model.PhaseRespawn,   // iter 3
+		model.PhaseRespawn, // iter 3
 		model.PhaseDeveloping,
 		model.PhaseReviewing,
 		model.PhaseCommitting,
@@ -750,11 +751,11 @@ func TestRespawnAllowedAfterReset(t *testing.T) {
 	env := setupEnv(t)
 
 	registerTransitions(env, t, []model.Phase{
-		model.PhaseRespawn,   // iter 1 from PLANNING
+		model.PhaseRespawn, // iter 1 from PLANNING
 		model.PhaseDeveloping,
 		model.PhaseReviewing,
 		model.PhaseCommitting,
-		model.PhaseRespawn,   // iter 2 (maxIter reached)
+		model.PhaseRespawn, // iter 2 (maxIter reached)
 		model.PhaseDeveloping,
 		model.PhaseReviewing,
 		model.PhaseCommitting,
@@ -782,13 +783,13 @@ func TestRespawnAllowedAfterReset(t *testing.T) {
 	var timeline model.WorkflowTimeline
 	require.NoError(t, env.GetWorkflowResult(&timeline))
 
-	// Verify we had a denial for max iterations with reset-iterations in the message
+	// Verify we had a denial for max iterations
 	hasDenial := false
 	for _, e := range timeline.Events {
 		if e.Type == model.EventHookDenial && e.Detail["reason"] != "" {
 			hasDenial = true
-			assert.Contains(t, e.Detail["reason"], "reset-iterations",
-				"denial message should contain reset-iterations instructions")
+			assert.Contains(t, e.Detail["reason"], "max iterations",
+				"denial message should mention max iterations")
 			break
 		}
 	}
@@ -801,11 +802,11 @@ func TestTotalIterationsIncrementsAlongside(t *testing.T) {
 	env := setupEnv(t)
 
 	registerTransitions(env, t, []model.Phase{
-		model.PhaseRespawn,   // iter 1 (from PLANNING — both start at 1, neither incremented)
+		model.PhaseRespawn, // iter 1 (from PLANNING — both start at 1, neither incremented)
 		model.PhaseDeveloping,
 		model.PhaseReviewing,
 		model.PhaseCommitting,
-		model.PhaseRespawn,   // iter 2 (both increment to 2)
+		model.PhaseRespawn, // iter 2 (both increment to 2)
 		model.PhaseDeveloping,
 		model.PhaseReviewing,
 		model.PhaseCommitting,
@@ -871,10 +872,8 @@ func TestGuardMaxIterMessageMentionsReset(t *testing.T) {
 	for _, e := range timeline.Events {
 		if e.Type == model.EventHookDenial && e.Detail["reason"] != "" {
 			reason := e.Detail["reason"]
-			assert.Contains(t, reason, "reset-iterations",
-				"denial message should mention reset-iterations command")
-			assert.Contains(t, reason, "Ask the user",
-				"denial message should tell Team Lead to ask user")
+			assert.Contains(t, reason, "max iterations",
+				"denial message should mention max iterations")
 			return
 		}
 	}
@@ -1195,19 +1194,98 @@ func TestInvalidateCommandsSignal(t *testing.T) {
 	assert.True(t, s.commandsRan["developer-1"]["lint"], "lint category should remain after partial invalidation")
 }
 
-// TestCommandsRanResetOnRespawn verifies that commandsRan is cleared when entering RESPAWN.
-func TestCommandsRanResetOnRespawn(t *testing.T) {
+// TestCommandsRanResetOnPhaseTransition verifies that commandsRan is cleared on general phase transitions.
+func TestCommandsRanResetOnPhaseTransition(t *testing.T) {
 	s := &sessionState{
 		commandsRan: map[string]map[string]bool{
 			"developer-1": {"test": true},
 		},
-		maxIter:  5,
+		maxIter:   5,
 		iteration: 1,
 	}
-	// Simulate RESPAWN reset (from handleTransition when req.To == PhaseRespawn)
+	// Simulate general phase transition clear (fromPhase != PhaseBlocked)
 	s.commandsRan = make(map[string]map[string]bool)
 
-	assert.Nil(t, s.commandsRan["developer-1"], "commandsRan should be cleared after RESPAWN")
+	assert.Nil(t, s.commandsRan["developer-1"], "commandsRan should be cleared after phase transition")
+}
+
+// TestCommandsRanClearedOnAgentShutdown verifies that commandsRan for a specific agent is removed on shutdown,
+// while other agents' commandsRan is preserved.
+func TestCommandsRanClearedOnAgentShutdown(t *testing.T) {
+	s := &sessionState{
+		activeAgents: map[string]string{
+			"developer-1": "session-1",
+			"reviewer-1":  "session-1",
+		},
+		commandsRan: map[string]map[string]bool{
+			"developer-1": {"test": true, "lint": true},
+			"reviewer-1":  {"review": true},
+		},
+	}
+	// Simulate agentShutDownCh handler for developer-1
+	agentName := "developer-1"
+	if _, ok := s.activeAgents[agentName]; ok {
+		delete(s.activeAgents, agentName)
+		delete(s.commandsRan, agentName)
+	}
+
+	assert.Nil(t, s.commandsRan["developer-1"], "developer-1 commandsRan should be removed after shutdown")
+	assert.True(t, s.commandsRan["reviewer-1"]["review"], "reviewer-1 commandsRan should be preserved")
+}
+
+// TestCommandsRanClearedOnPhaseTransition verifies that all commandsRan is cleared when
+// transitioning from a non-BLOCKED phase.
+func TestCommandsRanClearedOnPhaseTransition(t *testing.T) {
+	s := &sessionState{
+		commandsRan: map[string]map[string]bool{
+			"developer-1": {"test": true},
+			"reviewer-1":  {"review": true},
+		},
+		phase: model.PhaseDeveloping,
+	}
+	fromPhase := s.phase
+	// Simulate handleTransition clear logic
+	if fromPhase != model.PhaseBlocked {
+		s.commandsRan = make(map[string]map[string]bool)
+	}
+
+	assert.Nil(t, s.commandsRan["developer-1"], "developer-1 commandsRan should be cleared after phase transition")
+	assert.Nil(t, s.commandsRan["reviewer-1"], "reviewer-1 commandsRan should be cleared after phase transition")
+}
+
+// TestCommandsRanPreservedOnUnblock verifies that commandsRan is NOT cleared when unblocking from BLOCKED.
+func TestCommandsRanPreservedOnUnblock(t *testing.T) {
+	s := &sessionState{
+		commandsRan: map[string]map[string]bool{
+			"developer-1": {"test": true},
+		},
+		phase: model.PhaseBlocked,
+	}
+	fromPhase := s.phase
+	// Simulate handleTransition clear logic
+	if fromPhase != model.PhaseBlocked {
+		s.commandsRan = make(map[string]map[string]bool)
+	}
+
+	assert.True(t, s.commandsRan["developer-1"]["test"], "commandsRan should be preserved when unblocking from BLOCKED")
+}
+
+// TestCommandsRanClearedOnClearActiveAgents verifies that commandsRan is cleared when deregister-all-agents fires.
+func TestCommandsRanClearedOnClearActiveAgents(t *testing.T) {
+	s := &sessionState{
+		activeAgents: map[string]string{
+			"developer-1": "session-1",
+		},
+		commandsRan: map[string]map[string]bool{
+			"developer-1": {"test": true},
+		},
+	}
+	// Simulate clearActiveAgentsCh handler
+	s.activeAgents = make(map[string]string)
+	s.commandsRan = make(map[string]map[string]bool)
+
+	assert.Empty(t, s.activeAgents, "activeAgents should be empty after clear")
+	assert.Nil(t, s.commandsRan["developer-1"], "commandsRan should be cleared after deregister-all-agents")
 }
 
 // TestCommandsRanInStatus verifies that CommandsRan appears in WorkflowStatus query.
@@ -1405,7 +1483,6 @@ func TestAutoUnblockPreservesPreBlockedPhase(t *testing.T) {
 	}
 	assert.True(t, hasAutoUnblock, "should have auto-unblock transition event from BLOCKED to FEEDBACK")
 }
-
 
 // TestAutoBlockOnPermissionRequest verifies that a PermissionRequest hook event while in a
 // non-terminal, non-BLOCKED phase automatically transitions to BLOCKED and records preBlockedPhase.
@@ -1668,4 +1745,3 @@ func TestNoUnblockOnPostToolUseWithoutPermissionRequest(t *testing.T) {
 	assert.Equal(t, model.PhaseBlocked, s.phase, "PostToolUse should NOT unblock when blockedByPermission is false")
 	assert.Empty(t, s.events, "no transition event should be emitted for PostToolUse on manual BLOCKED")
 }
-

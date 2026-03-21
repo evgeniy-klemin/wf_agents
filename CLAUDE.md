@@ -8,7 +8,7 @@
 hooks/hooks.json              Hook configuration (all events → bin/hook-handler)
 agents/                       Agent definitions with YAML frontmatter
 commands/                     Slash commands
-states/                       Phase instructions (*.md) — read from disk by hook-handler
+workflow/                    Workflow defaults + phase instructions (UPPERCASE .md) — read from disk
 ```
 
 ### Go backend
@@ -47,6 +47,10 @@ Requires Claude Code v2.1.32+ and the experimental flag enabled in settings.json
 }
 ```
 
+### Kitty terminal freezes with teammates
+
+On macOS, kitty terminal freezes when teammates are running in background. The only confirmed fix is `kitty-unstick` — run it in a separate terminal tab before starting Claude Code. See README for install instructions.
+
 ## Testing
 
 ```bash
@@ -61,7 +65,7 @@ go test ./internal/model/ -v       # state machine tests
 - Transitions use `UpdateWorkflow` (synchronous allow/deny), not signals
 - `WaitForStage: client.WorkflowUpdateStageCompleted` required in UpdateWorkflow options
 - Task description set via `set-task` signal on first `UserPromptSubmit`
-- Phase instructions loaded from `states/*.md` and injected as `additionalContext` on every PreToolUse
+- Phase instructions loaded from `workflow/*.md` and injected as `additionalContext` on every PreToolUse
 - Bash commands chained with `&&`, `||`, `|`, `;` are split and each segment checked independently in guards
 
 ## Important conventions

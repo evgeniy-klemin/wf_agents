@@ -1,6 +1,6 @@
 ---
 title: Declarative guards config with Helm-style overrides
-status: mostly done
+status: done
 priority: high
 created: 2026-03-15
 updated: 2026-03-16

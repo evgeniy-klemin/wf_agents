@@ -1,7 +1,8 @@
 PHASE: PLANNING — Read-only exploration and planning.
 
 CHECKLIST (in order — do NOT skip steps):
-- [ ] Run git branch --show-current → if on main, run git pull; if NOT on main, ask user whether to switch
+
+- [ ] Run git branch --show-current → if on main, run git pull (make sure the main branch is up to date); if NOT on main, ask user whether to switch
 - [ ] Record BASE_BRANCH (main or current branch per user's choice)
 - [ ] Create feature branch: git checkout -b <feature-branch-name>
 - [ ] VERIFY: git branch --show-current — confirm on feature branch, NOT BASE_BRANCH
@@ -11,9 +12,11 @@ CHECKLIST (in order — do NOT skip steps):
 - [ ] Define testing strategy
 - [ ] Write the plan using plan mode — this creates a plan file the user can review
 - [ ] Wait for explicit user approval before transitioning — do NOT proceed without it
+- [ ] VERIFY: git status — working tree must be clean before transition
 - [ ] Transition: {{WF_CLIENT}} transition <id> --to RESPAWN --reason "Plan: <summary>"
 
 RULES:
+
 - NEVER commit directly to BASE_BRANCH — all work happens on the feature branch
 - Remember BASE_BRANCH — you will need it in PR_CREATION
 - Break large tasks into logical iteration blocks: each iteration should produce a coherent,

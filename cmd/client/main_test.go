@@ -2,11 +2,14 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/eklemin/wf-agents/internal/platform"
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/client"
 )
@@ -200,5 +203,275 @@ func TestRemoveSessionMarker_AlsoCleansTeammateMarkers(t *testing.T) {
 	// Teammate marker should also be gone
 	if _, err := os.Stat(teammateMarker); !os.IsNotExist(err) {
 		t.Errorf("teammate marker with parent=%s should have been removed by removeSessionMarker", parentSessionID)
+	}
+}
+
+// TestParsePlatformFromURL verifies platform detection from git remote URLs.
+func TestParsePlatformFromURL(t *testing.T) {
+	tests := []struct {
+		name      string
+		remoteURL string
+		want      string
+	}{
+		{"github SSH", "git@github.com:org/repo.git", "github"},
+		{"github HTTPS", "https://github.com/org/repo.git", "github"},
+		{"gitlab.diftech.org SSH", "git@gitlab.diftech.org:org/repo.git", "gitlab"},
+		{"gitlab.diftech.org HTTPS", "https://gitlab.diftech.org/org/repo.git", "gitlab"},
+		{"gitlab.com SSH", "git@gitlab.com:org/repo.git", "gitlab"},
+		{"gitlab.com HTTPS", "https://gitlab.com/org/repo.git", "gitlab"},
+		{"bitbucket", "https://bitbucket.org/org/repo.git", "unknown"},
+		{"empty", "", "unknown"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := platform.ParsePlatformFromURL(tc.remoteURL)
+			if got != tc.want {
+				t.Errorf("parsePlatformFromURL(%q) = %q, want %q", tc.remoteURL, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCollectBranchPushedEvidence verifies branch_pushed evidence using a mock CmdRunner.
+func TestCollectBranchPushedEvidence(t *testing.T) {
+	const sha1 = "abc123def456abc123def456abc123def456abc1"
+	const sha2 = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+
+	makeRunner := func(localHead, remoteHead string, localErr, remoteErr error) platform.CmdRunner {
+		return func(_ time.Duration, name string, args ...string) (string, error) {
+			if name == "git" && len(args) == 2 && args[0] == "rev-parse" && args[1] == "HEAD" {
+				return localHead, localErr
+			}
+			if name == "git" && len(args) == 2 && args[0] == "rev-parse" && args[1] == "@{u}" {
+				return remoteHead, remoteErr
+			}
+			return "", fmt.Errorf("unexpected command: %s %v", name, args)
+		}
+	}
+
+	tests := []struct {
+		name      string
+		runner    platform.CmdRunner
+		wantKey   bool
+		wantValue string
+	}{
+		{
+			name:      "HEAD matches upstream — pushed",
+			runner:    makeRunner(sha1+"\n", sha1+"\n", nil, nil),
+			wantKey:   true,
+			wantValue: "true",
+		},
+		{
+			name:      "HEAD differs from upstream — not pushed",
+			runner:    makeRunner(sha1+"\n", sha2+"\n", nil, nil),
+			wantKey:   true,
+			wantValue: "false",
+		},
+		{
+			name:      "no upstream tracking branch — not pushed",
+			runner:    makeRunner(sha1+"\n", "", nil, fmt.Errorf("fatal: no upstream configured")),
+			wantKey:   true,
+			wantValue: "false",
+		},
+		{
+			name:    "git rev-parse HEAD fails — key absent",
+			runner:  makeRunner("", "", fmt.Errorf("not a git repo"), nil),
+			wantKey: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			evidence := make(map[string]string)
+			collectBranchPushedEvidence(evidence, tc.runner)
+			val, ok := evidence["branch_pushed"]
+			if ok != tc.wantKey {
+				t.Fatalf("branch_pushed present=%v, want present=%v", ok, tc.wantKey)
+			}
+			if tc.wantKey && val != tc.wantValue {
+				t.Errorf("branch_pushed = %q, want %q", val, tc.wantValue)
+			}
+		})
+	}
+}
+
+// TestCollectGitLabEvidence verifies GitLab evidence collection with a mock platform.CmdRunner.
+func TestCollectGitLabEvidence(t *testing.T) {
+	makeRunner := func(out string, err error) platform.CmdRunner {
+		return func(_ time.Duration, _ string, _ ...string) (string, error) {
+			return out, err
+		}
+	}
+
+	glabOutput := func(pipelineStatus *string, approvedBy int, state string) string {
+		pipeline := "null"
+		if pipelineStatus != nil {
+			pipeline = fmt.Sprintf(`{"status":%q}`, *pipelineStatus)
+		}
+		approvers := "[]"
+		if approvedBy > 0 {
+			items := make([]string, approvedBy)
+			for i := range items {
+				items[i] = `{"username":"user"}`
+			}
+			approvers = "[" + strings.Join(items, ",") + "]"
+		}
+		return fmt.Sprintf(`{"head_pipeline":%s,"approved_by":%s,"state":%q}`, pipeline, approvers, state)
+	}
+
+	strPtr := func(s string) *string { return &s }
+
+	tests := []struct {
+		name         string
+		runner       platform.CmdRunner
+		wantCI       string
+		wantApproved string
+		wantMerged   string
+	}{
+		{
+			name:         "pipeline success, approved, merged",
+			runner:       makeRunner(glabOutput(strPtr("success"), 1, "merged"), nil),
+			wantCI:       "true",
+			wantApproved: "true",
+			wantMerged:   "true",
+		},
+		{
+			name:         "pipeline failed, not approved, open",
+			runner:       makeRunner(glabOutput(strPtr("failed"), 0, "opened"), nil),
+			wantCI:       "false",
+			wantApproved: "false",
+			wantMerged:   "false",
+		},
+		{
+			name:         "pipeline nil (no pipeline), not approved, open",
+			runner:       makeRunner(glabOutput(nil, 0, "opened"), nil),
+			wantCI:       "true",
+			wantApproved: "false",
+			wantMerged:   "false",
+		},
+		{
+			name:         "pipeline skipped, approved, not merged",
+			runner:       makeRunner(glabOutput(strPtr("skipped"), 2, "opened"), nil),
+			wantCI:       "true",
+			wantApproved: "true",
+			wantMerged:   "false",
+		},
+		{
+			name:         "glab error (no MR)",
+			runner:       makeRunner("", fmt.Errorf("no MR found")),
+			wantCI:       "true",
+			wantApproved: "false",
+			wantMerged:   "false",
+		},
+		{
+			name:         "malformed JSON",
+			runner:       makeRunner("not json at all", nil),
+			wantCI:       "true",
+			wantApproved: "false",
+			wantMerged:   "false",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			evidence := make(map[string]string)
+			collectGitLabEvidence(evidence, tc.runner)
+			if got := evidence["ci_passed"]; got != tc.wantCI {
+				t.Errorf("ci_passed = %q, want %q", got, tc.wantCI)
+			}
+			if got := evidence["review_approved"]; got != tc.wantApproved {
+				t.Errorf("review_approved = %q, want %q", got, tc.wantApproved)
+			}
+			if got := evidence["merged"]; got != tc.wantMerged {
+				t.Errorf("merged = %q, want %q", got, tc.wantMerged)
+			}
+		})
+	}
+}
+
+// TestCollectGitHubEvidence verifies GitHub evidence collection with a mock platform.CmdRunner.
+func TestCollectGitHubEvidence(t *testing.T) {
+	checksJSON := func(states ...string) string {
+		items := make([]string, len(states))
+		for i, s := range states {
+			items[i] = fmt.Sprintf(`{"state":%q}`, s)
+		}
+		return "[" + strings.Join(items, ",") + "]"
+	}
+
+	prJSON := func(decision, state string) string {
+		return fmt.Sprintf(`{"reviewDecision":%q,"state":%q}`, decision, state)
+	}
+
+	makeRunner := func(checksOut, prOut string, checksErr, prErr error) platform.CmdRunner {
+		return func(_ time.Duration, name string, args ...string) (string, error) {
+			if name == "gh" && len(args) > 0 && args[0] == "pr" && args[1] == "checks" {
+				return checksOut, checksErr
+			}
+			if name == "gh" && len(args) > 0 && args[0] == "pr" && args[1] == "view" {
+				return prOut, prErr
+			}
+			return "", fmt.Errorf("unexpected command: %s %v", name, args)
+		}
+	}
+
+	tests := []struct {
+		name         string
+		runner       platform.CmdRunner
+		wantCI       string
+		wantApproved string
+		wantMerged   string
+	}{
+		{
+			name:         "all checks pass, approved, merged",
+			runner:       makeRunner(checksJSON("SUCCESS", "NEUTRAL"), prJSON("APPROVED", "MERGED"), nil, nil),
+			wantCI:       "true",
+			wantApproved: "true",
+			wantMerged:   "true",
+		},
+		{
+			name:         "check failed, not approved, open",
+			runner:       makeRunner(checksJSON("SUCCESS", "FAILURE"), prJSON("", "OPEN"), nil, nil),
+			wantCI:       "false",
+			wantApproved: "false",
+			wantMerged:   "false",
+		},
+		{
+			name:         "no checks (empty array), approved, open",
+			runner:       makeRunner("[]", prJSON("APPROVED", "OPEN"), nil, nil),
+			wantCI:       "true",
+			wantApproved: "true",
+			wantMerged:   "false",
+		},
+		{
+			name:         "gh pr checks error, gh pr view error",
+			runner:       makeRunner("", "", fmt.Errorf("no PR"), fmt.Errorf("no PR")),
+			wantCI:       "true",
+			wantApproved: "false",
+			wantMerged:   "false",
+		},
+		{
+			name:         "skipped check counts as pass",
+			runner:       makeRunner(checksJSON("SKIPPED", "SUCCESS"), prJSON("APPROVED", "MERGED"), nil, nil),
+			wantCI:       "true",
+			wantApproved: "true",
+			wantMerged:   "true",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			evidence := make(map[string]string)
+			collectGitHubEvidence(evidence, tc.runner)
+			if got := evidence["ci_passed"]; got != tc.wantCI {
+				t.Errorf("ci_passed = %q, want %q", got, tc.wantCI)
+			}
+			if got := evidence["review_approved"]; got != tc.wantApproved {
+				t.Errorf("review_approved = %q, want %q", got, tc.wantApproved)
+			}
+			if got := evidence["merged"]; got != tc.wantMerged {
+				t.Errorf("merged = %q, want %q", got, tc.wantMerged)
+			}
+		})
 	}
 }

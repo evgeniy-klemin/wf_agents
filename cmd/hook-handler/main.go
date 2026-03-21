@@ -14,6 +14,8 @@ import (
 	"github.com/eklemin/wf-agents/internal/config"
 	"github.com/eklemin/wf-agents/internal/model"
 	"github.com/eklemin/wf-agents/internal/noplog"
+	"github.com/eklemin/wf-agents/internal/session"
+	internaltemporal "github.com/eklemin/wf-agents/internal/temporal"
 	wf "github.com/eklemin/wf-agents/internal/workflow"
 	enums "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/client"
@@ -126,6 +128,7 @@ func main() {
 		"prompt": true, "source": true, "model": true,
 		"last_assistant_message": true, "error": true,
 		"teammate_name": true, "team_name": true,
+		"stop_hook_active": true,
 	}
 	for k := range rawFields {
 		if !knownFields[k] {
@@ -230,7 +233,7 @@ func main() {
 			})
 			currentStatus := queryStatus(ctx, c, workflowID)
 			currentPhase := currentStatus.Phase
-			instructions := phaseInstructions(currentPhase)
+			instructions := phaseInstructions(currentPhase, input.CWD)
 			out := hookOutput{
 				HookSpecificOutput: &hookSpecificOutput{
 					HookEventName:            "PreToolUse",
@@ -257,7 +260,7 @@ func main() {
 		// Re-query status after possible auto-transition (e.g., AskUserQuestion → BLOCKED)
 		currentStatus := queryStatus(ctx, c, workflowID)
 		currentPhase := currentStatus.Phase
-		instructions := phaseInstructions(currentPhase)
+		instructions := phaseInstructions(currentPhase, input.CWD)
 		if instructions != "" {
 			out := hookOutput{
 				HookSpecificOutput: &hookSpecificOutput{
@@ -334,9 +337,7 @@ func main() {
 		if !isTeammate {
 			// This is the Team Lead going idle — use config-driven deny rules.
 			if msg := evalLeadStopConfig(input.CWD, string(phase)); msg != "" {
-				pluginRoot := os.Getenv("CLAUDE_PLUGIN_ROOT")
-				reason := fmt.Sprintf("DENIED: %s Run: %s/bin/wf-client transition <session-id> --to BLOCKED --reason \"<why>\"",
-					msg, pluginRoot)
+				reason := fmt.Sprintf("DENIED: %s", msg)
 				fmt.Fprintf(os.Stderr, "%s\n", reason)
 				logResponse(input.SessionID, "TeammateIdle", 2, map[string]string{
 					"action": "keep_working",
@@ -348,6 +349,11 @@ func main() {
 			// Teammate going idle — query per-agent command tracking then evaluate config-driven idle rules.
 			agentName := resolveAgentName(input)
 			commandsRan := queryAgentCommands(ctx, c, workflowID, agentName)
+			// Skip command_ran idle checks if the agent hasn't changed any files yet.
+			// This prevents denying idle immediately after spawn (before the agent starts working).
+			if !commandsRan["_file_changed"] {
+				break
+			}
 			if reason := evalTeammateIdleConfig(input.CWD, string(phase), agentName, commandsRan); reason != "" {
 				fmt.Fprintf(os.Stderr, "%s\n", reason)
 				logResponse(input.SessionID, "TeammateIdle", 2, map[string]string{
@@ -370,8 +376,7 @@ func main() {
 		if !isTeammate {
 			phase := queryPhase(ctx, c, workflowID)
 			if msg := evalLeadStopConfig(input.CWD, string(phase)); msg != "" {
-				reason := fmt.Sprintf("DENIED: %s Run: %s/bin/wf-client transition <session-id> --to BLOCKED --reason \"<why>\"",
-					msg, os.Getenv("CLAUDE_PLUGIN_ROOT"))
+				reason := fmt.Sprintf("DENIED: %s", msg)
 				fmt.Fprintf(os.Stderr, "%s\n", reason)
 				logResponse(input.SessionID, "Stop", 2, map[string]string{
 					"action": "keep_working",
@@ -473,16 +478,18 @@ func queryPhase(ctx context.Context, c client.Client, workflowID string) model.P
 // phaseInstructions returns comprehensive enforcement instructions for the current phase.
 // Injected as additionalContext on every PreToolUse — this is the PRIMARY mechanism
 // that keeps Claude on track (since plugin CLAUDE.md is project docs, not workflow rules).
-// Content is loaded from states/<phase>.md under CLAUDE_PLUGIN_ROOT and placeholders
+// Content is loaded from workflow/<PHASE>.md under CLAUDE_PLUGIN_ROOT, with a project-level
+// override checked first at <cwd>/.wf-agents/<PHASE>.md. Placeholders
 // ({{WF_CLIENT}}, {{PLUGIN_ROOT}}, {{AGENT_FILE}}) are substituted.
-func phaseInstructions(phase model.Phase) string {
+// The .md filename defaults to PHASE.md (uppercase); it is no longer read from config.
+func phaseInstructions(phase model.Phase, cwd string) string {
 	wfc := wfClientBin()
 
 	pluginRoot := os.Getenv("CLAUDE_PLUGIN_ROOT")
 	if pluginRoot == "" {
 		pluginRoot = "${CLAUDE_PLUGIN_ROOT}"
 	}
-	agentFile := pluginRoot + "/agents/feature-team-lead.md"
+	agentFile := pluginRoot + "/agents/iriski-team-lead.md"
 
 	// Preamble for Team Lead phases — where the main agent is acting
 	teamLeadPreamble := "You are the Team Lead. You NEVER write code or review code. You plan, delegate, and coordinate.\n" +
@@ -493,32 +500,35 @@ func phaseInstructions(phase model.Phase) string {
 	// Enforcement-only preamble for phases where teammates act
 	enforcementPreamble := "If a tool call is denied, DO NOT retry — follow the denial reason.\n\n"
 
-	// Map each phase to its state file name and the appropriate preamble.
-	type phaseConfig struct {
-		filename string
-		preamble string
-	}
-	configs := map[model.Phase]phaseConfig{
-		model.PhasePlanning:   {"planning.md", teamLeadPreamble},
-		model.PhaseRespawn:    {"respawn.md", teamLeadPreamble},
-		model.PhaseDeveloping: {"developing.md", enforcementPreamble},
-		model.PhaseReviewing:  {"reviewing.md", enforcementPreamble},
-		model.PhaseCommitting: {"committing.md", teamLeadPreamble},
-		model.PhasePRCreation: {"pr_creation.md", teamLeadPreamble},
-		model.PhaseFeedback:   {"feedback.md", teamLeadPreamble},
-		model.PhaseBlocked:    {"blocked.md", teamLeadPreamble},
-		model.PhaseComplete:   {"complete.md", teamLeadPreamble},
+	// Phases where teammates act (not the Team Lead).
+	teammatePhases := map[model.Phase]bool{
+		model.PhaseDeveloping: true,
+		model.PhaseReviewing:  true,
 	}
 
-	cfg, ok := configs[phase]
-	if !ok {
-		return fmt.Sprintf("PHASE: %s", phase)
+	preamble := teamLeadPreamble
+	if teammatePhases[phase] {
+		preamble = enforcementPreamble
 	}
 
-	stateFile := filepath.Join(pluginRoot, "states", cfg.filename)
-	raw, err := os.ReadFile(stateFile)
-	if err != nil {
-		return fmt.Sprintf("PHASE: %s", phase)
+	// Filename is PHASE.md (uppercase). No longer read from config.
+	filename := string(phase) + ".md"
+
+	// Check for project-level override first: <cwd>/.wf-agents/<PHASE>.md
+	var raw []byte
+	var err error
+	if cwd != "" {
+		projectFile := filepath.Join(cwd, ".wf-agents", filename)
+		raw, err = os.ReadFile(projectFile)
+	}
+
+	// Fall back to plugin's workflow/ directory
+	if err != nil || len(raw) == 0 {
+		stateFile := filepath.Join(pluginRoot, "workflow", filename)
+		raw, err = os.ReadFile(stateFile)
+		if err != nil {
+			return fmt.Sprintf("PHASE: %s", phase)
+		}
 	}
 
 	content := strings.NewReplacer(
@@ -527,85 +537,11 @@ func phaseInstructions(phase model.Phase) string {
 		"{{AGENT_FILE}}", agentFile,
 	).Replace(string(raw))
 
-	return cfg.preamble + content
+	return preamble + content
 }
 
-// resolveWorkflowID returns the workflow ID for the given session.
-// First checks if session_id itself has a marker (lead session).
-// If not, scans all markers to find one with matching CWD (teammate session).
-// Returns empty string if no workflow found.
 func resolveWorkflowID(sessionID, cwd string) string {
-	dir := filepath.Join(os.TempDir(), "wf-agents-sessions")
-
-	// Direct match — this is the lead session
-	marker := filepath.Join(dir, sessionID)
-	if data, err := os.ReadFile(marker); err == nil {
-		var m map[string]string
-		if json.Unmarshal(data, &m) == nil {
-			return m["workflow_id"]
-		}
-		// Legacy marker (plain text) — assume workflow_id format
-		return "coding-session-" + strings.TrimSpace(string(data))
-	}
-
-	// No direct match — scan for CWD match (teammate session).
-	// Only consider lead markers (no "parent" field). Among multiple lead markers
-	// with the same CWD, pick the one with the most recent modification time.
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return ""
-	}
-
-	var bestWorkflowID string
-	var bestSessionID string
-	var bestModTime time.Time
-
-	for _, entry := range entries {
-		path := filepath.Join(dir, entry.Name())
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		var m map[string]string
-		if json.Unmarshal(data, &m) != nil {
-			continue
-		}
-		// Skip teammate markers — only lead markers can be the CWD match source.
-		if m["parent"] != "" {
-			continue
-		}
-		if m["cwd"] != cwd || cwd == "" {
-			continue
-		}
-		// Pick the marker with the latest modification time.
-		info, err := entry.Info()
-		if err != nil {
-			continue
-		}
-		if info.ModTime().After(bestModTime) {
-			bestModTime = info.ModTime()
-			bestWorkflowID = m["workflow_id"]
-			bestSessionID = m["session_id"]
-		}
-	}
-
-	if bestWorkflowID != "" && bestSessionID != sessionID {
-		// Found a workflow with same CWD — this teammate belongs to it.
-		// Create a marker for the teammate so future hooks resolve directly.
-		teammateMarker := filepath.Join(dir, sessionID)
-		teammateData, _ := json.Marshal(map[string]string{
-			"session_id":  sessionID,
-			"workflow_id": bestWorkflowID,
-			"cwd":         cwd,
-			"parent":      bestSessionID,
-		})
-		_ = os.WriteFile(teammateMarker, teammateData, 0o644)
-		fmt.Fprintf(os.Stderr, "Teammate resolved: session=%s → workflow=%s (via CWD match with %s)\n",
-			sessionID, bestWorkflowID, bestSessionID)
-		return bestWorkflowID
-	}
-
-	return ""
+	return session.ResolveWorkflowIDByCWD(sessionID, cwd)
 }
 
 func buildDetail(input claudeHookInput) map[string]string {
@@ -691,10 +627,7 @@ func wfClientBin() string {
 }
 
 func temporalHost() string {
-	if h := os.Getenv("TEMPORAL_HOST"); h != "" {
-		return h
-	}
-	return "localhost:7233"
+	return internaltemporal.Host()
 }
 
 // idleCheckContext implements config.CheckContext for teammate idle evaluation.
@@ -761,6 +694,7 @@ func trackPreToolUse(ctx context.Context, c workflowSignaler, workflowID string,
 	}
 
 	// File-change tool: invalidate categories that have invalidate_on_file_change=true
+	// and record _file_changed so idle checks know the agent has started making changes.
 	if config.IsFileChangeTool(input.ToolName) {
 		var toInvalidate []string
 		for catName, cat := range cfg.Tracking {
@@ -779,6 +713,24 @@ func trackPreToolUse(ctx context.Context, c workflowSignaler, workflowID string,
 				fmt.Fprintf(os.Stderr, "Warning: failed to send invalidate-commands signal: %v\n", err)
 			}
 		}
+		// Record that this agent has made at least one file change.
+		_ = c.SignalWorkflow(ctx, workflowID, "", wf.SignalCommandRan, model.SignalCommandRan{
+			SessionID: input.SessionID,
+			AgentName: agentName,
+			Category:  "_file_changed",
+			Command:   input.ToolName,
+		})
+		return
+	}
+
+	// SendMessage tool: record that this agent sent a message to the team.
+	if input.ToolName == "SendMessage" {
+		_ = c.SignalWorkflow(ctx, workflowID, "", wf.SignalCommandRan, model.SignalCommandRan{
+			SessionID: input.SessionID,
+			AgentName: agentName,
+			Category:  "_sent_message",
+			Command:   "SendMessage",
+		})
 		return
 	}
 
@@ -814,10 +766,32 @@ func trackPreToolUse(ctx context.Context, c workflowSignaler, workflowID string,
 }
 
 // matchesAnyPattern returns true if cmd starts with any of the given patterns at a word boundary.
+// It also tries matching the basename of the first token to handle path-prefixed commands
+// like "/usr/local/bin/golangci-lint run ./..." matching pattern "golangci-lint".
 func matchesAnyPattern(cmd string, patterns []string) bool {
 	for _, p := range patterns {
 		if matchesBashPatternPrefix(cmd, p) {
 			return true
+		}
+	}
+	// Try with the basename of the executable (first token may be an absolute path).
+	if strings.HasPrefix(cmd, "/") {
+		// Extract first space-delimited token and replace with its basename.
+		firstSpace := strings.IndexByte(cmd, ' ')
+		var exe, rest string
+		if firstSpace == -1 {
+			exe = cmd
+			rest = ""
+		} else {
+			exe = cmd[:firstSpace]
+			rest = cmd[firstSpace:] // includes the leading space
+		}
+		base := filepath.Base(exe)
+		normalized := base + rest
+		for _, p := range patterns {
+			if matchesBashPatternPrefix(normalized, p) {
+				return true
+			}
 		}
 	}
 	return false
@@ -835,7 +809,7 @@ func matchesBashPatternPrefix(cmd, pattern string) bool {
 	return c == ' ' || c == '\t' || c == '|' || c == ';' || c == '&' || c == '\n'
 }
 
-// evalTeammateIdleConfig loads the project config (with optional .wf-agents.yaml override),
+// evalTeammateIdleConfig loads the project config (with optional .wf-agents/workflow.yaml override),
 // finds the idle rule matching the current phase, and evaluates its checks.
 // Returns a non-empty denial reason if the teammate should not idle, or "" if idle is allowed.
 func evalTeammateIdleConfig(projectDir, phase, teammateName string, commandsRan map[string]bool) string {

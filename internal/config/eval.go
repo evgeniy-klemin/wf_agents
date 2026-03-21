@@ -58,10 +58,7 @@ func EvalCheck(check Check, ctx CheckContext) string {
 			if check.Message != "" {
 				return fmt.Sprintf("%s (max: %d)", check.Message, ctx.MaxIterations())
 			}
-			return fmt.Sprintf(
-				"max iterations (%d) reached. Ask the user whether to continue. If yes, run: wf-client reset-iterations <workflow-id>, then retry this transition.",
-				ctx.MaxIterations(),
-			)
+			return fmt.Sprintf("max iterations (%d) reached", ctx.MaxIterations())
 		}
 		return ""
 
@@ -71,6 +68,12 @@ func EvalCheck(check Check, ctx CheckContext) string {
 			return ""
 		}
 		return check.Message
+
+	case "send_message":
+		if !ctx.CommandsRan()["_sent_message"] {
+			return check.Message
+		}
+		return ""
 
 	default:
 		return fmt.Sprintf("unknown check type %q", check.Type)
@@ -95,55 +98,150 @@ func agentGlobMatch(pattern, name string) bool {
 	return err == nil && matched
 }
 
+// phaseIdleRuleToIdleRule converts a PhaseIdleRule to an IdleRule for compatibility.
+func phaseIdleRuleToIdleRule(phase string, r PhaseIdleRule) *IdleRule {
+	checks := make([]Check, 0, len(r.Checks))
+	for _, pc := range r.Checks {
+		checks = append(checks, Check{
+			Type:     pc.Type,
+			Category: pc.Category,
+			Message:  pc.Message,
+		})
+	}
+	return &IdleRule{Phase: phase, Agent: r.Agent, Checks: checks}
+}
+
 // FindIdleRule returns the best-matching IdleRule from cfg for the given phase and agentName.
-// Priority (highest to lowest):
-//  1. Exact phase match + agent glob matches agentName
-//  2. Exact phase match + no agent (applies to all agents)
-//  3. Wildcard phase ("*") + agent glob matches agentName
-//  4. Wildcard phase ("*") + no agent
+//
+// Priority:
+//  1. cfg.TeammateIdle (legacy/override entries from .wf-agents/workflow.yaml) — exact phase+agent,
+//     exact phase+no-agent, wildcard+agent, wildcard+no-agent.
+//  2. cfg.Phases idle rules (new format) — exact phase+agent, exact phase+no-agent,
+//     defaults+agent, defaults+no-agent.
+//
+// This ordering allows project-level .wf-agents/workflow.yaml to override the phases idle rules
+// using the legacy teammate_idle format, while the default config uses phases config.
 //
 // Returns nil if no rule matches.
 func FindIdleRule(cfg *Config, phase, agentName string) *IdleRule {
-	var exactNoAgent, wildAgent, wildNoAgent *IdleRule
-	for i := range cfg.TeammateIdle {
-		r := &cfg.TeammateIdle[i]
-		exactPhase := r.Phase == phase
-		wildcardPhase := r.Phase == "*"
-		if !exactPhase && !wildcardPhase {
-			continue
-		}
-		hasAgent := r.Agent != ""
-		agentMatches := hasAgent && agentGlobMatch(r.Agent, agentName)
+	// Check cfg.TeammateIdle first — these are project-level overrides.
+	if len(cfg.TeammateIdle) > 0 {
+		var exactNoAgent, wildAgent, wildNoAgent *IdleRule
+		for i := range cfg.TeammateIdle {
+			r := &cfg.TeammateIdle[i]
+			exactPhase := r.Phase == phase
+			wildcardPhase := r.Phase == "*"
+			if !exactPhase && !wildcardPhase {
+				continue
+			}
+			hasAgent := r.Agent != ""
+			agentMatches := hasAgent && agentGlobMatch(r.Agent, agentName)
 
-		if exactPhase {
-			if agentMatches {
-				return r // highest priority: exact phase + agent match
-			}
-			if !hasAgent && exactNoAgent == nil {
-				exactNoAgent = r
-			}
-		} else { // wildcard phase
-			if agentMatches && wildAgent == nil {
-				wildAgent = r
-			}
-			if !hasAgent && wildNoAgent == nil {
-				wildNoAgent = r
+			if exactPhase {
+				if agentMatches {
+					return r // highest priority: exact phase + agent match
+				}
+				if !hasAgent && exactNoAgent == nil {
+					exactNoAgent = r
+				}
+			} else { // wildcard phase
+				if agentMatches && wildAgent == nil {
+					wildAgent = r
+				}
+				if !hasAgent && wildNoAgent == nil {
+					wildNoAgent = r
+				}
 			}
 		}
+		if exactNoAgent != nil {
+			return exactNoAgent
+		}
+		if wildAgent != nil {
+			return wildAgent
+		}
+		if wildNoAgent != nil {
+			return wildNoAgent
+		}
+		// Fall through to phases config if no match in TeammateIdle.
 	}
-	if exactNoAgent != nil {
-		return exactNoAgent
+
+	// New format: read from phases config idle rules (excluding "lead" agent).
+	if cfg.Phases != nil {
+		var exactAgentRule, exactNoAgentRule, defaultAgentRule, defaultNoAgentRule *IdleRule
+
+		// Check exact phase match.
+		if pc, ok := cfg.Phases.Phases[phase]; ok {
+			for _, rule := range pc.Idle {
+				if rule.Agent == "lead" {
+					continue // lead rules are handled by FindLeadIdleRule
+				}
+				hasAgent := rule.Agent != "" && rule.Agent != "*"
+				agentMatches := hasAgent && agentGlobMatch(rule.Agent, agentName)
+				if agentMatches && exactAgentRule == nil {
+					r := phaseIdleRuleToIdleRule(phase, rule)
+					exactAgentRule = r
+				} else if !hasAgent && exactNoAgentRule == nil {
+					r := phaseIdleRuleToIdleRule(phase, rule)
+					exactNoAgentRule = r
+				}
+			}
+		}
+		// Check defaults.
+		for _, rule := range cfg.Phases.Defaults.Idle {
+			if rule.Agent == "lead" {
+				continue
+			}
+			hasAgent := rule.Agent != "" && rule.Agent != "*"
+			agentMatches := hasAgent && agentGlobMatch(rule.Agent, agentName)
+			if agentMatches && defaultAgentRule == nil {
+				r := phaseIdleRuleToIdleRule("*", rule)
+				defaultAgentRule = r
+			} else if !hasAgent && defaultNoAgentRule == nil {
+				r := phaseIdleRuleToIdleRule("*", rule)
+				defaultNoAgentRule = r
+			}
+		}
+
+		if exactAgentRule != nil {
+			return exactAgentRule
+		}
+		if exactNoAgentRule != nil {
+			return exactNoAgentRule
+		}
+		if defaultAgentRule != nil {
+			return defaultAgentRule
+		}
+		return defaultNoAgentRule
 	}
-	if wildAgent != nil {
-		return wildAgent
-	}
-	return wildNoAgent
+
+	return nil
 }
 
 // FindLeadIdleRule returns the best-matching LeadIdleRule for the given phase.
-// Exact phase match takes priority over wildcard ("*").
+// Reads from cfg.Phases (new format) when available, falling back to cfg.LeadIdle (legacy).
+// Exact phase match takes priority over wildcard/defaults.
 // Returns nil if no rule matches.
 func FindLeadIdleRule(cfg *Config, phase string) *LeadIdleRule {
+	// New format: read from phases config idle rules where agent == "lead".
+	if cfg.Phases != nil {
+		// Check exact phase match first.
+		if pc, ok := cfg.Phases.Phases[phase]; ok {
+			for _, rule := range pc.Idle {
+				if rule.Agent == "lead" {
+					return &LeadIdleRule{Phase: phase, Deny: rule.Deny, Message: rule.Message}
+				}
+			}
+		}
+		// Fall back to defaults idle rules.
+		for _, rule := range cfg.Phases.Defaults.Idle {
+			if rule.Agent == "lead" {
+				return &LeadIdleRule{Phase: "*", Deny: rule.Deny, Message: rule.Message}
+			}
+		}
+		return nil
+	}
+
+	// Legacy fallback: read from cfg.LeadIdle.
 	var wildcard *LeadIdleRule
 	for i := range cfg.LeadIdle {
 		r := &cfg.LeadIdle[i]
@@ -160,7 +258,80 @@ func FindLeadIdleRule(cfg *Config, phase string) *LeadIdleRule {
 // FindTeammatePermission returns the first matching permission rule for the given
 // phase, agent name, tool name, and bash command. Returns nil if no rule matches.
 // Matching: agent glob (or empty=all), tool in Tools list OR bashCmd matches a Bash prefix.
+//
+// When cfg.Phases is set (new format), file-writing tool permissions are derived from
+// per-phase AgentPermission.FileWrites settings. A synthesized TeammatePermission is
+// returned with Phases set to the list of phases where file_writes==allow.
 func FindTeammatePermission(cfg *Config, phase, agentName, toolName, bashCmd string) *TeammatePermission {
+	// New format: derive from phases config when Phases is available.
+	if cfg.Phases != nil && toolName != "" {
+		// Only file-writing tools are controlled by the phases teammate permissions.
+		isFileWrite := false
+		for _, t := range cfg.Phases.Defaults.Permissions.FileWritingTools {
+			if t == toolName {
+				isFileWrite = true
+				break
+			}
+		}
+		if isFileWrite {
+			return findTeammatePermissionFromPhases(cfg, agentName, toolName)
+		}
+		// Non-file-write tools are not restricted via phases teammate permissions.
+		return nil
+	}
+
+	// Legacy fallback: read from cfg.TeammatePermissions.
+	return findTeammatePermissionLegacy(cfg, agentName, toolName, bashCmd)
+}
+
+// findTeammatePermissionFromPhases synthesizes a TeammatePermission from the phases config.
+// It collects all phases where the given agent has file_writes==allow and returns a rule
+// whose Phases field contains those phases. The caller checks if the current phase is
+// in rule.Phases to determine whether file writes are allowed.
+//
+// Only agents that have at least one phase with file_writes==allow are restricted.
+// Agents with no allow rules anywhere return nil (default open, no restriction),
+// preserving backward compatibility with agents like "reviewer*" that are not
+// explicitly managed by the permissions system.
+func findTeammatePermissionFromPhases(cfg *Config, agentName, toolName string) *TeammatePermission {
+	// Collect phases where this agent explicitly has file_writes==allow.
+	var allowedPhases []string
+	for phaseName, pc := range cfg.Phases.Phases {
+		for _, ap := range pc.Permissions.Teammate {
+			if agentGlobMatch(ap.Agent, agentName) && ap.FileWrites == "allow" {
+				allowedPhases = append(allowedPhases, phaseName)
+				break
+			}
+		}
+	}
+
+	// If the agent has no phase-specific allow rules, return nil (no restriction).
+	// This means the agent is not managed by the phases permissions system, and the
+	// default-open behavior applies — consistent with how the legacy teammate_permissions
+	// section only managed developer* agents.
+	if len(allowedPhases) == 0 {
+		return nil
+	}
+
+	// Agent has explicit phase-level allow rules — synthesize a permission rule.
+	// Phases = allowed list; if current phase is not in this list, the caller denies.
+	defaultMsg := "File editing only allowed in designated phases"
+	// Try to get the message from the default deny rule for this agent.
+	for _, ap := range cfg.Phases.Defaults.Permissions.Teammate {
+		if agentGlobMatch(ap.Agent, agentName) && ap.FileWrites == "deny" {
+			break // no message field on AgentPermission, use default
+		}
+	}
+	return &TeammatePermission{
+		Agent:   agentName,
+		Tools:   []string{toolName},
+		Phases:  allowedPhases,
+		Message: defaultMsg,
+	}
+}
+
+// findTeammatePermissionLegacy is the legacy implementation reading from cfg.TeammatePermissions.
+func findTeammatePermissionLegacy(cfg *Config, agentName, toolName, bashCmd string) *TeammatePermission {
 	for i := range cfg.TeammatePermissions {
 		r := &cfg.TeammatePermissions[i]
 		// Check agent glob
@@ -196,11 +367,69 @@ func FindTeammatePermission(cfg *Config, phase, agentName, toolName, bashCmd str
 }
 
 // FindGuards returns the GuardRules from cfg that match the given from→to transition.
-// Exact matches (no wildcards) are returned before wildcard matches.
-// Both from and to can be "*" in rules for wildcard matching.
+// Reads from cfg.Transitions (new format) when available, falling back to cfg.Guards (legacy).
+// Legacy cfg.Guards also supports wildcard "*" matching for from/to.
+//
+// When cfg.Transitions is set, cfg.Guards is still checked for disabled entries
+// (disabled:true in an override YAML) which take precedence and suppress the guard.
 func FindGuards(cfg *Config, from, to string) []GuardRule {
+	// New format: derive checks from transitions[from] where t.To == to.
+	if cfg.Transitions != nil {
+		// Check if a guards override has explicitly disabled this transition's guard.
+		for _, rule := range cfg.Guards {
+			if rule.From == from && rule.To == to && rule.Disabled {
+				return nil
+			}
+		}
+
+		if transitions, ok := cfg.Transitions[from]; ok {
+			for _, t := range transitions {
+				if t.To != to {
+					continue
+				}
+				checks := ParseWhenExpression(t.When, t.Message)
+				if len(checks) > 0 {
+					return []GuardRule{{From: from, To: to, Checks: checks}}
+				}
+				// Empty when = no guard checks (always allowed).
+				return nil
+			}
+		}
+		// Transition not found in new format → no guard (transition may be validated
+		// separately by IsValidTransition; no checks means always allowed if valid).
+		return nil
+	}
+
+	// Legacy fallback: read from cfg.Guards (supports wildcard "*" matching).
+	// Skip disabled entries.
 	var exact, wild []GuardRule
 	for _, rule := range cfg.Guards {
+		if rule.Disabled {
+			continue
+		}
+		fromMatch := rule.From == from || rule.From == "*"
+		toMatch := rule.To == to || rule.To == "*"
+		if !fromMatch || !toMatch {
+			continue
+		}
+		if rule.From == "*" || rule.To == "*" {
+			wild = append(wild, rule)
+		} else {
+			exact = append(exact, rule)
+		}
+	}
+	return append(exact, wild...)
+}
+
+// FindGuardsLegacy is the legacy implementation reading from cfg.Guards.
+// Used by tests that exercise the old format directly.
+// Skips disabled entries (Disabled:true).
+func FindGuardsLegacy(cfg *Config, from, to string) []GuardRule {
+	var exact, wild []GuardRule
+	for _, rule := range cfg.Guards {
+		if rule.Disabled {
+			continue
+		}
 		fromMatch := rule.From == from || rule.From == "*"
 		toMatch := rule.To == to || rule.To == "*"
 		if !fromMatch || !toMatch {
