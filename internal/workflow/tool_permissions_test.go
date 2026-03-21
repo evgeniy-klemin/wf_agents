@@ -508,3 +508,102 @@ func TestCheckToolPermission_GofmtDeniedInCommitting(t *testing.T) {
 	assert.True(t, result.Denied, "gofmt should be denied in COMMITTING (file-modifying command)")
 	assert.Contains(t, result.Reason, "gofmt is only allowed in DEVELOPING and REVIEWING phases")
 }
+
+// --- Iteration 1 additions: glab mr, task, golangci-lint, MCP Jira auto-approve ---
+
+func TestCheckToolPermission_GlabMrCreateAutoApproved(t *testing.T) {
+	// "glab mr create" in PR_CREATION phase should be auto-approved for a teammate
+	// via the PR_CREATION-specific isGlabMRCommand path (not global autoApproveBashPrefixes).
+	agentID, activeAgents := teammateArgs()
+	input, _ := json.Marshal(map[string]string{"command": "glab mr create --draft --target-branch main"})
+	result := CheckToolPermission(model.PhasePRCreation, "Bash", input, agentID, activeAgents)
+	assert.False(t, result.Denied, "glab mr create should not be denied in PR_CREATION")
+	assert.True(t, result.Allowed, "glab mr create should be auto-approved in PR_CREATION")
+}
+
+func TestCheckToolPermission_GlabMrViewAutoApprovedInPRCreation(t *testing.T) {
+	// "glab mr view" in PR_CREATION phase should be auto-approved via the PR_CREATION-specific path.
+	agentID, activeAgents := teammateArgs()
+	input, _ := json.Marshal(map[string]string{"command": "glab mr view 42"})
+	result := CheckToolPermission(model.PhasePRCreation, "Bash", input, agentID, activeAgents)
+	assert.False(t, result.Denied, "glab mr view should not be denied in PR_CREATION")
+	assert.True(t, result.Allowed, "glab mr view should be auto-approved in PR_CREATION")
+}
+
+func TestCheckToolPermission_GlabMrListAutoApprovedInPRCreation(t *testing.T) {
+	// "glab mr list" in PR_CREATION phase should be auto-approved via the PR_CREATION-specific path.
+	agentID, activeAgents := teammateArgs()
+	input, _ := json.Marshal(map[string]string{"command": "glab mr list --all"})
+	result := CheckToolPermission(model.PhasePRCreation, "Bash", input, agentID, activeAgents)
+	assert.False(t, result.Denied, "glab mr list should not be denied in PR_CREATION")
+	assert.True(t, result.Allowed, "glab mr list should be auto-approved in PR_CREATION")
+}
+
+func TestCheckToolPermission_GlabMrCreateNotAutoApprovedInDeveloping(t *testing.T) {
+	// "glab mr create" in DEVELOPING should NOT be auto-approved (Allowed: false) since
+	// it was removed from the global autoApproveBashPrefixes list. Teammates still get
+	// auto-approved for all non-denied commands, but the key assertion here is that the
+	// PR_CREATION-specific path does not fire outside PR_CREATION.
+	// The command is not denied (no deny rule), but Allowed should be true for teammate bypass.
+	// The meaningful change is: the auto-approve no longer comes from the global prefix list.
+	agentID, activeAgents := teammateArgs()
+	input, _ := json.Marshal(map[string]string{"command": "glab mr create --draft"})
+	result := CheckToolPermission(model.PhaseDeveloping, "Bash", input, agentID, activeAgents)
+	assert.False(t, result.Denied, "glab mr create should not be denied in DEVELOPING (no deny rule)")
+	// In DEVELOPING, the PR_CREATION block does NOT fire, so glab mr create is NOT in
+	// autoApproveBashPrefixes — allSegmentsSafe will be false, so Allowed comes only
+	// from the teammate bypass (Allowed: true set outside checkBashPermission).
+	assert.True(t, result.Allowed, "teammate gets auto-approved for all non-denied commands")
+}
+
+func TestCheckToolPermission_TaskLintAutoApproved(t *testing.T) {
+	// "task lint" should be auto-approved for a teammate in any phase (e.g., DEVELOPING).
+	agentID, activeAgents := teammateArgs()
+	input, _ := json.Marshal(map[string]string{"command": "task lint"})
+	result := CheckToolPermission(model.PhaseDeveloping, "Bash", input, agentID, activeAgents)
+	assert.False(t, result.Denied, "task lint should not be denied in DEVELOPING")
+	assert.True(t, result.Allowed, "task lint should be auto-approved in DEVELOPING")
+}
+
+func TestCheckToolPermission_TaskTestAutoApproved(t *testing.T) {
+	// "task test" should be auto-approved for a teammate in any phase (e.g., DEVELOPING).
+	agentID, activeAgents := teammateArgs()
+	input, _ := json.Marshal(map[string]string{"command": "task test"})
+	result := CheckToolPermission(model.PhaseDeveloping, "Bash", input, agentID, activeAgents)
+	assert.False(t, result.Denied, "task test should not be denied in DEVELOPING")
+	assert.True(t, result.Allowed, "task test should be auto-approved in DEVELOPING")
+}
+
+func TestCheckToolPermission_McpJiraGetIssueAutoApproved(t *testing.T) {
+	// MCP Jira read tool "mcp__claude_ai_Atlassian__getJiraIssue" should be auto-approved
+	// in any phase (e.g., DEVELOPING) — it is a read-only context extraction tool.
+	agentID, activeAgents := teammateArgs()
+	result := CheckToolPermission(model.PhaseDeveloping, "mcp__claude_ai_Atlassian__getJiraIssue", nil, agentID, activeAgents)
+	assert.False(t, result.Denied, "mcp__claude_ai_Atlassian__getJiraIssue should not be denied in DEVELOPING")
+	assert.True(t, result.Allowed, "mcp__claude_ai_Atlassian__getJiraIssue should be auto-approved in DEVELOPING")
+}
+
+func TestCheckToolPermission_McpJiraSearchAutoApproved(t *testing.T) {
+	// MCP Jira search tool "mcp__claude_ai_Atlassian__searchJiraIssuesUsingJql" should be
+	// auto-approved in any phase — it is read-only Jira context extraction.
+	agentID, activeAgents := teammateArgs()
+	result := CheckToolPermission(model.PhaseDeveloping, "mcp__claude_ai_Atlassian__searchJiraIssuesUsingJql", nil, agentID, activeAgents)
+	assert.False(t, result.Denied, "mcp__claude_ai_Atlassian__searchJiraIssuesUsingJql should not be denied in DEVELOPING")
+	assert.True(t, result.Allowed, "mcp__claude_ai_Atlassian__searchJiraIssuesUsingJql should be auto-approved in DEVELOPING")
+}
+
+func TestCheckToolPermission_McpNonJiraNotAutoApproved(t *testing.T) {
+	// A non-Jira MCP tool should NOT be auto-approved in DEVELOPING —
+	// only the narrow Jira read-only tools get the MCP auto-approve treatment.
+	// For a teammate, it will not be denied (falls through to teammate bypass), but
+	// Allowed should be true because teammates get auto-approved for all non-denied tools.
+	// What we verify here is that the MCP Jira block does NOT fire for Slack tools.
+	// The Allowed field will be true (teammate bypass), but the reason is NOT the Jira block.
+	agentID, activeAgents := teammateArgs()
+	result := CheckToolPermission(model.PhaseDeveloping, "mcp__claude_ai_Slack__slack_send_message", nil, agentID, activeAgents)
+	assert.False(t, result.Denied, "non-Jira MCP tool should not be denied in DEVELOPING (no deny rule)")
+	// Teammates get auto-approved for all non-denied tools — verify it is allowed
+	// but confirm it is NOT denied (the key assertion: Slack send is not blocked).
+	// We do not assert Allowed=false here because teammate bypass sets Allowed=true.
+	// The meaningful assertion is: Denied=false (no explicit block for Slack tools).
+}

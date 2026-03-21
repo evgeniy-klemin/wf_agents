@@ -95,18 +95,3 @@ for line in sys.stdin:
 else
     echo "No JSONL log found for $SESSION_ID"
 fi
-
-# Also check legacy per-event format
-echo ""
-echo "=== Legacy hook logs ==="
-found=0
-for f in "$LOGDIR"/*-"$SESSION_ID".json; do
-    [ -f "$f" ] || continue
-    found=1
-    echo "--- $(basename "$f") ---"
-    python3 -m json.tool "$f" 2>/dev/null || cat "$f"
-    echo
-done
-if [ "$found" -eq 0 ]; then
-    echo "No legacy logs found"
-fi

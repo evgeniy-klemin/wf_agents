@@ -1,6 +1,10 @@
 # Project-level overrides for wf-agents plugin.
-# Copy to .wf-agents.yaml in your target project and customize.
-# Merged on top of plugin defaults (internal/config/defaults.yaml).
+# Copy to .wf-agents/workflow.yaml in your target project and customize.
+# Merged on top of plugin defaults (workflow/defaults.yaml).
+#
+# You can also override per-phase instructions by placing .wf-agents/<PHASE>.md files
+# (e.g. .wf-agents/DEVELOPING.md) in your project root. These replace the default
+# phase instructions for that phase.
 #
 # teammate_idle rules match by PHASE NAME and optional AGENT GLOB.
 # Priority: exact phase+agent > exact phase+no agent > wildcard phase+agent > wildcard phase+no agent.

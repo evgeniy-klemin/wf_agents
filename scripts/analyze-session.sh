@@ -2,25 +2,43 @@
 set -euo pipefail
 
 WF_CLIENT="$(dirname "$0")/../bin/wf-client"
-WORKFLOW_ID="coding-session-$1"
+SESSION_ID="${1:?Usage: analyze-session.sh <session-id>}"
+WORKFLOW_ID="coding-session-$SESSION_ID"
+CACHE_DIR="/tmp/wf-analysis/$SESSION_ID"
+
+mkdir -p "$CACHE_DIR"
+
+# Cache status and timeline once
+if [ ! -f "$CACHE_DIR/status.txt" ]; then
+  $WF_CLIENT status "$WORKFLOW_ID" > "$CACHE_DIR/status.txt" 2>&1 || { echo "Cannot query $WORKFLOW_ID"; exit 1; }
+fi
+if [ ! -f "$CACHE_DIR/timeline.json" ]; then
+  $WF_CLIENT timeline "$WORKFLOW_ID" > "$CACHE_DIR/timeline.json" 2>&1 || { echo "Cannot get timeline (session too large?)"; touch "$CACHE_DIR/timeline.json"; }
+fi
+
+STATUS="$CACHE_DIR/status.txt"
+TIMELINE="$CACHE_DIR/timeline.json"
 
 echo "=== STATUS ==="
-$WF_CLIENT status $WORKFLOW_ID
+cat "$STATUS"
 
+echo ""
 echo "=== TRANSITIONS ==="
-$WF_CLIENT timeline $WORKFLOW_ID | grep -E '"type": "transition"' -A8 | grep -E '"from"|"to"|"reason"|"iteration"' || true
+grep -E '"type": "transition"' -A8 "$TIMELINE" | grep -E '"from"|"to"|"reason"|"iteration"' || true
 
+echo ""
 echo "=== AGENTS ==="
-$WF_CLIENT timeline $WORKFLOW_ID | grep -E 'agent_spawn|agent_stop' -A6 | grep -E 'timestamp|agent_id|agent_type|hook_type' || true
+grep -E 'agent_spawn|agent_stop' -A6 "$TIMELINE" | grep -E 'timestamp|agent_id|agent_type|hook_type' || true
 
+echo ""
 echo "=== TEAMMATE IDLE ==="
-$WF_CLIENT timeline $WORKFLOW_ID | grep 'TeammateIdle' -A5 | grep 'teammate_name|team_name' || true
+grep 'TeammateIdle' -A5 "$TIMELINE" | grep 'teammate_name\|team_name' || true
 
+echo ""
 echo "=== METRICS ==="
-TIMELINE=$($WF_CLIENT timeline $WORKFLOW_ID)
-echo "Transitions: $(echo "$TIMELINE" | grep -c '"type": "transition"' || echo 0)"
-echo "Auto-BLOCKED: $(echo "$TIMELINE" | grep -c 'auto:' || echo 0)"
-echo "Errors: $(echo "$TIMELINE" | grep -c 'PostToolUseFailure' || echo 0)"
-echo "Denials: $(echo "$TIMELINE" | grep -c '"denied"' || echo 0)"
-echo "SendMessage: $(echo "$TIMELINE" | grep -c '"tool": "SendMessage"' || echo 0)"
-echo "TeammateIdle: $(echo "$TIMELINE" | grep -c 'TeammateIdle' || echo 0)"
+echo "Transitions: $(grep -c '"type": "transition"' "$TIMELINE" || echo 0)"
+echo "Auto-BLOCKED: $(grep -c 'auto:' "$TIMELINE" || echo 0)"
+echo "Errors: $(grep -c 'PostToolUseFailure' "$TIMELINE" || echo 0)"
+echo "Denials: $(grep -c '"denied"' "$TIMELINE" || echo 0)"
+echo "SendMessage: $(grep -c '"tool": "SendMessage"' "$TIMELINE" || echo 0)"
+echo "TeammateIdle: $(grep -c 'TeammateIdle' "$TIMELINE" || echo 0)"

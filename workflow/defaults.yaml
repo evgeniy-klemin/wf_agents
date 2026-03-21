@@ -1,0 +1,296 @@
+# defaults.yaml — unified default workflow configuration
+# Superset of defaults.yaml (guards, tracking, idle, permissions) plus
+# the new phases and transitions sections.
+
+# ─── Phases ──────────────────────────────────────────────────────────────────
+
+phases:
+  start: PLANNING
+  stop: [COMPLETE]
+
+  # defaults start ->
+  defaults:
+    permissions:
+      safe_commands:
+        - ls
+        - cat
+        - head
+        - tail
+        - wc
+        - file
+        - grep
+        - rg
+        - awk
+        - sort
+        - uniq
+        - diff
+        - echo
+        - printf
+        - true
+        - false
+        - test
+        - pwd
+        - jq
+        - yq
+        - gofmt
+        - git status
+        - git log
+        - git diff
+        - git show
+        - git branch
+        - git remote
+        - git tag
+        - git describe
+        - git rev-parse
+        - git ls-files
+        - git ls-tree
+        - git blame
+        - git shortlog
+        - go test
+        - go vet
+        - go build
+        - go list
+        - go mod
+        - go clean
+        - golangci-lint
+        - npm test
+        - npm run lint
+        - cargo test
+        - cargo check
+        - python -m pytest
+        - pytest
+        - wf-client
+        # read-only shell utilities (globally safe, moved from PLANNING whitelist)
+        - find
+        - less
+        - more
+        - tree
+        - stat
+        - du
+        - df
+        - which
+        - where
+        - type
+        - command
+        - env
+        - printenv
+        - hostname
+        - whoami
+        - uname
+        - date
+        # GitHub CLI read-only operations (globally safe, moved from PLANNING whitelist)
+        - gh pr view
+        - gh pr list
+        - gh pr checks
+        - gh pr diff
+        - gh api
+        - gh repo view
+        - gh issue view
+        - gh issue list
+        - gh issue
+        # GitLab CLI read-only operations
+        - glab mr view
+        - glab ci status
+        # feedback polling binary
+        - feedback-poll
+
+      read_only_tools:
+        - Read
+        - Glob
+        - Grep
+        - WebFetch
+        - WebSearch
+        - ToolSearch
+        - LSP
+
+      file_writing_tools:
+        - Edit
+        - Write
+        - NotebookEdit
+
+      lead:
+        file_writes: deny
+
+      teammate:
+        - agent: "developer*"
+          file_writes: deny
+        - agent: "reviewer*"
+          file_writes: deny
+
+    idle:
+      - agent: lead
+        deny: false
+      - agent: "*"
+        deny: false
+  # <- defaults end
+
+  PLANNING:
+    display: { label: "Planning", icon: "clipboard", color: "#6366f1" }
+    hint: "Transition to RESPAWN first."
+    idle:
+      - agent: lead
+        deny: true
+        message: "No teammates in PLANNING — transition to BLOCKED before stopping"
+    permissions:
+      whitelist:
+        # git operations that modify local state (not read-only, phase-specific)
+        - git checkout
+        - git pull
+        - git fetch
+        - git stash list
+        - git stash show
+        - git config
+        - git help
+        - git version
+        # build/run tools needed during planning
+        - make
+        - curl
+        - wget
+        - cd
+        - ag
+        - set
+        - export
+        - npx
+        - yarn test
+        - cargo clippy
+        - python -c
+
+  RESPAWN:
+    display: { label: "Respawn", icon: "refresh", color: "#8b5cf6" }
+    hint: "Only agent management allowed. Transition to DEVELOPING when agents are ready."
+
+  DEVELOPING:
+    display: { label: "Developing", icon: "code", color: "#10b981" }
+    on_enter:
+      - type: increment_iteration
+    permissions:
+      teammate:
+        - agent: "developer*"
+          file_writes: allow
+    idle:
+      - agent: "developer*"
+        checks:
+          - type: command_ran
+            category: lint
+            message: "Run linter before going idle"
+          - type: command_ran
+            category: test
+            message: "Run tests before going idle"
+          - type: send_message
+            message: "Send your completion summary to the Team Lead via SendMessage before going idle."
+
+  REVIEWING:
+    display: { label: "Reviewing", icon: "search", color: "#f59e0b" }
+    hint: "Delegate review to Reviewer teammate. Do NOT review code directly. If issues found, transition to DEVELOPING (not RESPAWN)."
+    idle:
+      - agent: "reviewer*"
+        checks:
+          - type: send_message
+            message: "Send your completion summary to the Team Lead via SendMessage before going idle."
+
+  COMMITTING:
+    display: { label: "Committing", icon: "git-commit", color: "#3b82f6" }
+    hint: "Only git operations allowed."
+    permissions:
+      # git add/commit/push are in the phase whitelist (not per-teammate) because
+      # AgentPermission.whitelist is not yet supported in the Go config struct.
+      # TODO: once per-teammate bash whitelists are supported, restrict these to
+      # developer* only and remove from the phase-level whitelist.
+      whitelist: [git add, git commit, git push]
+      teammate:
+        - agent: "developer*"
+          file_writes: allow
+
+  PR_CREATION:
+    display:
+      { label: "PR Creation", icon: "git-pull-request", color: "#ec4899" }
+    hint: "Only PR creation commands allowed."
+    permissions:
+      whitelist: [glab mr create, glab mr view, glab mr list]
+
+  FEEDBACK:
+    display: { label: "Feedback", icon: "message-circle", color: "#f97316" }
+    hint: "Triage PR comments. Accepted → implement first (RESPAWN→...→push), then reply what was done. Rejected → reply immediately with reasoning."
+    permissions:
+      whitelist:
+        - glab api
+        - glab mr note
+        - gh pr comment
+        - gh pr review
+    idle:
+      - agent: lead
+        deny: true
+        message: "FEEDBACK requires active polling. Run: sleep 60 (foreground, NOT run_in_background) → feedback-poll → parse result → repeat. Do NOT use run_in_background for sleep — it causes idle attempts which are denied. The sleep must block your turn."
+
+  COMPLETE:
+    display: { label: "Complete", icon: "check-circle", color: "#22c55e" }
+
+# ─── Transitions ─────────────────────────────────────────────────────────────
+
+transitions:
+  PLANNING:
+    - to: RESPAWN
+      when: working_tree_clean
+      message: "working tree is not clean"
+
+  RESPAWN:
+    - to: DEVELOPING
+      when: active_agents == 0
+      message: "shut down old teammates first"
+
+  DEVELOPING:
+    - to: REVIEWING
+      when: not working_tree_clean
+      message: "no changes to review"
+
+  REVIEWING:
+    - to: COMMITTING
+      label: "Approved"
+    - to: DEVELOPING
+      label: "Rejected"
+      when: iteration < max_iterations
+      message: "max iterations reached"
+
+  COMMITTING:
+    - to: RESPAWN
+      label: "Iterate"
+      when: working_tree_clean and iteration < max_iterations
+      message: "working tree is not clean or max iterations reached"
+    - to: PR_CREATION
+      label: "Ready"
+      when: working_tree_clean and branch_pushed
+      message: "working tree is not clean or branch not pushed to remote"
+
+  PR_CREATION:
+    - to: FEEDBACK
+      # when: ci_passed
+      #message: "CI has not passed — wait for pipeline"
+
+  FEEDBACK:
+    - to: COMPLETE
+      label: "Done"
+      when: review_approved or merged
+      message: "PR has not been approved or merged"
+    - to: RESPAWN
+      label: "Rework"
+      when: iteration < max_iterations
+      message: "max iterations reached"
+
+# ─── Tracking (command categories for idle rules) ────────────────────────────
+
+tracking:
+  lint:
+    patterns:
+      - "go vet"
+      - "golangci-lint"
+      - "npm run lint"
+      - "cargo clippy"
+    invalidate_on_file_change: true
+  test:
+    patterns:
+      - "go test"
+      - "npm test"
+      - "cargo test"
+      - "python -m pytest"
+      - "pytest"
+    invalidate_on_file_change: true

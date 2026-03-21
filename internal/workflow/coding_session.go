@@ -12,20 +12,22 @@ import (
 
 // Signal and query name constants used by CodingSessionWorkflow.
 const (
-	SignalTransition        = "transition"
-	SignalHookEvent         = "hook-event"
-	SignalJournal           = "journal"
-	SignalComplete          = "complete"
-	SignalResetIterations   = "reset-iterations"
-	SignalClearActiveAgents = "clear-active-agents"
-	SignalCommandRan        = "command-ran"
+	SignalTransition         = "transition"
+	SignalHookEvent          = "hook-event"
+	SignalJournal            = "journal"
+	SignalComplete           = "complete"
+	SignalResetIterations    = "reset-iterations"
+	SignalClearActiveAgents  = "clear-active-agents"
+	SignalCommandRan         = "command-ran"
 	SignalInvalidateCommands = "invalidate-commands"
-	SignalAgentShutDown     = "agent-shut-down"
+	SignalAgentShutDown      = "agent-shut-down"
 
-	QueryStatus      = "status"
-	QueryTimeline    = "timeline"
-	QueryPhase       = "phase"
-	QueryCommandsRan = "query-commands-ran"
+	QueryStatus         = "status"
+	QueryTimeline       = "timeline"
+	QueryTimelineRecent = "timeline-recent"
+	QueryPhase          = "phase"
+	QueryCommandsRan    = "query-commands-ran"
+	QueryWorkflowConfig = "workflow-config"
 
 	UpdateTransition = "request-transition"
 	SignalSetTask    = "set-task"
@@ -37,10 +39,25 @@ const (
 func CodingSessionWorkflow(ctx workflow.Context, input model.WorkflowInput) (model.WorkflowTimeline, error) {
 	logger := workflow.GetLogger(ctx)
 
+	// Initialize terminal phases — prefer flow snapshot, fall back to guardConfig.
+	if input.Flow != nil && len(input.Flow.Stop) > 0 {
+		model.SetTerminalPhases(input.Flow.Stop)
+	} else if stops := guardConfig.StopPhases(); len(stops) > 0 {
+		model.SetTerminalPhases(stops)
+	}
+
+	// Determine initial phase — prefer flow snapshot, fall back to guardConfig.
+	initialPhase := model.PhasePlanning
+	if input.Flow != nil && input.Flow.Start != "" {
+		initialPhase = model.Phase(input.Flow.Start)
+	} else if start := guardConfig.StartPhase(); start != "" {
+		initialPhase = model.Phase(start)
+	}
+
 	state := &sessionState{
-		phase:           model.PhasePlanning,
-		iteration:       1,
-		totalIterations: 1,
+		phase:           initialPhase,
+		iteration:       0,
+		totalIterations: 0,
 		events:          make([]model.WorkflowEvent, 0, 100),
 		activeAgents:    make(map[string]string),
 		commandsRan:     make(map[string]map[string]bool),
@@ -49,6 +66,7 @@ func CodingSessionWorkflow(ctx workflow.Context, input model.WorkflowInput) (mod
 		phaseEnteredAt:  workflow.Now(ctx),
 		task:            input.TaskDescription,
 		maxIter:         input.MaxIterations,
+		flow:            input.Flow,
 	}
 	if state.maxIter == 0 {
 		state.maxIter = 5
@@ -56,7 +74,7 @@ func CodingSessionWorkflow(ctx workflow.Context, input model.WorkflowInput) (mod
 	state.doneCh = workflow.NewChannel(ctx)
 
 	state.addEvent(ctx, model.EventTransition, input.SessionID, map[string]string{
-		"to":     string(model.PhasePlanning),
+		"to":     string(initialPhase),
 		"reason": "workflow started",
 	})
 
@@ -73,6 +91,21 @@ func CodingSessionWorkflow(ctx workflow.Context, input model.WorkflowInput) (mod
 		return model.WorkflowTimeline{}, fmt.Errorf("set timeline query: %w", err)
 	}
 
+	// QueryTimelineRecent returns the last N events (default 500) to avoid exceeding
+	// Temporal's query result size limit (2MB) for long-running sessions.
+	if err := workflow.SetQueryHandler(ctx, QueryTimelineRecent, func(limit int) (model.WorkflowTimeline, error) {
+		if limit <= 0 {
+			limit = 500
+		}
+		events := state.events
+		if len(events) > limit {
+			events = events[len(events)-limit:]
+		}
+		return model.WorkflowTimeline{Events: events, TotalEvents: len(state.events)}, nil
+	}); err != nil {
+		return model.WorkflowTimeline{}, fmt.Errorf("set timeline-recent query: %w", err)
+	}
+
 	if err := workflow.SetQueryHandler(ctx, QueryPhase, func() (model.Phase, error) {
 		return state.phase, nil
 	}); err != nil {
@@ -86,6 +119,12 @@ func CodingSessionWorkflow(ctx workflow.Context, input model.WorkflowInput) (mod
 		return state.commandsRan[agentName], nil
 	}); err != nil {
 		return model.WorkflowTimeline{}, fmt.Errorf("set commands-ran query: %w", err)
+	}
+
+	if err := workflow.SetQueryHandler(ctx, QueryWorkflowConfig, func() (*model.FlowSnapshot, error) {
+		return state.flow, nil
+	}); err != nil {
+		return model.WorkflowTimeline{}, fmt.Errorf("set workflow-config query: %w", err)
 	}
 
 	// Register update handler for synchronous transition requests (allow/deny)
@@ -160,6 +199,7 @@ func CodingSessionWorkflow(ctx workflow.Context, input model.WorkflowInput) (mod
 			ch.Receive(ctx, &sessionID)
 			count := len(state.activeAgents)
 			state.activeAgents = make(map[string]string)
+			state.commandsRan = make(map[string]map[string]bool)
 			state.addEvent(ctx, model.EventJournal, sessionID, map[string]string{
 				"message": fmt.Sprintf("cleared %d active agent(s) via deregister-all-agents", count),
 			})
@@ -174,6 +214,7 @@ func CodingSessionWorkflow(ctx workflow.Context, input model.WorkflowInput) (mod
 			}
 			if _, ok := state.activeAgents[sig.AgentName]; ok {
 				delete(state.activeAgents, sig.AgentName)
+				delete(state.commandsRan, sig.AgentName)
 				state.addEvent(ctx, model.EventJournal, "", map[string]string{
 					"message": fmt.Sprintf("agent shut down: %s", sig.AgentName),
 				})
@@ -249,17 +290,18 @@ type sessionState struct {
 	phase               model.Phase
 	preBlockedPhase     model.Phase // remembers state before BLOCKED, for returning
 	blockedByPermission bool        // true when BLOCKED was triggered by a PermissionRequest
-	iteration       int         // resettable counter for guard checks
-	totalIterations int         // cumulative counter, never reset
-	events          []model.WorkflowEvent
-	activeAgents    map[string]string         // agent_type → agent_id; entries added on SubagentStart, cleared by clear-active-agents or COMPLETE
-	commandsRan     map[string]map[string]bool // agent → category → ran
-	startedAt       time.Time
-	lastUpdated     time.Time
-	phaseEnteredAt  time.Time
-	task            string
-	maxIter         int
-	doneCh          workflow.Channel // internal channel to unblock selector when terminal state is reached
+	iteration           int         // resettable counter for guard checks
+	totalIterations     int         // cumulative counter, never reset
+	events              []model.WorkflowEvent
+	activeAgents        map[string]string          // agent_type → agent_id; entries added on SubagentStart, cleared by clear-active-agents or COMPLETE
+	commandsRan         map[string]map[string]bool // agent → category → ran
+	startedAt           time.Time
+	lastUpdated         time.Time
+	phaseEnteredAt      time.Time
+	task                string
+	maxIter             int
+	doneCh              workflow.Channel    // internal channel to unblock selector when terminal state is reached
+	flow                *model.FlowSnapshot // snapshotted flow topology from session start
 }
 
 func (s *sessionState) addEvent(ctx workflow.Context, evtType model.EventType, sessionID string, detail map[string]string) {
@@ -303,41 +345,45 @@ func (s *sessionState) handleTransition(ctx workflow.Context, req model.SignalTr
 	}
 
 	// Entering BLOCKED — remember where we came from
+	fromPhase := s.phase
 	if req.To == model.PhaseBlocked {
 		s.preBlockedPhase = s.phase
 	}
 
-	// Track iteration on RESPAWN entry (except first entry from PLANNING).
-	// When unblocking to RESPAWN, use preBlockedPhase to determine origin.
-	// Guards check maxIter for normal transitions, but unblock flows bypass guards,
-	// so we enforce the cap here too.
-	originPhase := s.phase
-	if originPhase == model.PhaseBlocked {
-		originPhase = s.preBlockedPhase
-	}
-	// Increment iteration on RESPAWN entry, except:
-	// - First entry from PLANNING (doesn't count)
-	// - Return from BLOCKED (iteration was already counted on original entry)
-	if req.To == model.PhaseRespawn && originPhase != model.PhasePlanning && s.phase != model.PhaseBlocked {
-		s.iteration++
-		s.totalIterations++
-	}
-
-	// Increment iteration on REVIEWING→DEVELOPING (review reject loop).
-	// This transition bypasses RESPAWN but still starts a new iteration.
-	if req.To == model.PhaseDeveloping && s.phase == model.PhaseReviewing {
-		s.iteration++
-		s.totalIterations++
-	}
-
 	// Apply transition
 	s.phase = req.To
+
+	// Execute on_enter side effects for the target phase.
+	// Skip when unblocking from BLOCKED — the phase was already "entered" before BLOCKED.
+	// Prefer flow snapshot; fall back to guardConfig for workflows started without a snapshot.
+	if fromPhase != model.PhaseBlocked {
+		if s.flow != nil {
+			if fp, ok := s.flow.Phases[string(req.To)]; ok {
+				for _, effect := range fp.OnEnter {
+					if effect.Type == "increment_iteration" {
+						s.iteration++
+						s.totalIterations++
+					}
+				}
+			}
+		} else if guardConfig != nil && guardConfig.Phases != nil {
+			if phaseConfig, ok := guardConfig.Phases.Phases[string(req.To)]; ok {
+				for _, effect := range phaseConfig.OnEnter {
+					if effect.Type == "increment_iteration" {
+						s.iteration++
+						s.totalIterations++
+					}
+				}
+			}
+		}
+	}
 	s.lastUpdated = workflow.Now(ctx)
 	s.phaseEnteredAt = workflow.Now(ctx)
 	result.Allowed = true
 
-	// Clear command tracking on RESPAWN — fresh iteration = fresh state
-	if req.To == model.PhaseRespawn {
+	// Clear command tracking on phase transitions — fresh phase = fresh state.
+	// Skip when unblocking from BLOCKED — agent state was already set before BLOCKED.
+	if fromPhase != model.PhaseBlocked {
 		s.commandsRan = make(map[string]map[string]bool)
 	}
 

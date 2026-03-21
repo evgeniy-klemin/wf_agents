@@ -2,19 +2,32 @@
 set -euo pipefail
 
 WF_CLIENT="$(dirname "$0")/../bin/wf-client"
-WORKFLOW_ID="coding-session-$1"
+SESSION_ID="${1:?Usage: session-agents.sh <session-id>}"
+WORKFLOW_ID="coding-session-$SESSION_ID"
+CACHE_DIR="/tmp/wf-analysis/$SESSION_ID"
+
+mkdir -p "$CACHE_DIR"
+
+if [ ! -f "$CACHE_DIR/status.txt" ]; then
+  $WF_CLIENT status "$WORKFLOW_ID" > "$CACHE_DIR/status.txt" 2>&1 || { echo "Cannot query $WORKFLOW_ID"; exit 1; }
+fi
+if [ ! -f "$CACHE_DIR/timeline.json" ]; then
+  $WF_CLIENT timeline "$WORKFLOW_ID" > "$CACHE_DIR/timeline.json" 2>&1 || { echo "Cannot get timeline"; exit 1; }
+fi
+
+TIMELINE="$CACHE_DIR/timeline.json"
 
 echo "=== ACTIVE AGENTS ==="
-$WF_CLIENT status $WORKFLOW_ID | grep "Active Agents" || true
+grep "Active Agents" "$CACHE_DIR/status.txt" || true
 
 echo "=== AGENT SPAWNS ==="
-$WF_CLIENT timeline $WORKFLOW_ID | grep 'agent_spawn' -A6 | grep 'timestamp\|agent_id\|agent_type' || true
+grep 'agent_spawn' -A6 "$TIMELINE" | grep 'timestamp\|agent_id\|agent_type' || true
 
 echo "=== AGENT STOPS ==="
-$WF_CLIENT timeline $WORKFLOW_ID | grep 'agent_stop' -A8 | grep 'timestamp\|agent_id\|agent_type\|hook_type' || true
+grep 'agent_stop' -A8 "$TIMELINE" | grep 'timestamp\|agent_id\|agent_type\|hook_type' || true
 
 echo "=== TEAMMATE IDLE ==="
-$WF_CLIENT timeline $WORKFLOW_ID | grep 'TeammateIdle' -A5 | grep 'teammate_name\|team_name\|timestamp' || true
+grep 'TeammateIdle' -A5 "$TIMELINE" | grep 'teammate_name\|team_name\|timestamp' || true
 
 echo "=== AGENT TYPE COUNTS ==="
-$WF_CLIENT timeline $WORKFLOW_ID | grep '"agent_type"' | grep -v tool_input | sort | uniq -c | sort -rn || true
+grep '"agent_type"' "$TIMELINE" | grep -v tool_input | sort | uniq -c | sort -rn || true

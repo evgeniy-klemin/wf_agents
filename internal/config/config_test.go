@@ -13,35 +13,41 @@ import (
 func TestDefaultConfig_ParsesSuccessfully(t *testing.T) {
 	cfg, err := DefaultConfig()
 	require.NoError(t, err)
-	assert.NotEmpty(t, cfg.Guards, "defaults.yaml must contain guard rules")
+	// Guards are now derived from transitions; the legacy guards section has been removed.
+	assert.NotNil(t, cfg.Transitions, "defaults.yaml must contain transitions (which encode guard logic)")
+	assert.NotEmpty(t, cfg.Transitions, "transitions must not be empty")
 }
 
 func TestDefaultConfig_HasExpectedGuardedTransitions(t *testing.T) {
 	cfg, err := DefaultConfig()
 	require.NoError(t, err)
 
-	// Every guarded transition from the original hardcoded guards.go must appear.
-	expected := [][2]string{
+	// Transitions that must have guard checks (non-empty when expressions).
+	guarded := [][2]string{
+		{"PLANNING", "RESPAWN"},
 		{"RESPAWN", "DEVELOPING"},
 		{"DEVELOPING", "REVIEWING"},
 		{"REVIEWING", "DEVELOPING"},
 		{"COMMITTING", "RESPAWN"},
 		{"COMMITTING", "PR_CREATION"},
-		{"PR_CREATION", "FEEDBACK"},
 		{"FEEDBACK", "COMPLETE"},
 		{"FEEDBACK", "RESPAWN"},
 	}
-
-	for _, pair := range expected {
+	for _, pair := range guarded {
 		rules := FindGuards(cfg, pair[0], pair[1])
 		assert.NotEmpty(t, rules, "expected guard rule for %s→%s", pair[0], pair[1])
 	}
+
+	// PR_CREATION→FEEDBACK has an empty when (ci_passed check is commented out) — no guard.
+	rules := FindGuards(cfg, "PR_CREATION", "FEEDBACK")
+	assert.Empty(t, rules, "PR_CREATION→FEEDBACK should have no guard (when is empty)")
 }
 
 func TestLoadConfig_NoProjectFile(t *testing.T) {
 	cfg, err := LoadConfig(t.TempDir())
 	require.NoError(t, err)
-	assert.NotEmpty(t, cfg.Guards)
+	// Guards are now derived from transitions; verify transitions are present.
+	assert.NotEmpty(t, cfg.Transitions, "transitions must be present in default config")
 }
 
 func TestLoadConfig_MergesProjectFile(t *testing.T) {
@@ -52,7 +58,8 @@ guards:
     to: REVIEWING
     disabled: true
 `)
-	require.NoError(t, os.WriteFile(dir+"/.wf-agents.yaml", overrideYAML, 0644))
+	require.NoError(t, os.MkdirAll(dir+"/.wf-agents", 0755))
+	require.NoError(t, os.WriteFile(dir+"/.wf-agents/workflow.yaml", overrideYAML, 0644))
 
 	cfg, err := LoadConfig(dir)
 	require.NoError(t, err)
@@ -70,7 +77,7 @@ func TestMergeConfigs_TrackingOverrideByKey(t *testing.T) {
 		"test": {Patterns: []string{"go test"}},
 	}}
 	override := &Config{Tracking: TrackingConfig{
-		"lint": {Patterns: []string{"npm run lint"}}, // replaces base lint
+		"lint": {Patterns: []string{"npm run lint"}},  // replaces base lint
 		"e2e":  {Patterns: []string{"make test-e2e"}}, // new key appended
 	}}
 
@@ -196,25 +203,25 @@ func TestEvalCheck_EvidenceFail(t *testing.T) {
 func TestEvalCheck_EvidenceAlternativePass(t *testing.T) {
 	c := Check{
 		Type:         "evidence",
-		Key:          "pr_approved",
+		Key:          "review_approved",
 		Value:        "true",
-		Alternatives: []KV{{Key: "pr_merged", Value: "true"}},
+		Alternatives: []KV{{Key: "merged", Value: "true"}},
 		Message:      "not approved or merged",
 	}
 	// Primary fails, alternative passes
-	ctx := &simpleCtx{evidence: map[string]string{"pr_approved": "false", "pr_merged": "true"}}
+	ctx := &simpleCtx{evidence: map[string]string{"review_approved": "false", "merged": "true"}}
 	assert.Empty(t, EvalCheck(c, ctx))
 }
 
 func TestEvalCheck_EvidenceAlternativeFail(t *testing.T) {
 	c := Check{
 		Type:         "evidence",
-		Key:          "pr_approved",
+		Key:          "review_approved",
 		Value:        "true",
-		Alternatives: []KV{{Key: "pr_merged", Value: "true"}},
+		Alternatives: []KV{{Key: "merged", Value: "true"}},
 		Message:      "not approved or merged",
 	}
-	ctx := &simpleCtx{evidence: map[string]string{"pr_approved": "false", "pr_merged": "false"}}
+	ctx := &simpleCtx{evidence: map[string]string{"review_approved": "false", "merged": "false"}}
 	assert.Equal(t, "not approved or merged", EvalCheck(c, ctx))
 }
 
@@ -279,6 +286,24 @@ func TestEvalCheck_CommandRanFail_Category(t *testing.T) {
 	c := Check{Type: "command_ran", Category: "lint", Message: "lint not run"}
 	ctx := &simpleCtx{commandsRan: map[string]bool{"test": true}}
 	assert.Equal(t, "lint not run", EvalCheck(c, ctx))
+}
+
+func TestEvalCheck_SendMessagePass(t *testing.T) {
+	c := Check{Type: "send_message", Message: "Send your completion summary to the Team Lead via SendMessage before going idle."}
+	ctx := &simpleCtx{commandsRan: map[string]bool{"_sent_message": true}}
+	assert.Empty(t, EvalCheck(c, ctx))
+}
+
+func TestEvalCheck_SendMessageFail_NotSent(t *testing.T) {
+	c := Check{Type: "send_message", Message: "Send your completion summary to the Team Lead via SendMessage before going idle."}
+	ctx := &simpleCtx{commandsRan: map[string]bool{"_sent_message": false}}
+	assert.Equal(t, "Send your completion summary to the Team Lead via SendMessage before going idle.", EvalCheck(c, ctx))
+}
+
+func TestEvalCheck_SendMessageFail_NilMap(t *testing.T) {
+	c := Check{Type: "send_message", Message: "Send your completion summary to the Team Lead via SendMessage before going idle."}
+	ctx := &simpleCtx{commandsRan: nil}
+	assert.Equal(t, "Send your completion summary to the Team Lead via SendMessage before going idle.", EvalCheck(c, ctx))
 }
 
 func TestEvalCheck_UnknownTypeFailsSafe(t *testing.T) {
@@ -437,17 +462,48 @@ func TestFindIdleRule_WildcardAgentBeatsWildcardNoAgent(t *testing.T) {
 }
 
 func TestFindIdleRule_DefaultConfigAllowsIdleByDefault(t *testing.T) {
-	// Default config has only a wildcard rule with no checks — all agents idle freely.
 	cfg, err := DefaultConfig()
 	require.NoError(t, err)
 
-	for _, agent := range []string{"developer-1", "reviewer-1", "team-lead"} {
-		for _, phase := range []string{"DEVELOPING", "REVIEWING", "COMMITTING"} {
-			rule := FindIdleRule(cfg, phase, agent)
-			require.NotNil(t, rule, "expected wildcard rule for %s in %s", agent, phase)
+	// team-lead has no idle checks in any phase — idle is always allowed.
+	for _, phase := range []string{"DEVELOPING", "REVIEWING", "COMMITTING"} {
+		rule := FindIdleRule(cfg, phase, "team-lead")
+		if rule != nil {
 			ctx := &simpleCtx{}
 			reason := EvalChecks(rule.Checks, ctx)
-			assert.Empty(t, reason, "default config should allow idle for %s in %s", agent, phase)
+			assert.Empty(t, reason, "default config should allow idle for team-lead in %s", phase)
+		}
+	}
+
+	// reviewer-1 in REVIEWING is required to send a completion summary before idling.
+	reviewerReviewingRule := FindIdleRule(cfg, "REVIEWING", "reviewer-1")
+	require.NotNil(t, reviewerReviewingRule, "expected idle rule for reviewer-1 in REVIEWING")
+	reviewerCtx := &simpleCtx{}
+	reviewerReason := EvalChecks(reviewerReviewingRule.Checks, reviewerCtx)
+	assert.NotEmpty(t, reviewerReason, "reviewer-1 in REVIEWING should be denied idle (send_message check)")
+
+	// reviewer-1 in other phases (DEVELOPING, COMMITTING) should idle freely.
+	for _, phase := range []string{"DEVELOPING", "COMMITTING"} {
+		rule := FindIdleRule(cfg, phase, "reviewer-1")
+		if rule != nil {
+			ctx := &simpleCtx{}
+			reason := EvalChecks(rule.Checks, ctx)
+			assert.Empty(t, reason, "default config should allow idle for reviewer-1 in %s", phase)
+		}
+	}
+
+	// developer-1 in DEVELOPING has lint+test checks from the phases config.
+	devDevelopingRule := FindIdleRule(cfg, "DEVELOPING", "developer-1")
+	require.NotNil(t, devDevelopingRule, "expected idle rule for developer-1 in DEVELOPING")
+	assert.NotEmpty(t, devDevelopingRule.Checks, "developer* in DEVELOPING should have idle checks (lint+test)")
+
+	// developer-1 in other phases should allow idle freely (no checks or nil rule).
+	for _, phase := range []string{"REVIEWING", "COMMITTING"} {
+		rule := FindIdleRule(cfg, phase, "developer-1")
+		if rule != nil {
+			ctx := &simpleCtx{}
+			reason := EvalChecks(rule.Checks, ctx)
+			assert.Empty(t, reason, "default config should allow idle for developer-1 in %s", phase)
 		}
 	}
 }
@@ -667,36 +723,37 @@ func TestFindTeammatePermission_NoRules(t *testing.T) {
 func TestDefaultConfig_HasTeammatePermissions(t *testing.T) {
 	cfg, err := DefaultConfig()
 	require.NoError(t, err)
-	assert.NotEmpty(t, cfg.TeammatePermissions, "defaults.yaml must contain teammate_permissions")
+	// Teammate permissions are now derived from phases config; legacy section was removed.
+	// Verify via FindTeammatePermission which reads from phases config.
 
-	// developer* should have Edit restricted
+	// developer* should have Edit restricted; allowed in DEVELOPING
 	rule := FindTeammatePermission(cfg, "DEVELOPING", "developer-1", "Edit", "")
-	require.NotNil(t, rule)
-	// Edit is allowed in DEVELOPING
+	require.NotNil(t, rule, "developer* Edit should have a permission rule")
 	allowed := false
 	for _, p := range rule.Phases {
 		if p == "DEVELOPING" {
 			allowed = true
 		}
 	}
-	assert.True(t, allowed)
+	assert.True(t, allowed, "Edit is allowed in DEVELOPING")
 
 	// Edit should NOT be allowed in REVIEWING
 	rule = FindTeammatePermission(cfg, "REVIEWING", "developer-1", "Edit", "")
-	require.NotNil(t, rule)
+	require.NotNil(t, rule, "developer* Edit should have a permission rule in REVIEWING")
 	reviewingAllowed := false
 	for _, p := range rule.Phases {
 		if p == "REVIEWING" {
 			reviewingAllowed = true
 		}
 	}
-	assert.False(t, reviewingAllowed)
+	assert.False(t, reviewingAllowed, "Edit should not be allowed in REVIEWING")
 }
 
 func TestDefaultConfig_HasLeadIdleRules(t *testing.T) {
 	cfg, err := DefaultConfig()
 	require.NoError(t, err)
-	assert.NotEmpty(t, cfg.LeadIdle, "defaults.yaml must contain lead_idle rules")
+	// Lead idle rules are now derived from phases config; legacy section was removed.
+	// Verify via FindLeadIdleRule which reads from phases config.
 
 	// PLANNING should be denied
 	r := FindLeadIdleRule(cfg, "PLANNING")
@@ -712,4 +769,135 @@ func TestDefaultConfig_HasLeadIdleRules(t *testing.T) {
 	r = FindLeadIdleRule(cfg, "DEVELOPING")
 	require.NotNil(t, r)
 	assert.False(t, r.Deny, "DEVELOPING should allow lead idle by default")
+}
+
+// --- mergePhases ---
+
+func TestMergePhases_OverrideFieldsPerPhase(t *testing.T) {
+	base := &PhasesConfig{
+		Start: "PLANNING",
+		Stop:  []string{"COMPLETE"},
+		Phases: map[string]PhaseConfig{
+			"PLANNING": {
+				Display:      PhaseDisplay{Label: "Planning", Icon: "clipboard", Color: "#111"},
+				Instructions: "planning.md",
+				Hint:         "base hint",
+			},
+		},
+	}
+	override := &PhasesConfig{
+		Phases: map[string]PhaseConfig{
+			"PLANNING": {
+				Display: PhaseDisplay{Label: "Plan", Color: "#222"},
+				Hint:    "override hint",
+			},
+		},
+	}
+	result := mergePhases(base, override)
+	require.NotNil(t, result)
+	assert.Equal(t, "PLANNING", result.Start)
+	assert.Equal(t, []string{"COMPLETE"}, result.Stop)
+	pc := result.Phases["PLANNING"]
+	assert.Equal(t, "Plan", pc.Display.Label, "label should be overridden")
+	assert.Equal(t, "clipboard", pc.Display.Icon, "icon should be preserved from base")
+	assert.Equal(t, "#222", pc.Display.Color, "color should be overridden")
+	assert.Equal(t, "planning.md", pc.Instructions, "instructions should be preserved from base")
+	assert.Equal(t, "override hint", pc.Hint, "hint should be overridden")
+}
+
+func TestMergePhases_NewPhaseAdded(t *testing.T) {
+	base := &PhasesConfig{
+		Phases: map[string]PhaseConfig{
+			"PLANNING": {Display: PhaseDisplay{Label: "Planning"}},
+		},
+	}
+	override := &PhasesConfig{
+		Phases: map[string]PhaseConfig{
+			"CUSTOM": {Display: PhaseDisplay{Label: "Custom Phase"}, Instructions: "custom.md"},
+		},
+	}
+	result := mergePhases(base, override)
+	require.NotNil(t, result)
+	assert.Contains(t, result.Phases, "PLANNING")
+	require.Contains(t, result.Phases, "CUSTOM")
+	assert.Equal(t, "Custom Phase", result.Phases["CUSTOM"].Display.Label)
+}
+
+func TestMergePhases_StartStopOverride(t *testing.T) {
+	base := &PhasesConfig{Start: "PLANNING", Stop: []string{"COMPLETE"}}
+	override := &PhasesConfig{Start: "CUSTOM", Stop: []string{"DONE"}}
+	result := mergePhases(base, override)
+	assert.Equal(t, "CUSTOM", result.Start)
+	assert.Equal(t, []string{"DONE"}, result.Stop)
+}
+
+func TestMergePhases_NilOverride(t *testing.T) {
+	base := &PhasesConfig{Start: "PLANNING"}
+	result := mergePhases(base, nil)
+	assert.Equal(t, base, result)
+}
+
+// --- mergeTransitions ---
+
+func TestMergeTransitions_OverrideReplacesSourcePhase(t *testing.T) {
+	base := map[string][]TransitionConfig{
+		"PLANNING": {{To: "RESPAWN"}},
+		"RESPAWN":  {{To: "DEVELOPING"}},
+	}
+	override := map[string][]TransitionConfig{
+		"PLANNING": {{To: "CUSTOM"}, {To: "BLOCKED"}},
+	}
+	result := mergeTransitions(base, override)
+	assert.Equal(t, []TransitionConfig{{To: "CUSTOM"}, {To: "BLOCKED"}}, result["PLANNING"])
+	assert.Equal(t, []TransitionConfig{{To: "DEVELOPING"}}, result["RESPAWN"], "unaffected phase preserved")
+}
+
+func TestMergeTransitions_NewSourcePhaseAdded(t *testing.T) {
+	base := map[string][]TransitionConfig{
+		"PLANNING": {{To: "RESPAWN"}},
+	}
+	override := map[string][]TransitionConfig{
+		"CUSTOM": {{To: "DONE"}},
+	}
+	result := mergeTransitions(base, override)
+	assert.Contains(t, result, "PLANNING")
+	require.Contains(t, result, "CUSTOM")
+	assert.Equal(t, []TransitionConfig{{To: "DONE"}}, result["CUSTOM"])
+}
+
+func TestMergeTransitions_NilOverride(t *testing.T) {
+	base := map[string][]TransitionConfig{
+		"PLANNING": {{To: "RESPAWN"}},
+	}
+	result := mergeTransitions(base, nil)
+	assert.Equal(t, base, result)
+}
+
+// --- MergeConfigs includes phases and transitions ---
+
+func TestMergeConfigs_PhasesAndTransitions(t *testing.T) {
+	base := &Config{
+		Phases: &PhasesConfig{
+			Start: "PLANNING",
+			Phases: map[string]PhaseConfig{
+				"PLANNING": {Hint: "base"},
+			},
+		},
+		Transitions: map[string][]TransitionConfig{
+			"PLANNING": {{To: "RESPAWN"}},
+		},
+	}
+	override := &Config{
+		Phases: &PhasesConfig{
+			Phases: map[string]PhaseConfig{
+				"PLANNING": {Hint: "override"},
+			},
+		},
+		Transitions: map[string][]TransitionConfig{
+			"PLANNING": {{To: "CUSTOM"}},
+		},
+	}
+	result := MergeConfigs(base, override)
+	assert.Equal(t, "override", result.Phases.Phases["PLANNING"].Hint)
+	assert.Equal(t, []TransitionConfig{{To: "CUSTOM"}}, result.Transitions["PLANNING"])
 }

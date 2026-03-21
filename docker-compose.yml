@@ -6,7 +6,7 @@ services:
       POSTGRES_USER: temporal
       POSTGRES_PASSWORD: temporal
     ports:
-      - "5432:5432"
+      - "15432:5432"
     volumes:
       - temporal-postgres-data:/var/lib/postgresql/data
 

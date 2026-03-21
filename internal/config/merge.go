@@ -8,6 +8,8 @@ package config
 //   - guards: same from+to → append override checks to base checks;
 //     disabled:true in override → remove all rules for that from+to pair
 //   - teammate_idle: same match → replace; new match → append
+//   - phases: field-level merge per phase name; start/stop replaced if set in override
+//   - transitions: per source-phase replacement (override completely replaces base transitions for a given from-phase)
 func MergeConfigs(base, override *Config) *Config {
 	result := &Config{}
 
@@ -26,6 +28,119 @@ func MergeConfigs(base, override *Config) *Config {
 	// Merge teammate_permissions — override replaces base for same agent+tool key; new entries append
 	result.TeammatePermissions = mergeTeammatePermissions(base.TeammatePermissions, override.TeammatePermissions)
 
+	// Merge phases — field-level per phase name
+	result.Phases = mergePhases(base.Phases, override.Phases)
+
+	// Merge transitions — per source-phase replacement
+	result.Transitions = mergeTransitions(base.Transitions, override.Transitions)
+
+	return result
+}
+
+// mergePhases merges override PhasesConfig on top of base.
+//   - start/stop from override replace base if set
+//   - Individual phase configs are merged field-by-field: a phase in override updates
+//     or adds to the base phase map; an override phase with a non-zero field replaces
+//     that field in the base phase.
+//   - defaults from override replace base if override.Defaults is non-zero.
+func mergePhases(base, override *PhasesConfig) *PhasesConfig {
+	if override == nil {
+		return base
+	}
+	if base == nil {
+		return override
+	}
+
+	result := &PhasesConfig{
+		Start:    base.Start,
+		Stop:     base.Stop,
+		Defaults: base.Defaults,
+	}
+
+	if override.Start != "" {
+		result.Start = override.Start
+	}
+	if len(override.Stop) > 0 {
+		result.Stop = override.Stop
+	}
+	// Replace defaults entirely if override has any defaults set.
+	if len(override.Defaults.Permissions.SafeCommands) > 0 ||
+		len(override.Defaults.Permissions.ReadOnlyTools) > 0 ||
+		len(override.Defaults.Permissions.FileWritingTools) > 0 ||
+		override.Defaults.Permissions.Lead.FileWrites != "" ||
+		len(override.Defaults.Permissions.Teammate) > 0 ||
+		len(override.Defaults.Idle) > 0 {
+		result.Defaults = override.Defaults
+	}
+
+	// Merge individual phases: start with base phases, then apply override per-phase.
+	result.Phases = make(map[string]PhaseConfig, len(base.Phases))
+	for k, v := range base.Phases {
+		result.Phases[k] = v
+	}
+	for name, ov := range override.Phases {
+		base, exists := result.Phases[name]
+		if !exists {
+			// New phase from override — add as-is.
+			result.Phases[name] = ov
+			continue
+		}
+		// Merge individual fields: override replaces only fields that are set.
+		merged := base
+		if ov.Display.Label != "" {
+			merged.Display.Label = ov.Display.Label
+		}
+		if ov.Display.Icon != "" {
+			merged.Display.Icon = ov.Display.Icon
+		}
+		if ov.Display.Color != "" {
+			merged.Display.Color = ov.Display.Color
+		}
+		if ov.Instructions != "" {
+			merged.Instructions = ov.Instructions
+		}
+		if ov.Hint != "" {
+			merged.Hint = ov.Hint
+		}
+		if ov.Permissions.Lead != nil {
+			merged.Permissions.Lead = ov.Permissions.Lead
+		}
+		if len(ov.Permissions.Teammate) > 0 {
+			merged.Permissions.Teammate = ov.Permissions.Teammate
+		}
+		if len(ov.Permissions.Whitelist) > 0 {
+			merged.Permissions.Whitelist = ov.Permissions.Whitelist
+		}
+		if len(ov.Idle) > 0 {
+			merged.Idle = ov.Idle
+		}
+		if len(ov.OnEnter) > 0 {
+			merged.OnEnter = ov.OnEnter
+		}
+		result.Phases[name] = merged
+	}
+
+	return result
+}
+
+// mergeTransitions merges override transitions on top of base.
+// Override completely replaces transitions for a given source phase.
+// Source phases not in override keep base transitions.
+func mergeTransitions(base, override map[string][]TransitionConfig) map[string][]TransitionConfig {
+	if override == nil {
+		return base
+	}
+	if base == nil {
+		return override
+	}
+
+	result := make(map[string][]TransitionConfig, len(base))
+	for k, v := range base {
+		result[k] = v
+	}
+	for k, v := range override {
+		result[k] = v // complete replacement per source phase
+	}
 	return result
 }
 
@@ -39,7 +154,6 @@ func mergeTracking(base, override TrackingConfig) TrackingConfig {
 	}
 	return result
 }
-
 
 func mergeGuards(base, override []GuardRule) []GuardRule {
 	// Build index of base rules by from+to key
@@ -68,21 +182,17 @@ func mergeGuards(base, override []GuardRule) []GuardRule {
 				result[idx] = existing
 			}
 		} else {
-			if !r.Disabled {
-				index[k] = len(result)
-				result = append(result, r)
-			}
+			// New pair: add regardless of disabled state.
+			// Disabled entries are kept as suppressors for transitions-based guard lookup.
+			index[k] = len(result)
+			result = append(result, r)
 		}
 	}
 
-	// Filter out disabled placeholder entries
-	filtered := result[:0]
-	for _, r := range result {
-		if !r.Disabled {
-			filtered = append(filtered, r)
-		}
-	}
-	return filtered
+	// Keep disabled placeholder entries in the result. FindGuards checks for Disabled:true
+	// entries to suppress guards derived from the transitions format. The legacy FindGuardsLegacy
+	// path skips disabled entries when collecting guard rules.
+	return result
 }
 
 func mergeLeadIdleRules(base, override []LeadIdleRule) []LeadIdleRule {

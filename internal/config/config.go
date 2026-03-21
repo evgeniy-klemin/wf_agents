@@ -4,11 +4,13 @@ package config
 
 // Config is the top-level configuration structure.
 type Config struct {
-	Tracking             TrackingConfig       `yaml:"tracking"`
-	Guards               []GuardRule          `yaml:"guards"`
-	TeammateIdle         []IdleRule           `yaml:"teammate_idle"`
-	LeadIdle             []LeadIdleRule       `yaml:"lead_idle"`
-	TeammatePermissions  []TeammatePermission `yaml:"teammate_permissions"`
+	Tracking            TrackingConfig                `yaml:"tracking"`
+	Guards              []GuardRule                   `yaml:"guards"`
+	TeammateIdle        []IdleRule                    `yaml:"teammate_idle"`
+	LeadIdle            []LeadIdleRule                `yaml:"lead_idle"`
+	TeammatePermissions []TeammatePermission          `yaml:"teammate_permissions"`
+	Phases              *PhasesConfig                 `yaml:"phases,omitempty"`
+	Transitions         map[string][]TransitionConfig `yaml:"transitions,omitempty"`
 }
 
 // TeammatePermission restricts tool usage for teammates by phase and agent name.

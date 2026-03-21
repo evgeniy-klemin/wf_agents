@@ -6,6 +6,7 @@ build:
 	go build -o bin/wf-client ./cmd/client
 	go build -o bin/hook-handler ./cmd/hook-handler
 	go build -o bin/wf-web ./cmd/web
+	go build -o bin/feedback-poll ./cmd/feedback-poll
 
 # Start Temporal infrastructure
 up:
