@@ -19,27 +19,41 @@ func DefaultConfig() (*Config, error) {
 	return &cfg, nil
 }
 
-// LoadConfig loads the default config and optionally merges a project-level
-// .wf-agents/workflow.yaml from projectDir if the file exists.
+// LoadConfig loads the default config and applies a 3-level merge:
+//
+//	embedded defaults → preset (from extends field) → project (.wf-agents/workflow.yaml)
 func LoadConfig(projectDir string) (*Config, error) {
 	base, err := DefaultConfig()
 	if err != nil {
 		return nil, err
 	}
 
-	override := filepath.Join(projectDir, ".wf-agents", "workflow.yaml")
-	data, err := os.ReadFile(override)
+	overridePath := filepath.Join(projectDir, ".wf-agents", "workflow.yaml")
+	data, err := os.ReadFile(overridePath)
 	if os.IsNotExist(err) {
 		return base, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", override, err)
+		return nil, fmt.Errorf("read %s: %w", overridePath, err)
 	}
 
-	var overrideCfg Config
-	if err := yaml.Unmarshal(data, &overrideCfg); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", override, err)
+	var projectCfg Config
+	if err := yaml.Unmarshal(data, &projectCfg); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", overridePath, err)
 	}
 
-	return MergeConfigs(base, &overrideCfg), nil
+	// Middle layer: preset
+	if projectCfg.Extends != "" {
+		presetDir, err := ResolvePresetDir(projectCfg.Extends)
+		if err != nil {
+			return nil, fmt.Errorf("resolve preset %q: %w", projectCfg.Extends, err)
+		}
+		presetCfg, err := LoadPresetConfig(presetDir)
+		if err != nil {
+			return nil, fmt.Errorf("load preset config: %w", err)
+		}
+		base = MergeConfigs(base, presetCfg)
+	}
+
+	return MergeConfigs(base, &projectCfg), nil
 }

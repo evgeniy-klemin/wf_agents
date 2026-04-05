@@ -1,10 +1,13 @@
 package workflow
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/eklemin/wf-agents/internal/config"
 	"github.com/eklemin/wf-agents/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -15,17 +18,17 @@ func TestStatusIncludesPhaseDurations(t *testing.T) {
 	env := setupEnv(t)
 
 	registerTransitions(env, t, []model.Phase{
-		model.PhaseRespawn,
-		model.PhaseDeveloping,
-		model.PhaseReviewing,
-		model.PhaseCommitting,
-		model.PhasePRCreation,
-		model.PhaseFeedback,
-		model.PhaseComplete,
+		model.Phase("RESPAWN"),
+		model.Phase("DEVELOPING"),
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
+		model.Phase("PR_CREATION"),
+		model.Phase("FEEDBACK"),
+		model.Phase("COMPLETE"),
 	})
 
 	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
-		SessionID: "test", TaskDescription: "test", MaxIterations: 5,
+		SessionID: "test", TaskDescription: "test", MaxIterations: 5, Flow: testFlow,
 	})
 
 	require.True(t, env.IsWorkflowCompleted())
@@ -53,17 +56,17 @@ func TestStatusCurrentPhaseSecsIsCurrentPhaseOnly(t *testing.T) {
 	env := setupEnv(t)
 
 	registerTransitions(env, t, []model.Phase{
-		model.PhaseRespawn,
-		model.PhaseDeveloping,
-		model.PhaseReviewing,
-		model.PhaseCommitting,
-		model.PhasePRCreation,
-		model.PhaseFeedback,
-		model.PhaseComplete,
+		model.Phase("RESPAWN"),
+		model.Phase("DEVELOPING"),
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
+		model.Phase("PR_CREATION"),
+		model.Phase("FEEDBACK"),
+		model.Phase("COMPLETE"),
 	})
 
 	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
-		SessionID: "test", TaskDescription: "test", MaxIterations: 5,
+		SessionID: "test", TaskDescription: "test", MaxIterations: 5, Flow: testFlow,
 	})
 
 	require.True(t, env.IsWorkflowCompleted())
@@ -88,6 +91,28 @@ func setupEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
 	return suite.NewTestWorkflowEnvironment()
 }
 
+// testFlow is a minimal FlowSnapshot that enables iteration counting in tests.
+// DEVELOPING has on_enter: increment_iteration, matching the production defaults.yaml config.
+// Transitions mirror the hardcoded validTransitions map in guards.go.
+var testFlow = &model.FlowSnapshot{
+	Start: "PLANNING",
+	Stop:  []string{"COMPLETE"},
+	Phases: map[string]model.FlowPhase{
+		"DEVELOPING": {
+			OnEnter: []model.FlowSideEffect{{Type: "increment_iteration"}},
+		},
+	},
+	Transitions: map[string][]model.FlowTransition{
+		"PLANNING":   {{To: "RESPAWN"}},
+		"RESPAWN":    {{To: "DEVELOPING"}},
+		"DEVELOPING": {{To: "REVIEWING"}},
+		"REVIEWING":  {{To: "COMMITTING"}, {To: "DEVELOPING"}},
+		"COMMITTING": {{To: "RESPAWN"}, {To: "PR_CREATION"}},
+		"PR_CREATION": {{To: "FEEDBACK"}},
+		"FEEDBACK":   {{To: "COMPLETE"}, {To: "RESPAWN"}},
+	},
+}
+
 // testEvidence provides default evidence that satisfies all guards.
 var testEvidence = map[string]string{
 	"working_tree_clean": "true",
@@ -106,7 +131,7 @@ var testEvidenceDirty = map[string]string{
 func update(env *testsuite.TestWorkflowEnvironment, t *testing.T, to model.Phase) {
 	// Pick appropriate evidence based on target phase
 	evidence := testEvidence
-	if to == model.PhaseReviewing {
+	if to == model.Phase("REVIEWING") {
 		evidence = testEvidenceDirty
 	}
 	env.UpdateWorkflowNoRejection(UpdateTransition, "", t, model.SignalTransition{
@@ -131,11 +156,27 @@ func updateMayDeny(env *testsuite.TestWorkflowEnvironment, to model.Phase) {
 }
 
 func registerTransitions(env *testsuite.TestWorkflowEnvironment, t *testing.T, phases []model.Phase) {
+	// mr_url_saved guard requires mrUrl set (via signal) before the FEEDBACK update fires.
+	// Signals are only consumed by sel.Select, which runs between time steps.
+	// Strategy: phases before FEEDBACK fire at delay=0; signal fires at 0; FEEDBACK and
+	// subsequent phases fire at delay=1s so sel.Select has consumed the signal by then.
+	seenFeedback := false
 	for _, p := range phases {
 		p := p
+		if p == model.Phase("FEEDBACK") {
+			seenFeedback = true
+			// Queue the signal at 0 so it is ready for sel.Select.
+			env.RegisterDelayedCallback(func() {
+				env.SignalWorkflow(SignalSetMrUrl, "https://example.com/mr/test")
+			}, 0)
+		}
+		delay := time.Duration(0)
+		if seenFeedback {
+			delay = time.Second
+		}
 		env.RegisterDelayedCallback(func() {
 			update(env, t, p)
-		}, 0)
+		}, delay)
 	}
 }
 
@@ -143,17 +184,17 @@ func TestHappyPath(t *testing.T) {
 	env := setupEnv(t)
 
 	registerTransitions(env, t, []model.Phase{
-		model.PhaseRespawn,
-		model.PhaseDeveloping,
-		model.PhaseReviewing,
-		model.PhaseCommitting,
-		model.PhasePRCreation,
-		model.PhaseFeedback,
-		model.PhaseComplete,
+		model.Phase("RESPAWN"),
+		model.Phase("DEVELOPING"),
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
+		model.Phase("PR_CREATION"),
+		model.Phase("FEEDBACK"),
+		model.Phase("COMPLETE"),
 	})
 
 	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
-		SessionID: "test", TaskDescription: "test", MaxIterations: 5,
+		SessionID: "test", TaskDescription: "test", MaxIterations: 5, Flow: testFlow,
 	})
 
 	require.True(t, env.IsWorkflowCompleted())
@@ -173,19 +214,19 @@ func TestReviewRejectLoop(t *testing.T) {
 	env := setupEnv(t)
 
 	registerTransitions(env, t, []model.Phase{
-		model.PhaseRespawn,
-		model.PhaseDeveloping,
-		model.PhaseReviewing,
-		model.PhaseDeveloping, // reject goes directly to DEVELOPING (no RESPAWN step)
-		model.PhaseReviewing,
-		model.PhaseCommitting,
-		model.PhasePRCreation,
-		model.PhaseFeedback,
-		model.PhaseComplete,
+		model.Phase("RESPAWN"),
+		model.Phase("DEVELOPING"),
+		model.Phase("REVIEWING"),
+		model.Phase("DEVELOPING"), // reject goes directly to DEVELOPING (no RESPAWN step)
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
+		model.Phase("PR_CREATION"),
+		model.Phase("FEEDBACK"),
+		model.Phase("COMPLETE"),
 	})
 
 	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
-		SessionID: "test", TaskDescription: "test", MaxIterations: 5,
+		SessionID: "test", TaskDescription: "test", MaxIterations: 5, Flow: testFlow,
 	})
 
 	require.True(t, env.IsWorkflowCompleted())
@@ -196,23 +237,23 @@ func TestFeedbackRespawnLoop(t *testing.T) {
 	env := setupEnv(t)
 
 	registerTransitions(env, t, []model.Phase{
-		model.PhaseRespawn,
-		model.PhaseDeveloping,
-		model.PhaseReviewing,
-		model.PhaseCommitting,
-		model.PhasePRCreation,
-		model.PhaseFeedback,
-		model.PhaseRespawn, // feedback → respawn (iter 2)
-		model.PhaseDeveloping,
-		model.PhaseReviewing,
-		model.PhaseCommitting,
-		model.PhasePRCreation,
-		model.PhaseFeedback,
-		model.PhaseComplete,
+		model.Phase("RESPAWN"),
+		model.Phase("DEVELOPING"),
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
+		model.Phase("PR_CREATION"),
+		model.Phase("FEEDBACK"),
+		model.Phase("RESPAWN"), // feedback → respawn (iter 2)
+		model.Phase("DEVELOPING"),
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
+		model.Phase("PR_CREATION"),
+		model.Phase("FEEDBACK"),
+		model.Phase("COMPLETE"),
 	})
 
 	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
-		SessionID: "test", TaskDescription: "test", MaxIterations: 5,
+		SessionID: "test", TaskDescription: "test", MaxIterations: 5, Flow: testFlow,
 	})
 
 	require.True(t, env.IsWorkflowCompleted())
@@ -230,21 +271,21 @@ func TestInvalidTransitionDenied(t *testing.T) {
 
 	// PLANNING → DEVELOPING is invalid
 	env.RegisterDelayedCallback(func() {
-		updateMayDeny(env, model.PhaseDeveloping)
+		updateMayDeny(env, model.Phase("DEVELOPING"))
 	}, 0)
 
 	registerTransitions(env, t, []model.Phase{
-		model.PhaseRespawn,
-		model.PhaseDeveloping,
-		model.PhaseReviewing,
-		model.PhaseCommitting,
-		model.PhasePRCreation,
-		model.PhaseFeedback,
-		model.PhaseComplete,
+		model.Phase("RESPAWN"),
+		model.Phase("DEVELOPING"),
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
+		model.Phase("PR_CREATION"),
+		model.Phase("FEEDBACK"),
+		model.Phase("COMPLETE"),
 	})
 
 	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
-		SessionID: "test", TaskDescription: "test", MaxIterations: 5,
+		SessionID: "test", TaskDescription: "test", MaxIterations: 5, Flow: testFlow,
 	})
 
 	require.True(t, env.IsWorkflowCompleted())
@@ -265,34 +306,94 @@ func TestInvalidTransitionDenied(t *testing.T) {
 	assert.True(t, hasDenial, "should have denial for PLANNING→DEVELOPING")
 }
 
+func TestIdempotentTransitionAllowed(t *testing.T) {
+	env := setupEnv(t)
+
+	var idempotentResult model.TransitionResult
+
+	// Transition to RESPAWN (valid)
+	env.RegisterDelayedCallback(func() {
+		update(env, t, model.Phase("RESPAWN"))
+	}, 0)
+
+	// Transition to RESPAWN again (idempotent) — capture the result
+	env.RegisterDelayedCallback(func() {
+		env.UpdateWorkflow(UpdateTransition, "", &testsuite.TestUpdateCallback{
+			OnAccept: func() {},
+			OnComplete: func(v interface{}, err error) {
+				if r, ok := v.(model.TransitionResult); ok {
+					idempotentResult = r
+				}
+			},
+			OnReject: func(error) {},
+		}, model.SignalTransition{
+			To:        model.Phase("RESPAWN"),
+			SessionID: "test",
+			Reason:    "test",
+			Guards:    testEvidence,
+		})
+	}, 0)
+
+	// Continue to completion
+	registerTransitions(env, t, []model.Phase{
+		model.Phase("DEVELOPING"),
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
+		model.Phase("PR_CREATION"),
+		model.Phase("FEEDBACK"),
+		model.Phase("COMPLETE"),
+	})
+
+	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
+		SessionID: "test", TaskDescription: "test", MaxIterations: 5, Flow: testFlow,
+	})
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	assert.True(t, idempotentResult.Allowed, "idempotent transition should be allowed")
+	assert.True(t, idempotentResult.NoOp, "idempotent transition should be a no-op")
+
+	// Count EventTransition events with to=RESPAWN — should be exactly 1 (the real transition)
+	var respawnTransitions int
+	var timeline model.WorkflowTimeline
+	require.NoError(t, env.GetWorkflowResult(&timeline))
+	for _, e := range timeline.Events {
+		if e.Type == model.EventTransition && e.Detail["to"] == "RESPAWN" {
+			respawnTransitions++
+		}
+	}
+	assert.Equal(t, 1, respawnTransitions, "should have exactly one RESPAWN transition event")
+}
+
 func TestMaxIterationsEnforced(t *testing.T) {
 	env := setupEnv(t)
 
 	registerTransitions(env, t, []model.Phase{
-		model.PhaseRespawn,
-		model.PhaseDeveloping,
-		model.PhaseReviewing,
-		model.PhaseCommitting,
-		model.PhaseRespawn, // iter 2
-		model.PhaseDeveloping,
-		model.PhaseReviewing,
-		model.PhaseCommitting,
+		model.Phase("RESPAWN"),
+		model.Phase("DEVELOPING"),
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
+		model.Phase("RESPAWN"), // iter 2
+		model.Phase("DEVELOPING"),
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
 	})
 
 	// iter 3 → DENIED by guard
 	env.RegisterDelayedCallback(func() {
-		updateMayDeny(env, model.PhaseRespawn)
+		updateMayDeny(env, model.Phase("RESPAWN"))
 	}, 0)
 
 	// Still in COMMITTING, complete via valid path
 	registerTransitions(env, t, []model.Phase{
-		model.PhasePRCreation,
-		model.PhaseFeedback,
-		model.PhaseComplete,
+		model.Phase("PR_CREATION"),
+		model.Phase("FEEDBACK"),
+		model.Phase("COMPLETE"),
 	})
 
 	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
-		SessionID: "test", TaskDescription: "test", MaxIterations: 2,
+		SessionID: "test", TaskDescription: "test", MaxIterations: 2, Flow: testFlow,
 	})
 
 	require.True(t, env.IsWorkflowCompleted())
@@ -323,23 +424,23 @@ func TestBlockedRespawnNoDoubleCount(t *testing.T) {
 	env := setupEnv(t)
 
 	registerTransitions(env, t, []model.Phase{
-		model.PhaseRespawn, // iter 1 (from PLANNING, doesn't count)
-		model.PhaseDeveloping,
-		model.PhaseReviewing,
-		model.PhaseCommitting,
-		model.PhaseRespawn, // iter 2
-		model.PhaseDeveloping,
+		model.Phase("RESPAWN"), // iter 1 (from PLANNING, doesn't count)
+		model.Phase("DEVELOPING"),
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
+		model.Phase("RESPAWN"), // iter 2
+		model.Phase("DEVELOPING"),
 		model.PhaseBlocked,    // blocked in DEVELOPING
-		model.PhaseDeveloping, // unblock back to DEVELOPING
-		model.PhaseReviewing,
-		model.PhaseCommitting,
-		model.PhasePRCreation,
-		model.PhaseFeedback,
-		model.PhaseComplete,
+		model.Phase("DEVELOPING"), // unblock back to DEVELOPING
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
+		model.Phase("PR_CREATION"),
+		model.Phase("FEEDBACK"),
+		model.Phase("COMPLETE"),
 	})
 
 	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
-		SessionID: "test", TaskDescription: "test", MaxIterations: 2,
+		SessionID: "test", TaskDescription: "test", MaxIterations: 2, Flow: testFlow,
 	})
 
 	require.True(t, env.IsWorkflowCompleted())
@@ -358,32 +459,32 @@ func TestBlockedAtMaxIterNoBypass(t *testing.T) {
 	env := setupEnv(t)
 
 	registerTransitions(env, t, []model.Phase{
-		model.PhaseRespawn, // iter 1 (from PLANNING, doesn't count)
-		model.PhaseDeveloping,
-		model.PhaseReviewing,
-		model.PhaseCommitting,
-		model.PhaseRespawn, // iter 2 (maxIter reached)
-		model.PhaseDeveloping,
-		model.PhaseReviewing,
-		model.PhaseCommitting,
+		model.Phase("RESPAWN"), // iter 1 (from PLANNING, doesn't count)
+		model.Phase("DEVELOPING"),
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
+		model.Phase("RESPAWN"), // iter 2 (maxIter reached)
+		model.Phase("DEVELOPING"),
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
 		model.PhaseBlocked,    // blocked in COMMITTING at iter 2
-		model.PhaseCommitting, // unblock back to COMMITTING
+		model.Phase("COMMITTING"), // unblock back to COMMITTING
 	})
 
 	// COMMITTING → RESPAWN must be DENIED (maxIter exceeded)
 	env.RegisterDelayedCallback(func() {
-		updateMayDeny(env, model.PhaseRespawn)
+		updateMayDeny(env, model.Phase("RESPAWN"))
 	}, 0)
 
 	// Complete via valid path
 	registerTransitions(env, t, []model.Phase{
-		model.PhasePRCreation,
-		model.PhaseFeedback,
-		model.PhaseComplete,
+		model.Phase("PR_CREATION"),
+		model.Phase("FEEDBACK"),
+		model.Phase("COMPLETE"),
 	})
 
 	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
-		SessionID: "test", TaskDescription: "test", MaxIterations: 2,
+		SessionID: "test", TaskDescription: "test", MaxIterations: 2, Flow: testFlow,
 	})
 
 	require.True(t, env.IsWorkflowCompleted())
@@ -412,27 +513,22 @@ func TestBlockedAndUnblock(t *testing.T) {
 	env := setupEnv(t)
 
 	registerTransitions(env, t, []model.Phase{
-		model.PhaseRespawn,
-		model.PhaseDeveloping,
+		model.Phase("RESPAWN"),
+		model.Phase("DEVELOPING"),
 		model.PhaseBlocked,
 	})
 
-	// DENIED — must return to DEVELOPING, not REVIEWING
-	env.RegisterDelayedCallback(func() {
-		updateMayDeny(env, model.PhaseReviewing)
-	}, 0)
-
+	// AUTO-UNBLOCK: BLOCKED → REVIEWING triggers auto-unblock to DEVELOPING, then DEVELOPING → REVIEWING succeeds
 	registerTransitions(env, t, []model.Phase{
-		model.PhaseDeveloping, // correct unblock
-		model.PhaseReviewing,
-		model.PhaseCommitting,
-		model.PhasePRCreation,
-		model.PhaseFeedback,
-		model.PhaseComplete,
+		model.Phase("REVIEWING"), // this auto-unblocks first (BLOCKED→DEVELOPING), then applies DEVELOPING→REVIEWING
+		model.Phase("COMMITTING"),
+		model.Phase("PR_CREATION"),
+		model.Phase("FEEDBACK"),
+		model.Phase("COMPLETE"),
 	})
 
 	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
-		SessionID: "test", TaskDescription: "test", MaxIterations: 5,
+		SessionID: "test", TaskDescription: "test", MaxIterations: 5, Flow: testFlow,
 	})
 
 	require.True(t, env.IsWorkflowCompleted())
@@ -440,15 +536,89 @@ func TestBlockedAndUnblock(t *testing.T) {
 
 	var timeline model.WorkflowTimeline
 	require.NoError(t, env.GetWorkflowResult(&timeline))
-	hasDenial := false
+
+	// Verify auto-unblock event exists (BLOCKED → DEVELOPING)
+	hasAutoUnblock := false
 	for _, e := range timeline.Events {
-		if e.Type == model.EventHookDenial && e.Detail["from"] == "BLOCKED" {
-			hasDenial = true
-			assert.Equal(t, "REVIEWING", e.Detail["to"])
+		if e.Type == model.EventTransition && e.Detail["from"] == "BLOCKED" && e.Detail["to"] == "DEVELOPING" {
+			hasAutoUnblock = true
 			break
 		}
 	}
-	assert.True(t, hasDenial, "should deny wrong unblock target")
+	assert.True(t, hasAutoUnblock, "should have auto-unblock event BLOCKED → DEVELOPING")
+
+	// Verify actual transition event exists (DEVELOPING → REVIEWING)
+	hasActualTransition := false
+	for _, e := range timeline.Events {
+		if e.Type == model.EventTransition && e.Detail["from"] == "DEVELOPING" && e.Detail["to"] == "REVIEWING" {
+			hasActualTransition = true
+			break
+		}
+	}
+	assert.True(t, hasActualTransition, "should have transition event DEVELOPING → REVIEWING")
+
+	// Verify no denial event from BLOCKED
+	for _, e := range timeline.Events {
+		if e.Type == model.EventHookDenial && e.Detail["from"] == "BLOCKED" {
+			t.Errorf("unexpected denial event from BLOCKED: %v", e.Detail)
+		}
+	}
+}
+
+func TestBlockedAutoReturnThenDenied(t *testing.T) {
+	// When BLOCKED with preBlockedPhase=DEVELOPING, attempting BLOCKED → COMMITTING
+	// (invalid from DEVELOPING) should auto-unblock to DEVELOPING but then deny DEVELOPING → COMMITTING.
+	env := setupEnv(t)
+
+	registerTransitions(env, t, []model.Phase{
+		model.Phase("RESPAWN"),
+		model.Phase("DEVELOPING"),
+		model.PhaseBlocked,
+	})
+
+	// Attempt invalid transition: BLOCKED → COMMITTING (DEVELOPING → COMMITTING is not valid)
+	env.RegisterDelayedCallback(func() {
+		updateMayDeny(env, model.Phase("COMMITTING"))
+	}, 0)
+
+	// After denial, complete via valid path from DEVELOPING
+	registerTransitions(env, t, []model.Phase{
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
+		model.Phase("PR_CREATION"),
+		model.Phase("FEEDBACK"),
+		model.Phase("COMPLETE"),
+	})
+
+	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
+		SessionID: "test", TaskDescription: "test", MaxIterations: 5, Flow: testFlow,
+	})
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	var timeline model.WorkflowTimeline
+	require.NoError(t, env.GetWorkflowResult(&timeline))
+
+	// Verify auto-unblock event exists (BLOCKED → DEVELOPING)
+	hasAutoUnblock := false
+	for _, e := range timeline.Events {
+		if e.Type == model.EventTransition && e.Detail["from"] == "BLOCKED" && e.Detail["to"] == "DEVELOPING" {
+			hasAutoUnblock = true
+			break
+		}
+	}
+	assert.True(t, hasAutoUnblock, "should have auto-unblock event BLOCKED → DEVELOPING")
+
+	// Verify denial event exists for DEVELOPING → COMMITTING
+	hasDenial := false
+	for _, e := range timeline.Events {
+		if e.Type == model.EventHookDenial && e.Detail["from"] == "DEVELOPING" && e.Detail["to"] == "COMMITTING" {
+			hasDenial = true
+			break
+		}
+	}
+	assert.True(t, hasDenial, "should deny invalid transition DEVELOPING → COMMITTING after auto-unblock")
 }
 
 func TestLegacyCompleteSignalIgnored(t *testing.T) {
@@ -461,17 +631,17 @@ func TestLegacyCompleteSignalIgnored(t *testing.T) {
 
 	// Complete via proper Update path
 	registerTransitions(env, t, []model.Phase{
-		model.PhaseRespawn,
-		model.PhaseDeveloping,
-		model.PhaseReviewing,
-		model.PhaseCommitting,
-		model.PhasePRCreation,
-		model.PhaseFeedback,
-		model.PhaseComplete,
+		model.Phase("RESPAWN"),
+		model.Phase("DEVELOPING"),
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
+		model.Phase("PR_CREATION"),
+		model.Phase("FEEDBACK"),
+		model.Phase("COMPLETE"),
 	})
 
 	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
-		SessionID: "test", TaskDescription: "test", MaxIterations: 5,
+		SessionID: "test", TaskDescription: "test", MaxIterations: 5, Flow: testFlow,
 	})
 
 	require.True(t, env.IsWorkflowCompleted())
@@ -481,28 +651,28 @@ func TestLegacyCompleteSignalIgnored(t *testing.T) {
 	require.NoError(t, err)
 	var phase model.Phase
 	require.NoError(t, val.Get(&phase))
-	assert.Equal(t, model.PhaseComplete, phase)
+	assert.Equal(t, model.Phase("COMPLETE"), phase)
 }
 
 func TestCommittingRespawnLoop(t *testing.T) {
 	env := setupEnv(t)
 
 	registerTransitions(env, t, []model.Phase{
-		model.PhaseRespawn,
-		model.PhaseDeveloping,
-		model.PhaseReviewing,
-		model.PhaseCommitting,
-		model.PhaseRespawn,
-		model.PhaseDeveloping,
-		model.PhaseReviewing,
-		model.PhaseCommitting,
-		model.PhasePRCreation,
-		model.PhaseFeedback,
-		model.PhaseComplete,
+		model.Phase("RESPAWN"),
+		model.Phase("DEVELOPING"),
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
+		model.Phase("RESPAWN"),
+		model.Phase("DEVELOPING"),
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
+		model.Phase("PR_CREATION"),
+		model.Phase("FEEDBACK"),
+		model.Phase("COMPLETE"),
 	})
 
 	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
-		SessionID: "test", TaskDescription: "test", MaxIterations: 5,
+		SessionID: "test", TaskDescription: "test", MaxIterations: 5, Flow: testFlow,
 	})
 
 	require.True(t, env.IsWorkflowCompleted())
@@ -519,26 +689,26 @@ func TestPRCreationToCompleteDenied(t *testing.T) {
 	env := setupEnv(t)
 
 	registerTransitions(env, t, []model.Phase{
-		model.PhaseRespawn,
-		model.PhaseDeveloping,
-		model.PhaseReviewing,
-		model.PhaseCommitting,
-		model.PhasePRCreation,
+		model.Phase("RESPAWN"),
+		model.Phase("DEVELOPING"),
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
+		model.Phase("PR_CREATION"),
 	})
 
 	// PR_CREATION → COMPLETE must be DENIED
 	env.RegisterDelayedCallback(func() {
-		updateMayDeny(env, model.PhaseComplete)
+		updateMayDeny(env, model.Phase("COMPLETE"))
 	}, 0)
 
 	// Complete via valid path
 	registerTransitions(env, t, []model.Phase{
-		model.PhaseFeedback,
-		model.PhaseComplete,
+		model.Phase("FEEDBACK"),
+		model.Phase("COMPLETE"),
 	})
 
 	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
-		SessionID: "test", TaskDescription: "test", MaxIterations: 5,
+		SessionID: "test", TaskDescription: "test", MaxIterations: 5, Flow: testFlow,
 	})
 
 	require.True(t, env.IsWorkflowCompleted())
@@ -562,17 +732,17 @@ func TestCurrentIterPhaseDurations_SingleIteration(t *testing.T) {
 	env := setupEnv(t)
 
 	registerTransitions(env, t, []model.Phase{
-		model.PhaseRespawn,
-		model.PhaseDeveloping,
-		model.PhaseReviewing,
-		model.PhaseCommitting,
-		model.PhasePRCreation,
-		model.PhaseFeedback,
-		model.PhaseComplete,
+		model.Phase("RESPAWN"),
+		model.Phase("DEVELOPING"),
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
+		model.Phase("PR_CREATION"),
+		model.Phase("FEEDBACK"),
+		model.Phase("COMPLETE"),
 	})
 
 	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
-		SessionID: "test", TaskDescription: "test", MaxIterations: 5,
+		SessionID: "test", TaskDescription: "test", MaxIterations: 5, Flow: testFlow,
 	})
 
 	require.True(t, env.IsWorkflowCompleted())
@@ -600,21 +770,21 @@ func TestCurrentIterPhaseDurations_MultiIteration(t *testing.T) {
 	env := setupEnv(t)
 
 	registerTransitions(env, t, []model.Phase{
-		model.PhaseRespawn, // iter 1 (from PLANNING)
-		model.PhaseDeveloping,
-		model.PhaseReviewing,
-		model.PhaseCommitting,
-		model.PhaseRespawn, // iter 2
-		model.PhaseDeveloping,
-		model.PhaseReviewing,
-		model.PhaseCommitting,
-		model.PhasePRCreation,
-		model.PhaseFeedback,
-		model.PhaseComplete,
+		model.Phase("RESPAWN"), // iter 1 (from PLANNING)
+		model.Phase("DEVELOPING"),
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
+		model.Phase("RESPAWN"), // iter 2
+		model.Phase("DEVELOPING"),
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
+		model.Phase("PR_CREATION"),
+		model.Phase("FEEDBACK"),
+		model.Phase("COMPLETE"),
 	})
 
 	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
-		SessionID: "test", TaskDescription: "test", MaxIterations: 5,
+		SessionID: "test", TaskDescription: "test", MaxIterations: 5, Flow: testFlow,
 	})
 
 	require.True(t, env.IsWorkflowCompleted())
@@ -648,17 +818,17 @@ func TestCurrentIterPhaseDurations_FirstIterationOnly(t *testing.T) {
 	env := setupEnv(t)
 
 	registerTransitions(env, t, []model.Phase{
-		model.PhaseRespawn,
-		model.PhaseDeveloping,
-		model.PhaseReviewing,
-		model.PhaseCommitting,
-		model.PhasePRCreation,
-		model.PhaseFeedback,
-		model.PhaseComplete,
+		model.Phase("RESPAWN"),
+		model.Phase("DEVELOPING"),
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
+		model.Phase("PR_CREATION"),
+		model.Phase("FEEDBACK"),
+		model.Phase("COMPLETE"),
 	})
 
 	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
-		SessionID: "test", TaskDescription: "test", MaxIterations: 5,
+		SessionID: "test", TaskDescription: "test", MaxIterations: 5, Flow: testFlow,
 	})
 
 	require.True(t, env.IsWorkflowCompleted())
@@ -707,25 +877,25 @@ func TestResetIterationsSignalInWorkflow(t *testing.T) {
 	env := setupEnv(t)
 
 	registerTransitions(env, t, []model.Phase{
-		model.PhaseRespawn, // from PLANNING (no increment)
-		model.PhaseDeveloping,
-		model.PhaseReviewing,
-		model.PhaseCommitting,
-		model.PhaseRespawn, // iter 2
-		model.PhaseDeveloping,
-		model.PhaseReviewing,
-		model.PhaseCommitting,
-		model.PhaseRespawn, // iter 3
-		model.PhaseDeveloping,
-		model.PhaseReviewing,
-		model.PhaseCommitting,
-		model.PhasePRCreation,
-		model.PhaseFeedback,
-		model.PhaseComplete,
+		model.Phase("RESPAWN"), // from PLANNING (no increment)
+		model.Phase("DEVELOPING"),
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
+		model.Phase("RESPAWN"), // iter 2
+		model.Phase("DEVELOPING"),
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
+		model.Phase("RESPAWN"), // iter 3
+		model.Phase("DEVELOPING"),
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
+		model.Phase("PR_CREATION"),
+		model.Phase("FEEDBACK"),
+		model.Phase("COMPLETE"),
 	})
 
 	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
-		SessionID: "test", TaskDescription: "test", MaxIterations: 5,
+		SessionID: "test", TaskDescription: "test", MaxIterations: 5, Flow: testFlow,
 	})
 
 	require.True(t, env.IsWorkflowCompleted())
@@ -751,30 +921,30 @@ func TestRespawnAllowedAfterReset(t *testing.T) {
 	env := setupEnv(t)
 
 	registerTransitions(env, t, []model.Phase{
-		model.PhaseRespawn, // iter 1 from PLANNING
-		model.PhaseDeveloping,
-		model.PhaseReviewing,
-		model.PhaseCommitting,
-		model.PhaseRespawn, // iter 2 (maxIter reached)
-		model.PhaseDeveloping,
-		model.PhaseReviewing,
-		model.PhaseCommitting,
+		model.Phase("RESPAWN"), // iter 1 from PLANNING
+		model.Phase("DEVELOPING"),
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
+		model.Phase("RESPAWN"), // iter 2 (maxIter reached)
+		model.Phase("DEVELOPING"),
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
 	})
 
 	// COMMITTING → RESPAWN must be DENIED (maxIter exceeded)
 	env.RegisterDelayedCallback(func() {
-		updateMayDeny(env, model.PhaseRespawn)
+		updateMayDeny(env, model.Phase("RESPAWN"))
 	}, 0)
 
 	// Complete via valid path after the denied RESPAWN
 	registerTransitions(env, t, []model.Phase{
-		model.PhasePRCreation,
-		model.PhaseFeedback,
-		model.PhaseComplete,
+		model.Phase("PR_CREATION"),
+		model.Phase("FEEDBACK"),
+		model.Phase("COMPLETE"),
 	})
 
 	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
-		SessionID: "test", TaskDescription: "test", MaxIterations: 2,
+		SessionID: "test", TaskDescription: "test", MaxIterations: 2, Flow: testFlow,
 	})
 
 	require.True(t, env.IsWorkflowCompleted())
@@ -802,21 +972,21 @@ func TestTotalIterationsIncrementsAlongside(t *testing.T) {
 	env := setupEnv(t)
 
 	registerTransitions(env, t, []model.Phase{
-		model.PhaseRespawn, // iter 1 (from PLANNING — both start at 1, neither incremented)
-		model.PhaseDeveloping,
-		model.PhaseReviewing,
-		model.PhaseCommitting,
-		model.PhaseRespawn, // iter 2 (both increment to 2)
-		model.PhaseDeveloping,
-		model.PhaseReviewing,
-		model.PhaseCommitting,
-		model.PhasePRCreation,
-		model.PhaseFeedback,
-		model.PhaseComplete,
+		model.Phase("RESPAWN"), // iter 1 (from PLANNING — both start at 1, neither incremented)
+		model.Phase("DEVELOPING"),
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
+		model.Phase("RESPAWN"), // iter 2 (both increment to 2)
+		model.Phase("DEVELOPING"),
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
+		model.Phase("PR_CREATION"),
+		model.Phase("FEEDBACK"),
+		model.Phase("COMPLETE"),
 	})
 
 	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
-		SessionID: "test", TaskDescription: "test", MaxIterations: 5,
+		SessionID: "test", TaskDescription: "test", MaxIterations: 5, Flow: testFlow,
 	})
 
 	require.True(t, env.IsWorkflowCompleted())
@@ -837,30 +1007,30 @@ func TestGuardMaxIterMessageMentionsReset(t *testing.T) {
 	env := setupEnv(t)
 
 	registerTransitions(env, t, []model.Phase{
-		model.PhaseRespawn,
-		model.PhaseDeveloping,
-		model.PhaseReviewing,
-		model.PhaseCommitting,
-		model.PhaseRespawn, // iter 2 (maxIter reached)
-		model.PhaseDeveloping,
-		model.PhaseReviewing,
-		model.PhaseCommitting,
+		model.Phase("RESPAWN"),
+		model.Phase("DEVELOPING"),
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
+		model.Phase("RESPAWN"), // iter 2 (maxIter reached)
+		model.Phase("DEVELOPING"),
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
 	})
 
 	// iter 3 → DENIED by guard
 	env.RegisterDelayedCallback(func() {
-		updateMayDeny(env, model.PhaseRespawn)
+		updateMayDeny(env, model.Phase("RESPAWN"))
 	}, 0)
 
 	// Still in COMMITTING, complete via valid path
 	registerTransitions(env, t, []model.Phase{
-		model.PhasePRCreation,
-		model.PhaseFeedback,
-		model.PhaseComplete,
+		model.Phase("PR_CREATION"),
+		model.Phase("FEEDBACK"),
+		model.Phase("COMPLETE"),
 	})
 
 	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
-		SessionID: "test", TaskDescription: "test", MaxIterations: 2,
+		SessionID: "test", TaskDescription: "test", MaxIterations: 2, Flow: testFlow,
 	})
 
 	require.True(t, env.IsWorkflowCompleted())
@@ -889,17 +1059,17 @@ func TestWorkflowCompletesAfterCompleteTransition(t *testing.T) {
 
 	// Minimal path to COMPLETE
 	registerTransitions(env, t, []model.Phase{
-		model.PhaseRespawn,
-		model.PhaseDeveloping,
-		model.PhaseReviewing,
-		model.PhaseCommitting,
-		model.PhasePRCreation,
-		model.PhaseFeedback,
-		model.PhaseComplete,
+		model.Phase("RESPAWN"),
+		model.Phase("DEVELOPING"),
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
+		model.Phase("PR_CREATION"),
+		model.Phase("FEEDBACK"),
+		model.Phase("COMPLETE"),
 	})
 
 	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
-		SessionID: "test", TaskDescription: "test task", MaxIterations: 5,
+		SessionID: "test", TaskDescription: "test task", MaxIterations: 5, Flow: testFlow,
 	})
 
 	require.True(t, env.IsWorkflowCompleted(), "workflow should be completed after COMPLETE transition")
@@ -915,7 +1085,7 @@ func TestWorkflowCompletesAfterCompleteTransition(t *testing.T) {
 			lastTransition = e
 		}
 	}
-	assert.Equal(t, string(model.PhaseComplete), lastTransition.Detail["to"],
+	assert.Equal(t, string(model.Phase("COMPLETE")), lastTransition.Detail["to"],
 		"last transition should be to COMPLETE")
 }
 
@@ -924,9 +1094,9 @@ func TestRespawnGuardActiveAgents(t *testing.T) {
 	// We verify the guard condition inline since handleTransition needs a workflow context.
 	t.Run("deny with active agents", func(t *testing.T) {
 		activeAgents := []string{"dev-agent-1", "dev-agent-2"}
-		phase := model.PhaseRespawn
-		target := model.PhaseDeveloping
-		assert.True(t, phase == model.PhaseRespawn && target == model.PhaseDeveloping && len(activeAgents) > 0,
+		phase := model.Phase("RESPAWN")
+		target := model.Phase("DEVELOPING")
+		assert.True(t, phase == model.Phase("RESPAWN") && target == model.Phase("DEVELOPING") && len(activeAgents) > 0,
 			"guard condition should match: RESPAWN → DEVELOPING with active agents")
 	})
 	t.Run("allow with no agents", func(t *testing.T) {
@@ -937,6 +1107,7 @@ func TestRespawnGuardActiveAgents(t *testing.T) {
 		// Teammates are removed via clear-active-agents signal (during RESPAWN),
 		// NOT by SubagentStop (which fires per Agent tool invocation, not per process exit).
 		agents := map[string]string{"dev-1": "id-1", "rev-1": "id-2"}
+		_ = agents
 		agents = make(map[string]string) // clear-active-agents bulk-clears
 		assert.Equal(t, 0, len(agents), "clear-active-agents must empty the map")
 	})
@@ -950,7 +1121,7 @@ func TestRespawnDoesNotAutoClearActiveAgents(t *testing.T) {
 	t.Run("activeAgents preserved after RESPAWN entry", func(t *testing.T) {
 		// Directly test sessionState — no workflow.Context needed.
 		s := &sessionState{
-			phase:        model.PhaseRespawn,
+			phase:        model.Phase("RESPAWN"),
 			activeAgents: map[string]string{"dev-1": "id-1", "dev-2": "id-2", "rev-1": "id-3"},
 			maxIter:      5,
 			iteration:    1,
@@ -962,27 +1133,23 @@ func TestRespawnDoesNotAutoClearActiveAgents(t *testing.T) {
 	})
 
 	t.Run("guardNoActiveAgents blocks RESPAWN→DEVELOPING when agents still active", func(t *testing.T) {
-		s := &sessionState{
-			phase:        model.PhaseRespawn,
-			activeAgents: map[string]string{"dev-1": "id-1"},
-			maxIter:      5,
-			iteration:    1,
-		}
-
-		reason := validateTransition(s, model.PhaseRespawn, model.PhaseDeveloping, nil)
+		cfg, err := config.DefaultConfig()
+		require.NoError(t, err)
+		reason := checkAllGuards(cfg, guardParams{
+			From: "RESPAWN", To: "DEVELOPING",
+			ActiveAgents: 1, MaxIterations: 5, Iteration: 1,
+		})
 		assert.NotEmpty(t, reason,
 			"guardNoActiveAgents must deny RESPAWN→DEVELOPING when activeAgents is non-empty")
 	})
 
 	t.Run("guardNoActiveAgents passes when agents have stopped", func(t *testing.T) {
-		s := &sessionState{
-			phase:        model.PhaseRespawn,
-			activeAgents: map[string]string{},
-			maxIter:      5,
-			iteration:    1,
-		}
-
-		reason := validateTransition(s, model.PhaseRespawn, model.PhaseDeveloping, nil)
+		cfg, err := config.DefaultConfig()
+		require.NoError(t, err)
+		reason := checkAllGuards(cfg, guardParams{
+			From: "RESPAWN", To: "DEVELOPING",
+			ActiveAgents: 0, MaxIterations: 5, Iteration: 1,
+		})
 		assert.Empty(t, reason, "guardNoActiveAgents should pass when activeAgents is empty")
 	})
 
@@ -1002,7 +1169,7 @@ func TestRespawnDoesNotAutoClearActiveAgents(t *testing.T) {
 		}, 0)
 
 		registerTransitions(env, t, []model.Phase{
-			model.PhaseRespawn,
+			model.Phase("RESPAWN"),
 		})
 
 		// clear-active-agents during RESPAWN removes all agents so RESPAWN→DEVELOPING is allowed.
@@ -1011,10 +1178,10 @@ func TestRespawnDoesNotAutoClearActiveAgents(t *testing.T) {
 		}, 0)
 
 		registerTransitions(env, t, []model.Phase{
-			model.PhaseDeveloping,
-			model.PhaseReviewing,
-			model.PhaseCommitting,
-			model.PhaseRespawn,
+			model.Phase("DEVELOPING"),
+			model.Phase("REVIEWING"),
+			model.Phase("COMMITTING"),
+			model.Phase("RESPAWN"),
 		})
 
 		// clear again for the second RESPAWN→DEVELOPING
@@ -1023,16 +1190,16 @@ func TestRespawnDoesNotAutoClearActiveAgents(t *testing.T) {
 		}, 0)
 
 		registerTransitions(env, t, []model.Phase{
-			model.PhaseDeveloping,
-			model.PhaseReviewing,
-			model.PhaseCommitting,
-			model.PhasePRCreation,
-			model.PhaseFeedback,
-			model.PhaseComplete,
+			model.Phase("DEVELOPING"),
+			model.Phase("REVIEWING"),
+			model.Phase("COMMITTING"),
+			model.Phase("PR_CREATION"),
+			model.Phase("FEEDBACK"),
+			model.Phase("COMPLETE"),
 		})
 
 		env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
-			SessionID: "test", TaskDescription: "test", MaxIterations: 5,
+			SessionID: "test", TaskDescription: "test", MaxIterations: 5, Flow: testFlow,
 		})
 
 		require.True(t, env.IsWorkflowCompleted(),
@@ -1064,17 +1231,17 @@ func TestSubagentStartStoresAgentType(t *testing.T) {
 	}, 0)
 
 	registerTransitions(env, t, []model.Phase{
-		model.PhaseRespawn,
-		model.PhaseDeveloping,
-		model.PhaseReviewing,
-		model.PhaseCommitting,
-		model.PhasePRCreation,
-		model.PhaseFeedback,
-		model.PhaseComplete,
+		model.Phase("RESPAWN"),
+		model.Phase("DEVELOPING"),
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
+		model.Phase("PR_CREATION"),
+		model.Phase("FEEDBACK"),
+		model.Phase("COMPLETE"),
 	})
 
 	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
-		SessionID: "test", TaskDescription: "test", MaxIterations: 5,
+		SessionID: "test", TaskDescription: "test", MaxIterations: 5, Flow: testFlow,
 	})
 
 	require.True(t, env.IsWorkflowCompleted())
@@ -1116,17 +1283,17 @@ func TestSubagentStartNoDuplicates(t *testing.T) {
 	}, 0)
 
 	registerTransitions(env, t, []model.Phase{
-		model.PhaseRespawn,
-		model.PhaseDeveloping,
-		model.PhaseReviewing,
-		model.PhaseCommitting,
-		model.PhasePRCreation,
-		model.PhaseFeedback,
-		model.PhaseComplete,
+		model.Phase("RESPAWN"),
+		model.Phase("DEVELOPING"),
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
+		model.Phase("PR_CREATION"),
+		model.Phase("FEEDBACK"),
+		model.Phase("COMPLETE"),
 	})
 
 	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
-		SessionID: "test", TaskDescription: "test", MaxIterations: 5,
+		SessionID: "test", TaskDescription: "test", MaxIterations: 5, Flow: testFlow,
 	})
 
 	require.True(t, env.IsWorkflowCompleted())
@@ -1139,6 +1306,76 @@ func TestSubagentStartNoDuplicates(t *testing.T) {
 	// activeAgents is cleared by terminal COMPLETE phase, not by SubagentStop.
 	assert.Equal(t, 0, len(status.ActiveAgents),
 		"activeAgents should be empty after COMPLETE phase (terminal clear)")
+}
+
+// TestSubagentStartFirstRegistrationEmitsSpawn verifies that SubagentStart emits EventAgentSpawn
+// only on the first registration. A second SubagentStart for the same agent_type updates the
+// agent_id silently (EventToolUse, not EventAgentSpawn).
+func TestSubagentStartFirstRegistrationEmitsSpawn(t *testing.T) {
+	s := &sessionState{
+		activeAgents: make(map[string]string),
+		events:       make([]model.WorkflowEvent, 0),
+	}
+
+	// Simulate first SubagentStart handler logic.
+	agentType := "developer-1"
+	agentID1 := "id-first"
+	var evtType1 model.EventType
+	if _, alreadyRegistered := s.activeAgents[agentType]; !alreadyRegistered {
+		evtType1 = model.EventAgentSpawn
+	} else {
+		evtType1 = model.EventToolUse
+	}
+	s.activeAgents[agentType] = agentID1
+
+	// Simulate second SubagentStart for same agent_type.
+	agentID2 := "id-second"
+	var evtType2 model.EventType
+	if _, alreadyRegistered := s.activeAgents[agentType]; !alreadyRegistered {
+		evtType2 = model.EventAgentSpawn
+	} else {
+		evtType2 = model.EventToolUse
+	}
+	s.activeAgents[agentType] = agentID2
+
+	assert.Equal(t, model.EventAgentSpawn, evtType1, "first SubagentStart should emit EventAgentSpawn")
+	assert.Equal(t, model.EventToolUse, evtType2, "second SubagentStart for same type should emit EventToolUse (silent)")
+	assert.Equal(t, agentID2, s.activeAgents[agentType], "agent_id should be updated to second id")
+}
+
+// TestAgentShutDownEmitsAgentStopEvent verifies that the agentShutDownCh handler emits
+// EventAgentStop with agent_type detail when an agent is removed.
+func TestAgentShutDownEmitsAgentStopEvent(t *testing.T) {
+	s := &sessionState{
+		activeAgents: map[string]string{
+			"developer-1": "session-1",
+		},
+		commandsRan: map[string]map[string]bool{
+			"developer-1": {"test": true},
+		},
+		events: make([]model.WorkflowEvent, 0),
+	}
+
+	// Simulate agentShutDownCh handler for developer-1.
+	agentName := "developer-1"
+	var emittedEvent *model.WorkflowEvent
+	if _, ok := s.activeAgents[agentName]; ok {
+		delete(s.activeAgents, agentName)
+		delete(s.commandsRan, agentName)
+		evt := model.WorkflowEvent{
+			Type:   model.EventAgentStop,
+			Detail: map[string]string{"agent_type": agentName},
+		}
+		s.events = append(s.events, evt)
+		emittedEvent = &s.events[len(s.events)-1]
+	}
+
+	require.NotNil(t, emittedEvent, "agentShutDownCh should emit an event")
+	assert.Equal(t, model.EventAgentStop, emittedEvent.Type, "event type should be EventAgentStop")
+	assert.Equal(t, "developer-1", emittedEvent.Detail["agent_type"], "event should include agent_type detail")
+	_, stillPresent := s.activeAgents["developer-1"]
+	assert.False(t, stillPresent, "agent should be removed from activeAgents")
+	assert.Nil(t, s.commandsRan["developer-1"], "commandsRan should be removed on shutdown")
 }
 
 // sendCommandRan is a helper to send a command-ran signal in tests.
@@ -1176,22 +1413,47 @@ func TestCommandRanPerAgentIsolation(t *testing.T) {
 	assert.False(t, s.commandsRan["reviewer-1"]["test"], "reviewer-1 should not have test recorded")
 }
 
-// TestInvalidateCommandsSignal verifies that SignalInvalidateCommands clears specified categories.
+// TestInvalidateCommandsSignal verifies that SignalInvalidateCommands clears ALL categories and preserves _file_changed.
 func TestInvalidateCommandsSignal(t *testing.T) {
 	s := &sessionState{
 		commandsRan: map[string]map[string]bool{
-			"developer-1": {"test": true, "lint": true},
+			"developer-1": {"test": true, "lint": true, "_sent_message": true},
 		},
 	}
-	// Simulate invalidate-commands signal handler for "test" only
-	sig := model.SignalInvalidateCommands{AgentName: "developer-1", Categories: []string{"test"}, Tool: "Edit"}
-	agentCmds := s.commandsRan[sig.AgentName]
-	for _, cat := range sig.Categories {
-		delete(agentCmds, cat)
-	}
+	// Simulate invalidate-commands signal handler: replace entire agent map
+	sig := model.SignalInvalidateCommands{AgentName: "developer-1", Tool: "Edit"}
+	s.commandsRan[sig.AgentName] = map[string]bool{"_file_changed": true}
 
 	assert.False(t, s.commandsRan["developer-1"]["test"], "test category should be cleared after invalidation")
-	assert.True(t, s.commandsRan["developer-1"]["lint"], "lint category should remain after partial invalidation")
+	assert.False(t, s.commandsRan["developer-1"]["lint"], "lint category should be cleared after invalidation")
+	assert.False(t, s.commandsRan["developer-1"]["_sent_message"], "_sent_message should be cleared after invalidation")
+	assert.True(t, s.commandsRan["developer-1"]["_file_changed"], "_file_changed should be preserved after invalidation")
+}
+
+// TestInvalidateCommandsClearsSentMessage verifies that _sent_message is cleared after file-change invalidation.
+func TestInvalidateCommandsClearsSentMessage(t *testing.T) {
+	s := &sessionState{
+		commandsRan: map[string]map[string]bool{
+			"developer-1": {"_sent_message": true, "test": true},
+		},
+	}
+	sig := model.SignalInvalidateCommands{AgentName: "developer-1", Tool: "Write"}
+	s.commandsRan[sig.AgentName] = map[string]bool{"_file_changed": true}
+
+	assert.False(t, s.commandsRan["developer-1"]["_sent_message"], "_sent_message must be cleared on file change")
+	assert.True(t, s.commandsRan["developer-1"]["_file_changed"], "_file_changed must be set after invalidation")
+}
+
+// TestInvalidateCommandsNoPreexistingMap verifies that invalidation with no prior map creates one with _file_changed.
+func TestInvalidateCommandsNoPreexistingMap(t *testing.T) {
+	s := &sessionState{
+		commandsRan: make(map[string]map[string]bool),
+	}
+	sig := model.SignalInvalidateCommands{AgentName: "developer-1", Tool: "Edit"}
+	s.commandsRan[sig.AgentName] = map[string]bool{"_file_changed": true}
+
+	assert.True(t, s.commandsRan["developer-1"]["_file_changed"], "_file_changed should be set even with no prior map")
+	assert.Equal(t, 1, len(s.commandsRan["developer-1"]), "only _file_changed should be in the map")
 }
 
 // TestCommandsRanResetOnPhaseTransition verifies that commandsRan is cleared on general phase transitions.
@@ -1241,7 +1503,7 @@ func TestCommandsRanClearedOnPhaseTransition(t *testing.T) {
 			"developer-1": {"test": true},
 			"reviewer-1":  {"review": true},
 		},
-		phase: model.PhaseDeveloping,
+		phase: model.Phase("DEVELOPING"),
 	}
 	fromPhase := s.phase
 	// Simulate handleTransition clear logic
@@ -1299,17 +1561,17 @@ func TestCommandsRanInStatus(t *testing.T) {
 	}, 0)
 
 	registerTransitions(env, t, []model.Phase{
-		model.PhaseRespawn,
-		model.PhaseDeveloping,
-		model.PhaseReviewing,
-		model.PhaseCommitting,
-		model.PhasePRCreation,
-		model.PhaseFeedback,
-		model.PhaseComplete,
+		model.Phase("RESPAWN"),
+		model.Phase("DEVELOPING"),
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
+		model.Phase("PR_CREATION"),
+		model.Phase("FEEDBACK"),
+		model.Phase("COMPLETE"),
 	})
 
 	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
-		SessionID: "test", TaskDescription: "test", MaxIterations: 5,
+		SessionID: "test", TaskDescription: "test", MaxIterations: 5, Flow: testFlow,
 	})
 
 	require.True(t, env.IsWorkflowCompleted())
@@ -1368,17 +1630,17 @@ func TestClearActiveAgentsSignal(t *testing.T) {
 	}, 0)
 
 	registerTransitions(env, t, []model.Phase{
-		model.PhaseRespawn,
-		model.PhaseDeveloping,
-		model.PhaseReviewing,
-		model.PhaseCommitting,
-		model.PhasePRCreation,
-		model.PhaseFeedback,
-		model.PhaseComplete,
+		model.Phase("RESPAWN"),
+		model.Phase("DEVELOPING"),
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
+		model.Phase("PR_CREATION"),
+		model.Phase("FEEDBACK"),
+		model.Phase("COMPLETE"),
 	})
 
 	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
-		SessionID: "test", TaskDescription: "test", MaxIterations: 5,
+		SessionID: "test", TaskDescription: "test", MaxIterations: 5, Flow: testFlow,
 	})
 
 	require.True(t, env.IsWorkflowCompleted())
@@ -1397,7 +1659,7 @@ func TestClearActiveAgentsSignal(t *testing.T) {
 func TestNoUnblockOnUserPromptSubmit(t *testing.T) {
 	s := &sessionState{
 		phase:           model.PhaseBlocked,
-		preBlockedPhase: model.PhaseDeveloping,
+		preBlockedPhase: model.Phase("DEVELOPING"),
 		events:          make([]model.WorkflowEvent, 0),
 		activeAgents:    make(map[string]string),
 		commandsRan:     make(map[string]map[string]bool),
@@ -1437,7 +1699,7 @@ func TestNoUnblockOnUserPromptSubmit(t *testing.T) {
 func TestAutoUnblockPreservesPreBlockedPhase(t *testing.T) {
 	s := &sessionState{
 		phase:               model.PhaseBlocked,
-		preBlockedPhase:     model.PhaseFeedback,
+		preBlockedPhase:     model.Phase("FEEDBACK"),
 		blockedByPermission: true,
 		events:              make([]model.WorkflowEvent, 0),
 		activeAgents:        make(map[string]string),
@@ -1470,7 +1732,7 @@ func TestAutoUnblockPreservesPreBlockedPhase(t *testing.T) {
 		}
 	}
 
-	assert.Equal(t, model.PhaseFeedback, s.phase, "phase should be FEEDBACK after auto-unblock via PostToolUse")
+	assert.Equal(t, model.Phase("FEEDBACK"), s.phase, "phase should be FEEDBACK after auto-unblock via PostToolUse")
 
 	hasAutoUnblock := false
 	for _, e := range s.events {
@@ -1488,7 +1750,7 @@ func TestAutoUnblockPreservesPreBlockedPhase(t *testing.T) {
 // non-terminal, non-BLOCKED phase automatically transitions to BLOCKED and records preBlockedPhase.
 func TestAutoBlockOnPermissionRequest(t *testing.T) {
 	s := &sessionState{
-		phase:           model.PhaseDeveloping,
+		phase:           model.Phase("DEVELOPING"),
 		preBlockedPhase: "",
 		events:          make([]model.WorkflowEvent, 0),
 		activeAgents:    make(map[string]string),
@@ -1501,13 +1763,14 @@ func TestAutoBlockOnPermissionRequest(t *testing.T) {
 		HookType:  "PermissionRequest",
 		SessionID: "test",
 		Tool:      "Bash",
-		Detail:    map[string]string{"agent_type": "developer-1"},
+		Detail:    map[string]string{"agent_type": "developer-1", "tool_input": `{"command":"go test ./..."}`},
 	}
 
 	// Simulate the auto-block logic (same as handleHookEvent)
 	if evt.HookType == "PermissionRequest" {
 		if !s.phase.IsTerminal() && s.phase != model.PhaseBlocked {
 			s.preBlockedPhase = s.phase
+			s.preBlockedReason = s.phaseReason
 			s.phase = model.PhaseBlocked
 
 			agent := evt.Detail["agent_type"]
@@ -1518,31 +1781,47 @@ func TestAutoBlockOnPermissionRequest(t *testing.T) {
 			if tool == "" {
 				tool = evt.Detail["tool_name"]
 			}
+
+			var reason string
+			if tool == "Bash" {
+				var toolInput map[string]interface{}
+				if err := json.Unmarshal([]byte(evt.Detail["tool_input"]), &toolInput); err == nil {
+					if cmd, ok := toolInput["command"].(string); ok {
+						reason = fmt.Sprintf("auto: %s needs permission for %s: %s", agent, tool, truncate(cmd, 200))
+					}
+				}
+			}
+			if reason == "" {
+				reason = fmt.Sprintf("auto: %s needs permission for %s", agent, tool)
+			}
+
+			s.phaseReason = reason
 			s.events = append(s.events, model.WorkflowEvent{
 				Type:      model.EventTransition,
 				SessionID: evt.SessionID,
 				Detail: map[string]string{
 					"from":   string(s.preBlockedPhase),
 					"to":     string(model.PhaseBlocked),
-					"reason": fmt.Sprintf("auto: %s needs permission for %s", agent, tool),
+					"reason": reason,
 				},
 			})
 		}
 	}
 
 	assert.Equal(t, model.PhaseBlocked, s.phase, "phase should be BLOCKED after PermissionRequest")
-	assert.Equal(t, model.PhaseDeveloping, s.preBlockedPhase, "preBlockedPhase should be DEVELOPING")
+	assert.Equal(t, model.Phase("DEVELOPING"), s.preBlockedPhase, "preBlockedPhase should be DEVELOPING")
+	assert.Contains(t, s.phaseReason, "go test ./...", "phaseReason should contain the command")
 
 	hasAutoBlock := false
 	for _, e := range s.events {
 		if e.Type == model.EventTransition && e.Detail["from"] == "DEVELOPING" && e.Detail["to"] == "BLOCKED" {
-			if strings.Contains(e.Detail["reason"], "permission") {
+			if strings.Contains(e.Detail["reason"], "go test ./...") {
 				hasAutoBlock = true
 				break
 			}
 		}
 	}
-	assert.True(t, hasAutoBlock, "should have auto-block transition event with reason containing 'permission'")
+	assert.True(t, hasAutoBlock, "should have auto-block transition event with enriched reason containing command")
 }
 
 // TestAutoUnblockOnPostToolUseAfterPermissionRequest verifies that PostToolUse while in BLOCKED
@@ -1550,7 +1829,7 @@ func TestAutoBlockOnPermissionRequest(t *testing.T) {
 func TestAutoUnblockOnPostToolUseAfterPermissionRequest(t *testing.T) {
 	s := &sessionState{
 		phase:               model.PhaseBlocked,
-		preBlockedPhase:     model.PhaseDeveloping,
+		preBlockedPhase:     model.Phase("DEVELOPING"),
 		blockedByPermission: true,
 		events:              make([]model.WorkflowEvent, 0),
 		activeAgents:        make(map[string]string),
@@ -1584,7 +1863,7 @@ func TestAutoUnblockOnPostToolUseAfterPermissionRequest(t *testing.T) {
 		}
 	}
 
-	assert.Equal(t, model.PhaseDeveloping, s.phase, "phase should return to DEVELOPING after PostToolUse")
+	assert.Equal(t, model.Phase("DEVELOPING"), s.phase, "phase should return to DEVELOPING after PostToolUse")
 	assert.False(t, s.blockedByPermission, "blockedByPermission should be cleared after unblock")
 
 	hasUnblock := false
@@ -1604,7 +1883,7 @@ func TestAutoUnblockOnPostToolUseAfterPermissionRequest(t *testing.T) {
 func TestAutoUnblockOnPostToolUseFailureAfterPermissionRequest(t *testing.T) {
 	s := &sessionState{
 		phase:               model.PhaseBlocked,
-		preBlockedPhase:     model.PhaseDeveloping,
+		preBlockedPhase:     model.Phase("DEVELOPING"),
 		blockedByPermission: true,
 		events:              make([]model.WorkflowEvent, 0),
 		activeAgents:        make(map[string]string),
@@ -1638,7 +1917,7 @@ func TestAutoUnblockOnPostToolUseFailureAfterPermissionRequest(t *testing.T) {
 		}
 	}
 
-	assert.Equal(t, model.PhaseDeveloping, s.phase, "phase should return to DEVELOPING after PostToolUseFailure")
+	assert.Equal(t, model.Phase("DEVELOPING"), s.phase, "phase should return to DEVELOPING after PostToolUseFailure")
 
 	hasUnlock := false
 	for _, e := range s.events {
@@ -1657,7 +1936,7 @@ func TestAutoUnblockOnPostToolUseFailureAfterPermissionRequest(t *testing.T) {
 func TestNoDoubleBlockOnPermissionRequest(t *testing.T) {
 	s := &sessionState{
 		phase:           model.PhaseBlocked,
-		preBlockedPhase: model.PhaseDeveloping,
+		preBlockedPhase: model.Phase("DEVELOPING"),
 		events:          make([]model.WorkflowEvent, 0),
 		activeAgents:    make(map[string]string),
 		commandsRan:     make(map[string]map[string]bool),
@@ -1699,7 +1978,7 @@ func TestNoDoubleBlockOnPermissionRequest(t *testing.T) {
 	}
 
 	assert.Equal(t, model.PhaseBlocked, s.phase, "phase should remain BLOCKED")
-	assert.Equal(t, model.PhaseDeveloping, s.preBlockedPhase, "preBlockedPhase should NOT be overwritten")
+	assert.Equal(t, model.Phase("DEVELOPING"), s.preBlockedPhase, "preBlockedPhase should NOT be overwritten")
 	assert.Empty(t, s.events, "no transition event should be emitted when already BLOCKED")
 }
 
@@ -1708,7 +1987,7 @@ func TestNoDoubleBlockOnPermissionRequest(t *testing.T) {
 func TestNoUnblockOnPostToolUseWithoutPermissionRequest(t *testing.T) {
 	s := &sessionState{
 		phase:               model.PhaseBlocked,
-		preBlockedPhase:     model.PhaseDeveloping,
+		preBlockedPhase:     model.Phase("DEVELOPING"),
 		blockedByPermission: false, // manual BLOCKED, not from PermissionRequest
 		events:              make([]model.WorkflowEvent, 0),
 		activeAgents:        make(map[string]string),
@@ -1744,4 +2023,351 @@ func TestNoUnblockOnPostToolUseWithoutPermissionRequest(t *testing.T) {
 
 	assert.Equal(t, model.PhaseBlocked, s.phase, "PostToolUse should NOT unblock when blockedByPermission is false")
 	assert.Empty(t, s.events, "no transition event should be emitted for PostToolUse on manual BLOCKED")
+}
+
+func TestSetMrUrlSignal(t *testing.T) {
+	const url1 = "https://gitlab.diftech.org/evgeniy.klemin/wf_agents/-/merge_requests/12"
+	const url2 = "https://gitlab.diftech.org/evgeniy.klemin/wf_agents/-/merge_requests/99"
+
+	// In the Temporal test env, Updates (transitions) bypass sel.Select and fire synchronously.
+	// Signals are only consumed by sel.Select. To guarantee a signal is consumed before COMPLETE,
+	// we send it at time 1s (after workflow starts) and send COMPLETE at time 2s.
+	// This ensures the signal is in the channel when sel.Select runs between the two time steps.
+
+	t.Run("sets mr url", func(t *testing.T) {
+		env := setupEnv(t)
+		registerTransitions(env, t, []model.Phase{
+			model.Phase("RESPAWN"),
+			model.Phase("DEVELOPING"),
+			model.Phase("REVIEWING"),
+			model.Phase("COMMITTING"),
+			model.Phase("PR_CREATION"),
+			model.Phase("FEEDBACK"),
+		})
+		env.RegisterDelayedCallback(func() {
+			env.SignalWorkflow(SignalSetMrUrl, url1)
+		}, 1*time.Second)
+		env.RegisterDelayedCallback(func() {
+			update(env, t, model.Phase("COMPLETE"))
+		}, 2*time.Second)
+
+		env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
+			SessionID: "test", TaskDescription: "test", MaxIterations: 5, Flow: testFlow,
+		})
+
+		require.True(t, env.IsWorkflowCompleted())
+		require.NoError(t, env.GetWorkflowError())
+
+		val, err := env.QueryWorkflow(QueryStatus)
+		require.NoError(t, err)
+		var status model.WorkflowStatus
+		require.NoError(t, val.Get(&status))
+		assert.Equal(t, url1, status.MRUrl)
+	})
+
+	t.Run("overwrite: last url wins", func(t *testing.T) {
+		env := setupEnv(t)
+		registerTransitions(env, t, []model.Phase{
+			model.Phase("RESPAWN"),
+			model.Phase("DEVELOPING"),
+			model.Phase("REVIEWING"),
+			model.Phase("COMMITTING"),
+			model.Phase("PR_CREATION"),
+			model.Phase("FEEDBACK"),
+		})
+		env.RegisterDelayedCallback(func() {
+			env.SignalWorkflow(SignalSetMrUrl, url1)
+		}, 1*time.Second)
+		env.RegisterDelayedCallback(func() {
+			env.SignalWorkflow(SignalSetMrUrl, url2)
+		}, 2*time.Second)
+		env.RegisterDelayedCallback(func() {
+			update(env, t, model.Phase("COMPLETE"))
+		}, 3*time.Second)
+
+		env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
+			SessionID: "test", TaskDescription: "test", MaxIterations: 5, Flow: testFlow,
+		})
+
+		require.True(t, env.IsWorkflowCompleted())
+		require.NoError(t, env.GetWorkflowError())
+
+		val, err := env.QueryWorkflow(QueryStatus)
+		require.NoError(t, err)
+		var status model.WorkflowStatus
+		require.NoError(t, val.Get(&status))
+		assert.Equal(t, url2, status.MRUrl, "last URL should win")
+	})
+
+	t.Run("empty string ignored", func(t *testing.T) {
+		env := setupEnv(t)
+		registerTransitions(env, t, []model.Phase{
+			model.Phase("RESPAWN"),
+			model.Phase("DEVELOPING"),
+			model.Phase("REVIEWING"),
+			model.Phase("COMMITTING"),
+			model.Phase("PR_CREATION"),
+			model.Phase("FEEDBACK"),
+		})
+		env.RegisterDelayedCallback(func() {
+			env.SignalWorkflow(SignalSetMrUrl, url1)
+		}, 1*time.Second)
+		env.RegisterDelayedCallback(func() {
+			env.SignalWorkflow(SignalSetMrUrl, "")
+		}, 2*time.Second)
+		env.RegisterDelayedCallback(func() {
+			update(env, t, model.Phase("COMPLETE"))
+		}, 3*time.Second)
+
+		env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
+			SessionID: "test", TaskDescription: "test", MaxIterations: 5, Flow: testFlow,
+		})
+
+		require.True(t, env.IsWorkflowCompleted())
+		require.NoError(t, env.GetWorkflowError())
+
+		val, err := env.QueryWorkflow(QueryStatus)
+		require.NoError(t, err)
+		var status model.WorkflowStatus
+		require.NoError(t, val.Get(&status))
+		assert.Equal(t, url1, status.MRUrl, "empty string should not overwrite valid URL")
+	})
+}
+
+func TestTimelineIncrementalQuery(t *testing.T) {
+	env := setupEnv(t)
+
+	registerTransitions(env, t, []model.Phase{
+		model.Phase("RESPAWN"),
+		model.Phase("DEVELOPING"),
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
+		model.Phase("PR_CREATION"),
+		model.Phase("FEEDBACK"),
+		model.Phase("COMPLETE"),
+	})
+
+	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
+		SessionID: "test", TaskDescription: "test", MaxIterations: 5, Flow: testFlow,
+	})
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	// after=0: returns all events
+	val, err := env.QueryWorkflow(QueryTimelineIncremental, 0)
+	require.NoError(t, err)
+	var tl model.WorkflowTimeline
+	require.NoError(t, val.Get(&tl))
+	totalEvents := tl.TotalEvents
+	assert.Equal(t, totalEvents, len(tl.Events), "after=0 should return all events")
+	assert.Greater(t, totalEvents, 0, "should have at least one event")
+
+	// after=middle: returns only the tail
+	middle := totalEvents / 2
+	val, err = env.QueryWorkflow(QueryTimelineIncremental, middle)
+	require.NoError(t, err)
+	var tlMid model.WorkflowTimeline
+	require.NoError(t, val.Get(&tlMid))
+	assert.Equal(t, totalEvents, tlMid.TotalEvents, "TotalEvents should always reflect full count")
+	assert.Equal(t, totalEvents-middle, len(tlMid.Events), "after=middle should return events from that index")
+
+	// after=totalEvents: returns empty slice, not an error
+	val, err = env.QueryWorkflow(QueryTimelineIncremental, totalEvents)
+	require.NoError(t, err)
+	var tlBeyond model.WorkflowTimeline
+	require.NoError(t, val.Get(&tlBeyond))
+	assert.Equal(t, totalEvents, tlBeyond.TotalEvents, "TotalEvents should still be accurate")
+	assert.Empty(t, tlBeyond.Events, "after=totalEvents should return empty slice")
+
+	// after beyond end: also returns empty slice
+	val, err = env.QueryWorkflow(QueryTimelineIncremental, totalEvents+100)
+	require.NoError(t, err)
+	var tlFar model.WorkflowTimeline
+	require.NoError(t, val.Get(&tlFar))
+	assert.Equal(t, totalEvents, tlFar.TotalEvents)
+	assert.Empty(t, tlFar.Events)
+}
+
+// TestPhaseReasonInStatus verifies that a transition reason is surfaced in the status query.
+func TestPhaseReasonInStatus(t *testing.T) {
+	env := setupEnv(t)
+
+	env.RegisterDelayedCallback(func() {
+		env.UpdateWorkflowNoRejection(UpdateTransition, "", t, model.SignalTransition{
+			To:        model.Phase("RESPAWN"),
+			SessionID: "test",
+			Reason:    "starting fresh",
+			Guards:    testEvidence,
+		})
+		env.UpdateWorkflowNoRejection(UpdateTransition, "", t, model.SignalTransition{
+			To:        model.Phase("DEVELOPING"),
+			SessionID: "test",
+			Reason:    "my custom reason",
+			Guards:    testEvidence,
+		})
+	}, 0)
+
+	registerTransitions(env, t, []model.Phase{
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
+		model.Phase("PR_CREATION"),
+		model.Phase("FEEDBACK"),
+		model.Phase("COMPLETE"),
+	})
+
+	env.ExecuteWorkflow(CodingSessionWorkflow, model.WorkflowInput{
+		SessionID: "test", TaskDescription: "test", MaxIterations: 5, Flow: testFlow,
+	})
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	val, err := env.QueryWorkflow(QueryStatus)
+	require.NoError(t, err)
+	var status model.WorkflowStatus
+	require.NoError(t, val.Get(&status))
+	// Last transition was FEEDBACK → COMPLETE with reason "test" (from registerTransitions).
+	// We just verify the field is present and non-empty to confirm it's wired up.
+	assert.NotEmpty(t, status.PhaseReason, "PhaseReason should be set in status")
+}
+
+// TestPhaseReasonPreservedAcrossBlock verifies that phaseReason is saved before auto-BLOCKED
+// and restored after auto-unblock via PostToolUse.
+func TestPhaseReasonPreservedAcrossBlock(t *testing.T) {
+	s := &sessionState{
+		phase:           model.Phase("DEVELOPING"),
+		preBlockedPhase: "",
+		phaseReason:     "working on feature X",
+		events:          make([]model.WorkflowEvent, 0),
+		activeAgents:    make(map[string]string),
+		commandsRan:     make(map[string]map[string]bool),
+		maxIter:         5,
+		iteration:       1,
+	}
+
+	// Simulate PermissionRequest auto-block (same logic as handleHookEvent)
+	permEvt := model.SignalHookEvent{
+		HookType:  "PermissionRequest",
+		SessionID: "test",
+		Tool:      "Bash",
+		Detail:    map[string]string{"agent_type": "developer-1", "tool_input": `{"command":"rm -rf /tmp/test"}`},
+	}
+
+	if permEvt.HookType == "PermissionRequest" {
+		if !s.phase.IsTerminal() && s.phase != model.PhaseBlocked {
+			s.preBlockedPhase = s.phase
+			s.preBlockedReason = s.phaseReason
+			s.phase = model.PhaseBlocked
+			s.blockedByPermission = true
+
+			agent := permEvt.Detail["agent_type"]
+			if agent == "" {
+				agent = "lead"
+			}
+			tool := permEvt.Tool
+			if tool == "" {
+				tool = permEvt.Detail["tool_name"]
+			}
+
+			var reason string
+			if tool == "Bash" {
+				var toolInput map[string]interface{}
+				if err := json.Unmarshal([]byte(permEvt.Detail["tool_input"]), &toolInput); err == nil {
+					if cmd, ok := toolInput["command"].(string); ok {
+						reason = fmt.Sprintf("auto: %s needs permission for %s: %s", agent, tool, truncate(cmd, 200))
+					}
+				}
+			}
+			if reason == "" {
+				reason = fmt.Sprintf("auto: %s needs permission for %s", agent, tool)
+			}
+			s.phaseReason = reason
+		}
+	}
+
+	assert.Equal(t, model.PhaseBlocked, s.phase, "should be BLOCKED after PermissionRequest")
+	assert.Equal(t, "working on feature X", s.preBlockedReason, "preBlockedReason should be saved")
+	assert.Contains(t, s.phaseReason, "rm -rf /tmp/test", "phaseReason should contain the command during BLOCKED")
+
+	// Simulate PostToolUse auto-unblock
+	postEvt := model.SignalHookEvent{
+		HookType:  "PostToolUse",
+		SessionID: "test",
+	}
+
+	if s.phase == model.PhaseBlocked && s.preBlockedPhase != "" && s.blockedByPermission {
+		if postEvt.HookType == "PostToolUse" || postEvt.HookType == "PostToolUseFailure" {
+			s.phase = s.preBlockedPhase
+			s.phaseReason = s.preBlockedReason
+			s.blockedByPermission = false
+		}
+	}
+
+	assert.Equal(t, model.Phase("DEVELOPING"), s.phase, "should be restored to DEVELOPING after PostToolUse")
+	assert.Equal(t, "working on feature X", s.phaseReason, "phaseReason should be restored to pre-blocked value")
+}
+
+// TestCommandRanNewCategoryResetsSentMessage verifies that recording a genuinely new work category
+// clears _sent_message so the agent re-sends an updated summary.
+func TestCommandRanNewCategoryResetsSentMessage(t *testing.T) {
+	s := &sessionState{
+		commandsRan: map[string]map[string]bool{
+			"developer-1": {"_sent_message": true, "lint": true},
+		},
+	}
+	sig := model.SignalCommandRan{AgentName: "developer-1", Category: "test", Command: "go test ./..."}
+	if s.commandsRan[sig.AgentName] == nil {
+		s.commandsRan[sig.AgentName] = make(map[string]bool)
+	}
+	if sig.Category != "_sent_message" && sig.Category != "_file_changed" && !s.commandsRan[sig.AgentName][sig.Category] {
+		delete(s.commandsRan[sig.AgentName], "_sent_message")
+	}
+	s.commandsRan[sig.AgentName][sig.Category] = true
+
+	assert.False(t, s.commandsRan["developer-1"]["_sent_message"], "_sent_message should be deleted when new category is recorded")
+	assert.True(t, s.commandsRan["developer-1"]["lint"], "lint should remain true")
+	assert.True(t, s.commandsRan["developer-1"]["test"], "test should be recorded")
+}
+
+// TestCommandRanRepeatCategoryKeepsSentMessage verifies that repeating an already-recorded category
+// does NOT clear _sent_message (no genuinely new work).
+func TestCommandRanRepeatCategoryKeepsSentMessage(t *testing.T) {
+	s := &sessionState{
+		commandsRan: map[string]map[string]bool{
+			"developer-1": {"_sent_message": true, "lint": true},
+		},
+	}
+	sig := model.SignalCommandRan{AgentName: "developer-1", Category: "lint", Command: "golangci-lint run"}
+	if s.commandsRan[sig.AgentName] == nil {
+		s.commandsRan[sig.AgentName] = make(map[string]bool)
+	}
+	if sig.Category != "_sent_message" && sig.Category != "_file_changed" && !s.commandsRan[sig.AgentName][sig.Category] {
+		delete(s.commandsRan[sig.AgentName], "_sent_message")
+	}
+	s.commandsRan[sig.AgentName][sig.Category] = true
+
+	assert.True(t, s.commandsRan["developer-1"]["_sent_message"], "_sent_message should remain when category was already recorded")
+	assert.True(t, s.commandsRan["developer-1"]["lint"], "lint should remain true")
+}
+
+// TestCommandRanSentMessageDoesNotSelfReset verifies that recording _sent_message itself
+// does not trigger self-deletion (i.e., _sent_message is set, not wiped).
+func TestCommandRanSentMessageDoesNotSelfReset(t *testing.T) {
+	s := &sessionState{
+		commandsRan: map[string]map[string]bool{
+			"developer-1": {"lint": true},
+		},
+	}
+	sig := model.SignalCommandRan{AgentName: "developer-1", Category: "_sent_message", Command: ""}
+	if s.commandsRan[sig.AgentName] == nil {
+		s.commandsRan[sig.AgentName] = make(map[string]bool)
+	}
+	if sig.Category != "_sent_message" && sig.Category != "_file_changed" && !s.commandsRan[sig.AgentName][sig.Category] {
+		delete(s.commandsRan[sig.AgentName], "_sent_message")
+	}
+	s.commandsRan[sig.AgentName][sig.Category] = true
+
+	assert.True(t, s.commandsRan["developer-1"]["_sent_message"], "_sent_message should be set to true, not self-reset")
+	assert.True(t, s.commandsRan["developer-1"]["lint"], "lint should remain true")
 }

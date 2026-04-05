@@ -35,6 +35,18 @@ func (f *FlowSnapshot) IsValidTransition(from, to string) bool {
 	return false
 }
 
+// AllowedTransitions returns all valid target phases for a given from phase.
+func (f *FlowSnapshot) AllowedTransitions(from string) []string {
+	if f == nil || f.Transitions == nil {
+		return nil
+	}
+	var result []string
+	for _, t := range f.Transitions[from] {
+		result = append(result, t.To)
+	}
+	return result
+}
+
 // FlowPhase holds the flow-relevant properties of a single phase.
 type FlowPhase struct {
 	Display      FlowPhaseDisplay `json:"display,omitempty"`
@@ -73,7 +85,9 @@ type WorkflowStatus struct {
 	StartedAt            string                     `json:"started_at"`
 	LastUpdatedAt        string                     `json:"last_updated_at"`
 	Task                 string                     `json:"task"`
+	MRUrl                string                     `json:"mr_url,omitempty"`
 	PreBlockedPhase      Phase                      `json:"pre_blocked_phase,omitempty"`
+	PhaseReason          string                     `json:"phase_reason,omitempty"`
 	CurrentPhaseSecs     float64                    `json:"current_phase_secs"`
 	PhaseDurationSecs    map[string]float64         `json:"phase_duration_secs,omitempty"`
 	CurrentIterPhaseSecs map[string]float64         `json:"current_iter_phase_secs,omitempty"`
@@ -88,10 +102,12 @@ type WorkflowTimeline struct {
 
 // TransitionResult is used for workflow updates (allow/deny).
 type TransitionResult struct {
-	Allowed bool   `json:"allowed"`
-	Reason  string `json:"reason,omitempty"`
-	From    Phase  `json:"from"`
-	To      Phase  `json:"to"`
+	Allowed            bool     `json:"allowed"`
+	NoOp               bool     `json:"no_op,omitempty"`
+	Reason             string   `json:"reason,omitempty"`
+	From               Phase    `json:"from"`
+	To                 Phase    `json:"to"`
+	AllowedTransitions []string `json:"allowed_transitions,omitempty"`
 }
 
 // PhaseMetrics tracks time spent in each phase.

@@ -1,9 +1,9 @@
 package workflow
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/eklemin/wf-agents/internal/model"
@@ -22,15 +22,17 @@ const (
 	SignalInvalidateCommands = "invalidate-commands"
 	SignalAgentShutDown      = "agent-shut-down"
 
-	QueryStatus         = "status"
-	QueryTimeline       = "timeline"
-	QueryTimelineRecent = "timeline-recent"
-	QueryPhase          = "phase"
+	QueryStatus                = "status"
+	QueryTimeline              = "timeline"
+	QueryTimelineRecent        = "timeline-recent"
+	QueryTimelineIncremental   = "timeline-incremental"
+	QueryPhase                 = "phase"
 	QueryCommandsRan    = "query-commands-ran"
 	QueryWorkflowConfig = "workflow-config"
 
 	UpdateTransition = "request-transition"
 	SignalSetTask    = "set-task"
+	SignalSetMrUrl   = "set-mr-url"
 )
 
 // CodingSessionWorkflow is a long-running workflow that acts as an event store
@@ -39,20 +41,17 @@ const (
 func CodingSessionWorkflow(ctx workflow.Context, input model.WorkflowInput) (model.WorkflowTimeline, error) {
 	logger := workflow.GetLogger(ctx)
 
-	// Initialize terminal phases — prefer flow snapshot, fall back to guardConfig.
-	if input.Flow != nil && len(input.Flow.Stop) > 0 {
-		model.SetTerminalPhases(input.Flow.Stop)
-	} else if stops := guardConfig.StopPhases(); len(stops) > 0 {
-		model.SetTerminalPhases(stops)
+	// Initialize terminal phases from flow snapshot.
+	if input.Flow == nil || input.Flow.Start == "" {
+		return model.WorkflowTimeline{}, fmt.Errorf("no start phase configured: set phases.start in workflow/defaults.yaml")
 	}
+	if len(input.Flow.Stop) == 0 {
+		return model.WorkflowTimeline{}, fmt.Errorf("no terminal phases configured: set phases.stop in workflow/defaults.yaml")
+	}
+	model.SetTerminalPhases(input.Flow.Stop)
 
-	// Determine initial phase — prefer flow snapshot, fall back to guardConfig.
-	initialPhase := model.PhasePlanning
-	if input.Flow != nil && input.Flow.Start != "" {
-		initialPhase = model.Phase(input.Flow.Start)
-	} else if start := guardConfig.StartPhase(); start != "" {
-		initialPhase = model.Phase(start)
-	}
+	// Determine initial phase from flow snapshot.
+	initialPhase := model.Phase(input.Flow.Start)
 
 	state := &sessionState{
 		phase:           initialPhase,
@@ -67,6 +66,7 @@ func CodingSessionWorkflow(ctx workflow.Context, input model.WorkflowInput) (mod
 		task:            input.TaskDescription,
 		maxIter:         input.MaxIterations,
 		flow:            input.Flow,
+		repoPath:        input.RepoPath,
 	}
 	if state.maxIter == 0 {
 		state.maxIter = 5
@@ -106,6 +106,23 @@ func CodingSessionWorkflow(ctx workflow.Context, input model.WorkflowInput) (mod
 		return model.WorkflowTimeline{}, fmt.Errorf("set timeline-recent query: %w", err)
 	}
 
+	// QueryTimelineIncremental returns events[after:] and the total event count.
+	// after=0 returns all events; after=N returns events from index N onwards.
+	// Returns empty Events slice (not an error) when after >= len(events).
+	if err := workflow.SetQueryHandler(ctx, QueryTimelineIncremental, func(after int) (model.WorkflowTimeline, error) {
+		events := state.events
+		total := len(events)
+		if after < 0 {
+			after = 0
+		}
+		if after >= total {
+			return model.WorkflowTimeline{Events: []model.WorkflowEvent{}, TotalEvents: total}, nil
+		}
+		return model.WorkflowTimeline{Events: events[after:], TotalEvents: total}, nil
+	}); err != nil {
+		return model.WorkflowTimeline{}, fmt.Errorf("set timeline-incremental query: %w", err)
+	}
+
 	if err := workflow.SetQueryHandler(ctx, QueryPhase, func() (model.Phase, error) {
 		return state.phase, nil
 	}); err != nil {
@@ -138,6 +155,7 @@ func CodingSessionWorkflow(ctx workflow.Context, input model.WorkflowInput) (mod
 	hookEventCh := workflow.GetSignalChannel(ctx, SignalHookEvent)
 	journalCh := workflow.GetSignalChannel(ctx, SignalJournal)
 	setTaskCh := workflow.GetSignalChannel(ctx, SignalSetTask)
+	setMrUrlCh := workflow.GetSignalChannel(ctx, SignalSetMrUrl)
 	resetIterationsCh := workflow.GetSignalChannel(ctx, SignalResetIterations)
 	clearActiveAgentsCh := workflow.GetSignalChannel(ctx, SignalClearActiveAgents)
 	agentShutDownCh := workflow.GetSignalChannel(ctx, SignalAgentShutDown)
@@ -183,6 +201,18 @@ func CodingSessionWorkflow(ctx workflow.Context, input model.WorkflowInput) (mod
 			}
 		})
 
+		sel.AddReceive(setMrUrlCh, func(ch workflow.ReceiveChannel, more bool) {
+			var mrUrl string
+			ch.Receive(ctx, &mrUrl)
+			if mrUrl != "" {
+				state.mrUrl = mrUrl
+				_ = workflow.UpsertMemo(ctx, map[string]interface{}{
+					"mr_url": mrUrl,
+				})
+				logger.Info("MR URL set", "mr_url", mrUrl)
+			}
+		})
+
 		sel.AddReceive(resetIterationsCh, func(ch workflow.ReceiveChannel, more bool) {
 			var sessionID string
 			ch.Receive(ctx, &sessionID)
@@ -215,8 +245,8 @@ func CodingSessionWorkflow(ctx workflow.Context, input model.WorkflowInput) (mod
 			if _, ok := state.activeAgents[sig.AgentName]; ok {
 				delete(state.activeAgents, sig.AgentName)
 				delete(state.commandsRan, sig.AgentName)
-				state.addEvent(ctx, model.EventJournal, "", map[string]string{
-					"message": fmt.Sprintf("agent shut down: %s", sig.AgentName),
+				state.addEvent(ctx, model.EventAgentStop, "", map[string]string{
+					"agent_type": sig.AgentName,
 				})
 				logger.Info("Agent shut down", "agent", sig.AgentName)
 			}
@@ -234,6 +264,9 @@ func CodingSessionWorkflow(ctx workflow.Context, input model.WorkflowInput) (mod
 			if state.commandsRan[sig.AgentName] == nil {
 				state.commandsRan[sig.AgentName] = make(map[string]bool)
 			}
+			if sig.Category != "_sent_message" && sig.Category != "_file_changed" && !state.commandsRan[sig.AgentName][sig.Category] {
+				delete(state.commandsRan[sig.AgentName], "_sent_message")
+			}
 			state.commandsRan[sig.AgentName][sig.Category] = true
 			logger.Info("Command ran recorded", "agent", sig.AgentName, "category", sig.Category, "command", sig.Command)
 		})
@@ -244,13 +277,7 @@ func CodingSessionWorkflow(ctx workflow.Context, input model.WorkflowInput) (mod
 			if sig.AgentName == "" || state.commandsRan == nil {
 				return
 			}
-			agentCmds := state.commandsRan[sig.AgentName]
-			if agentCmds == nil {
-				return
-			}
-			for _, cat := range sig.Categories {
-				delete(agentCmds, cat)
-			}
+			state.commandsRan[sig.AgentName] = map[string]bool{"_file_changed": true}
 			logger.Info("Commands invalidated", "agent", sig.AgentName, "categories", sig.Categories, "tool", sig.Tool)
 		})
 
@@ -290,6 +317,8 @@ type sessionState struct {
 	phase               model.Phase
 	preBlockedPhase     model.Phase // remembers state before BLOCKED, for returning
 	blockedByPermission bool        // true when BLOCKED was triggered by a PermissionRequest
+	phaseReason         string      // human-readable reason for current phase
+	preBlockedReason    string      // phaseReason saved before entering BLOCKED
 	iteration           int         // resettable counter for guard checks
 	totalIterations     int         // cumulative counter, never reset
 	events              []model.WorkflowEvent
@@ -299,9 +328,11 @@ type sessionState struct {
 	lastUpdated         time.Time
 	phaseEnteredAt      time.Time
 	task                string
+	mrUrl               string
 	maxIter             int
 	doneCh              workflow.Channel    // internal channel to unblock selector when terminal state is reached
 	flow                *model.FlowSnapshot // snapshotted flow topology from session start
+	repoPath            string              // project directory for config reload
 }
 
 func (s *sessionState) addEvent(ctx workflow.Context, evtType model.EventType, sessionID string, detail map[string]string) {
@@ -320,6 +351,28 @@ func (s *sessionState) handleTransition(ctx workflow.Context, req model.SignalTr
 		To:   req.To,
 	}
 
+	// Idempotent: already in target phase → no-op success
+	if s.phase == req.To {
+		result.Allowed = true
+		result.NoOp = true
+		return result
+	}
+
+	// Auto-unblock: if currently BLOCKED and target is not preBlockedPhase and not BLOCKED itself,
+	// silently return to preBlockedPhase first, then let the normal flow validate the real transition.
+	if s.phase == model.PhaseBlocked && s.preBlockedPhase != "" && req.To != s.preBlockedPhase && req.To != model.PhaseBlocked {
+		s.addEvent(ctx, model.EventTransition, req.SessionID, map[string]string{
+			"from":   string(model.PhaseBlocked),
+			"to":     string(s.preBlockedPhase),
+			"reason": fmt.Sprintf("auto: unblocked for transition to %s", req.To),
+		})
+		s.phase = s.preBlockedPhase
+		s.blockedByPermission = false
+		s.lastUpdated = workflow.Now(ctx)
+		s.phaseEnteredAt = workflow.Now(ctx)
+		result.From = s.phase
+	}
+
 	// Terminal state check
 	if s.phase.IsTerminal() {
 		result.Allowed = false
@@ -332,10 +385,53 @@ func (s *sessionState) handleTransition(ctx workflow.Context, req model.SignalTr
 		return result
 	}
 
-	// Validate transition + guards via unified transition table
+	// Validate topology (snapshot) and BLOCKED/terminal rules — deterministic, no I/O.
 	if reason := validateTransition(s, s.phase, req.To, req.Guards); reason != "" {
 		result.Allowed = false
 		result.Reason = reason
+		result.AllowedTransitions = allowedTransitionsFor(s, s.phase)
+		s.addEvent(ctx, model.EventHookDenial, req.SessionID, map[string]string{
+			"from":   string(s.phase),
+			"to":     string(req.To),
+			"reason": result.Reason,
+		})
+		return result
+	}
+
+	// Evaluate ALL guard rules (evidence + state) via SideEffect —
+	// loads fresh three-level config from disk, result recorded in history.
+	origin := s.phase
+	if origin == model.PhaseBlocked {
+		origin = s.preBlockedPhase
+	}
+	var cmdsRan map[string]bool
+	if s.commandsRan != nil {
+		cmdsRan = s.commandsRan[req.SessionID]
+	}
+	p := guardParams{
+		RepoPath:      s.repoPath,
+		From:          string(s.phase),
+		To:            string(req.To),
+		Evidence:      req.Guards,
+		ActiveAgents:  len(s.activeAgents),
+		Iteration:     s.iteration,
+		MaxIterations: s.maxIter,
+		OriginPhase:   string(origin),
+		CommandsRan:   cmdsRan,
+		MrUrl:         s.mrUrl,
+	}
+	var reason string
+	_ = workflow.SideEffect(ctx, func(ctx workflow.Context) interface{} {
+		cfg, err := LoadConfigForProject(s.repoPath)
+		if err != nil {
+			return ""
+		}
+		return checkAllGuards(cfg, p)
+	}).Get(&reason)
+	if reason != "" {
+		result.Allowed = false
+		result.Reason = reason
+		result.AllowedTransitions = allowedTransitionsFor(s, s.phase)
 		s.addEvent(ctx, model.EventHookDenial, req.SessionID, map[string]string{
 			"from":   string(s.phase),
 			"to":     string(req.To),
@@ -347,6 +443,7 @@ func (s *sessionState) handleTransition(ctx workflow.Context, req model.SignalTr
 	// Entering BLOCKED — remember where we came from
 	fromPhase := s.phase
 	if req.To == model.PhaseBlocked {
+		s.preBlockedReason = s.phaseReason
 		s.preBlockedPhase = s.phase
 	}
 
@@ -355,24 +452,12 @@ func (s *sessionState) handleTransition(ctx workflow.Context, req model.SignalTr
 
 	// Execute on_enter side effects for the target phase.
 	// Skip when unblocking from BLOCKED — the phase was already "entered" before BLOCKED.
-	// Prefer flow snapshot; fall back to guardConfig for workflows started without a snapshot.
 	if fromPhase != model.PhaseBlocked {
-		if s.flow != nil {
-			if fp, ok := s.flow.Phases[string(req.To)]; ok {
-				for _, effect := range fp.OnEnter {
-					if effect.Type == "increment_iteration" {
-						s.iteration++
-						s.totalIterations++
-					}
-				}
-			}
-		} else if guardConfig != nil && guardConfig.Phases != nil {
-			if phaseConfig, ok := guardConfig.Phases.Phases[string(req.To)]; ok {
-				for _, effect := range phaseConfig.OnEnter {
-					if effect.Type == "increment_iteration" {
-						s.iteration++
-						s.totalIterations++
-					}
+		if fp, ok := s.flow.Phases[string(req.To)]; ok {
+			for _, effect := range fp.OnEnter {
+				if effect.Type == "increment_iteration" {
+					s.iteration++
+					s.totalIterations++
 				}
 			}
 		}
@@ -395,6 +480,13 @@ func (s *sessionState) handleTransition(ctx workflow.Context, req model.SignalTr
 		"total_iterations": fmt.Sprintf("%d", s.totalIterations),
 	})
 
+	// Update phaseReason: when leaving BLOCKED restore pre-blocked reason, otherwise use new reason.
+	if fromPhase == model.PhaseBlocked {
+		s.phaseReason = s.preBlockedReason
+	} else {
+		s.phaseReason = req.Reason
+	}
+
 	if req.To.IsTerminal() {
 		s.activeAgents = make(map[string]string)
 		s.doneCh.Send(ctx, true)
@@ -407,40 +499,31 @@ func (s *sessionState) handleHookEvent(ctx workflow.Context, evt model.SignalHoo
 	evtType := model.EventToolUse
 	switch evt.HookType {
 	case "SubagentStart":
-		evtType = model.EventAgentSpawn
 		agentType := evt.Detail["agent_type"]
 		agentID := evt.Detail["agent_id"]
 		if agentType != "" {
-			// Overwrite: a new spawn of the same agent_type replaces the old id.
-			// This ensures that when a stale SubagentStop (old agent_id) arrives later,
-			// it will not match the current id and will be ignored.
+			if _, alreadyRegistered := s.activeAgents[agentType]; !alreadyRegistered {
+				// First registration: emit EventAgentSpawn.
+				evtType = model.EventAgentSpawn
+			} else {
+				// Already registered: update agent_id silently, no event.
+				evtType = model.EventToolUse
+			}
 			s.activeAgents[agentType] = agentID
 		}
 	case "SubagentStop":
-		evtType = model.EventAgentStop
-		agentType := evt.Detail["agent_type"]
-		agentID := evt.Detail["agent_id"]
-		if agentType != "" && isNamedTeammate(agentType) {
-			// Named teammates (developer-N, reviewer-N) persist across Agent tool invocations —
-			// SubagentStop fires per Agent tool call but the teammate process is still alive.
-			// They are removed only by clear-active-agents (RESPAWN) or COMPLETE.
-		} else if agentType != "" {
-			// One-shot/unnamed agents (e.g. Explore) are genuinely done when they stop.
-			// Remove only if agent_id matches to guard against stale stops.
-			if stored, ok := s.activeAgents[agentType]; ok && stored == agentID {
-				delete(s.activeAgents, agentType)
-			}
-		}
+		// No timeline event, no activeAgents mutation — completely invisible.
+		return
 	case "Stop":
-		// Log only — a Stop event from Claude Code does not remove agents from the active map.
-		// SubagentStop with the correct agent_id is the authoritative removal signal.
-		evtType = model.EventAgentStop
+		// No timeline event — completely invisible.
+		return
 	}
 
 	// Auto-BLOCKED: PermissionRequest from any agent → terminal waiting for user approval
 	if evt.HookType == "PermissionRequest" {
 		if !s.phase.IsTerminal() && s.phase != model.PhaseBlocked {
 			s.preBlockedPhase = s.phase
+			s.preBlockedReason = s.phaseReason
 			s.phase = model.PhaseBlocked
 			s.blockedByPermission = true
 			s.lastUpdated = workflow.Now(ctx)
@@ -454,10 +537,25 @@ func (s *sessionState) handleHookEvent(ctx workflow.Context, evt model.SignalHoo
 			if tool == "" {
 				tool = evt.Detail["tool_name"]
 			}
+
+			var reason string
+			if tool == "Bash" {
+				var toolInput map[string]interface{}
+				if err := json.Unmarshal([]byte(evt.Detail["tool_input"]), &toolInput); err == nil {
+					if cmd, ok := toolInput["command"].(string); ok {
+						reason = fmt.Sprintf("auto: %s needs permission for %s: %s", agent, tool, truncate(cmd, 200))
+					}
+				}
+			}
+			if reason == "" {
+				reason = fmt.Sprintf("auto: %s needs permission for %s", agent, tool)
+			}
+
+			s.phaseReason = reason
 			s.addEvent(ctx, model.EventTransition, evt.SessionID, map[string]string{
 				"from":   string(s.preBlockedPhase),
 				"to":     string(model.PhaseBlocked),
-				"reason": fmt.Sprintf("auto: %s needs permission for %s", agent, tool),
+				"reason": reason,
 			})
 		}
 	}
@@ -468,6 +566,7 @@ func (s *sessionState) handleHookEvent(ctx workflow.Context, evt model.SignalHoo
 		if evt.HookType == "PostToolUse" || evt.HookType == "PostToolUseFailure" {
 			from := s.phase
 			s.phase = s.preBlockedPhase
+			s.phaseReason = s.preBlockedReason
 			s.blockedByPermission = false
 			s.lastUpdated = workflow.Now(ctx)
 			s.phaseEnteredAt = workflow.Now(ctx)
@@ -490,13 +589,6 @@ func (s *sessionState) handleHookEvent(ctx workflow.Context, evt model.SignalHoo
 	s.addEvent(ctx, evtType, evt.SessionID, detail)
 }
 
-// isNamedTeammate returns true if the agent_type represents a persistent named teammate
-// (e.g. "developer-1", "reviewer-2"). Named teammates persist across Agent tool invocations
-// and are only removed via clear-active-agents or COMPLETE. One-shot agents (e.g. "Explore")
-// are removed normally on SubagentStop.
-func isNamedTeammate(agentType string) bool {
-	return strings.HasPrefix(agentType, "developer-") || strings.HasPrefix(agentType, "reviewer-")
-}
 
 func (s *sessionState) status(now time.Time) model.WorkflowStatus {
 	var commandsRan map[string]map[string]bool
@@ -517,7 +609,9 @@ func (s *sessionState) status(now time.Time) model.WorkflowStatus {
 		StartedAt:            s.startedAt.Format(time.RFC3339),
 		LastUpdatedAt:        s.lastUpdated.Format(time.RFC3339),
 		Task:                 s.task,
+		MRUrl:                s.mrUrl,
 		PreBlockedPhase:      s.preBlockedPhase,
+		PhaseReason:          s.phaseReason,
 		CurrentPhaseSecs:     now.Sub(s.phaseEnteredAt).Seconds(),
 		PhaseDurationSecs:    s.computePhaseDurations(now),
 		CurrentIterPhaseSecs: s.computeCurrentIterPhaseDurations(now),
@@ -525,44 +619,69 @@ func (s *sessionState) status(now time.Time) model.WorkflowStatus {
 	}
 }
 
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
+}
+
+// iterationBoundaryPhases returns the set of phase names that trigger an iteration
+// increment on entry (on_enter: [{type: increment_iteration}]).
+func iterationBoundaryPhases(flow *model.FlowSnapshot) map[string]bool {
+	result := make(map[string]bool)
+	for name, fp := range flow.Phases {
+		for _, effect := range fp.OnEnter {
+			if effect.Type == "increment_iteration" {
+				result[name] = true
+				break
+			}
+		}
+	}
+	return result
+}
+
 // computeCurrentIterPhaseDurations computes per-phase seconds spent only in the
-// current iteration — i.e., since the last RESPAWN event (or from the beginning
-// if this is iteration 1 / no RESPAWN has occurred yet).
+// current iteration — i.e., since the last iteration-boundary transition (or from
+// the beginning if this is iteration 1 / no boundary has occurred yet).
+// The iteration boundary is config-driven: any phase with on_enter increment_iteration.
 func (s *sessionState) computeCurrentIterPhaseDurations(now time.Time) map[string]float64 {
-	// Find index of the last RESPAWN transition that started a new iteration.
-	// The very first RESPAWN (from PLANNING) is included; subsequent RESPAWNs
-	// mark the boundary of a new iteration. We want to start accumulating from
-	// the most recent RESPAWN that is NOT the very first one (iter > 1), OR
+	boundaryPhases := iterationBoundaryPhases(s.flow)
+
+	// Find index of the last iteration-boundary transition.
+	// The very first boundary (from the start phase) is included; subsequent ones
+	// mark the start of a new iteration. We want to start accumulating from
+	// the most recent boundary that is NOT the very first one (iter > 1), OR
 	// from the beginning when still in iteration 1.
-	lastRespawnIdx := -1
+	lastBoundaryIdx := -1
 	iterCount := 0
 	for i, ev := range s.events {
 		if ev.Type != model.EventTransition {
 			continue
 		}
 		to, ok := ev.Detail["to"]
-		if !ok || to != string(model.PhaseRespawn) {
+		if !ok || !boundaryPhases[to] {
 			continue
 		}
-		// Skip BLOCKED→RESPAWN transitions — those are unblocks, not new iteration boundaries.
+		// Skip BLOCKED→boundary transitions — those are unblocks, not new iteration boundaries.
 		if ev.Detail["from"] == string(model.PhaseBlocked) {
 			continue
 		}
 		iterCount++
-		lastRespawnIdx = i
+		lastBoundaryIdx = i
 	}
 
-	// If we're in iteration 1 (at most one RESPAWN seen), start from beginning.
+	// If we're in iteration 1 (at most one boundary seen), start from beginning.
 	if iterCount <= 1 {
-		lastRespawnIdx = -1
+		lastBoundaryIdx = -1
 	}
 
-	// Accumulate durations from the last RESPAWN boundary (inclusive) onward.
+	// Accumulate durations from the last iteration boundary (inclusive) onward.
 	durations := make(map[string]float64)
 	var currentPhase string
 	var phaseStart time.Time
 
-	startFrom := lastRespawnIdx // we begin at the RESPAWN event itself (inclusive)
+	startFrom := lastBoundaryIdx // we begin at the boundary event itself (inclusive)
 	if startFrom < 0 {
 		startFrom = -1 // all events
 	}

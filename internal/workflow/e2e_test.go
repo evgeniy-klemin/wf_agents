@@ -102,7 +102,7 @@ func replayFullTimeline(
 ) []string {
 	t.Helper()
 	var violations []string
-	currentPhase := model.PhasePlanning
+	currentPhase := model.Phase("PLANNING")
 
 	for i, entry := range entries {
 		switch entry.Type {
@@ -395,7 +395,7 @@ func TestE2EAgentShutDownSession(t *testing.T) {
 	}()
 
 	var violations []string
-	currentPhase := model.PhasePlanning
+	currentPhase := model.Phase("PLANNING")
 	commitsChecked := 0
 
 	for i, entry := range entries {
@@ -425,7 +425,7 @@ func TestE2EAgentShutDownSession(t *testing.T) {
 				"after transition %s→%s: expected phase %s, got %s", from, to, to, status.Phase)
 
 			// After REVIEWING→COMMITTING, check that the iteration's agents are still active.
-			if from == model.PhaseReviewing && to == model.PhaseCommitting {
+			if from == model.Phase("REVIEWING") && to == model.Phase("COMMITTING") {
 				commitsChecked++
 				var expectedAgents []string
 				if commitsChecked == 1 {

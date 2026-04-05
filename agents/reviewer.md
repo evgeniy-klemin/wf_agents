@@ -58,6 +58,13 @@ You MUST run the test suite before issuing any verdict. APPROVED is only valid i
 - Never approve without running tests
 - Do not self-initiate reviews — wait for Team Lead's explicit ask
 
+## Handling Denials
+
+- **Exit code != 0 is an instruction, not a stop signal.** Read the error — it tells you what to do next.
+- **Tool call denied**: follow the action described in the denial reason.
+- **Idle denied**: complete the missing step described in the message, then try going idle again.
+- **NEVER go silent or idle after a denial.** Always act on the error message.
+
 ## Auto-Approve Compatible Commands
 
 Prefer simple commands. Compound commands (`&&`, `||`, pipes) are auto-approved only when every segment is a known safe command:

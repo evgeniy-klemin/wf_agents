@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/eklemin/wf-agents/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -25,46 +24,6 @@ type claudeHookInputTest struct {
 	ToolUseID      string          `json:"tool_use_id,omitempty"`
 }
 
-// buildDetailTest mirrors buildDetail from hook-handler for test use.
-func buildDetailTest(input claudeHookInputTest) map[string]string {
-	d := map[string]string{"cwd": input.CWD}
-	if input.ToolName != "" {
-		d["tool_name"] = input.ToolName
-	}
-	if input.ToolUseID != "" {
-		d["tool_use_id"] = input.ToolUseID
-	}
-	if input.PermissionMode != "" {
-		d["permission_mode"] = input.PermissionMode
-	}
-	if len(input.ToolInput) > 0 {
-		d["tool_input"] = string(input.ToolInput)
-	}
-	if input.AgentID != "" {
-		d["agent_id"] = input.AgentID
-	}
-	if input.AgentType != "" {
-		d["agent_type"] = input.AgentType
-	}
-	return d
-}
-
-// toSignalHookEvent transforms a parsed hook input into model.SignalHookEvent
-// using the same logic as cmd/hook-handler/main.go.
-func toSignalHookEvent(input claudeHookInputTest) model.SignalHookEvent {
-	detail := buildDetailTest(input)
-	switch input.HookEventName {
-	case "SubagentStart", "SubagentStop":
-		detail["agent_id"] = input.AgentID
-		detail["agent_type"] = input.AgentType
-	}
-	return model.SignalHookEvent{
-		HookType:  input.HookEventName,
-		SessionID: input.SessionID,
-		Tool:      input.ToolName,
-		Detail:    detail,
-	}
-}
 
 // loadRawLogEvents reads a JSONL testdata file and parses each line.
 func loadRawLogEvents(t *testing.T, path string) []claudeHookInputTest {

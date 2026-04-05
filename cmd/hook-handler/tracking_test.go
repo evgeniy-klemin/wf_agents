@@ -168,14 +168,14 @@ teammate_idle:
 		reason := evalTeammateIdleConfig(dir, "DEVELOPING", "developer-1", map[string]bool{
 			"lint": true,
 			"test": true,
-		})
+		}, "")
 		if reason != "" {
 			t.Errorf("expected no denial, got: %q", reason)
 		}
 	})
 
 	t.Run("no commands ran — denied", func(t *testing.T) {
-		reason := evalTeammateIdleConfig(dir, "DEVELOPING", "developer-1", map[string]bool{})
+		reason := evalTeammateIdleConfig(dir, "DEVELOPING", "developer-1", map[string]bool{}, "")
 		if reason == "" {
 			t.Error("expected denial when no commands ran, got empty string")
 		}
@@ -184,19 +184,19 @@ teammate_idle:
 	t.Run("only lint ran — denied for missing test", func(t *testing.T) {
 		reason := evalTeammateIdleConfig(dir, "DEVELOPING", "developer-1", map[string]bool{
 			"lint": true,
-		})
+		}, "")
 		if reason == "" {
 			t.Error("expected denial when test has not run, got empty string")
 		}
 	})
 }
 
-// TestEvalTeammateIdleConfig_ReviewerFree verifies that a reviewer going idle in
-// REVIEWING is denied until they send a completion summary via SendMessage.
-func TestEvalTeammateIdleConfig_ReviewerFree(t *testing.T) {
+// TestEvalTeammateIdleConfig_ReviewerDeniedUntilSendMessage verifies that a reviewer
+// going idle in REVIEWING is denied until they send a completion summary.
+func TestEvalTeammateIdleConfig_ReviewerDeniedUntilSendMessage(t *testing.T) {
 	dir := t.TempDir()
-	reason := evalTeammateIdleConfig(dir, "REVIEWING", "reviewer-1", nil)
+	reason := evalTeammateIdleConfig(dir, "REVIEWING", "reviewer-1", nil, "")
 	if reason == "" {
-		t.Error("reviewer should be denied idle in REVIEWING until send_message check passes")
+		t.Error("reviewer should be denied idle in REVIEWING until send_message check is satisfied, got empty string")
 	}
 }

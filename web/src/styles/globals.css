@@ -1,0 +1,30 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@keyframes pulse-ring {
+  0%, 100% { opacity: 0.15; }
+  50% { opacity: 0.5; }
+}
+
+@keyframes flow-dash {
+  to { stroke-dashoffset: -20; }
+}
+
+.pulse-ring { animation: pulse-ring 2.5s ease-in-out infinite; }
+.flow-active { animation: flow-dash 1s linear infinite; stroke-dasharray: 8 4; }
+
+.node-card {
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.node-card:hover {
+  filter: brightness(1.15);
+  transform: translateY(-2px);
+}
+
+.event-row { transition: background-color 0.2s; }
+.event-row:hover { background-color: rgba(99, 102, 241, 0.08); }
+
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: #1e293b; }
+::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }

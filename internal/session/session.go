@@ -95,3 +95,49 @@ func ResolveWorkflowIDByCWD(sessionID, cwd string) string {
 
 	return ""
 }
+
+// UpdateMarkerCWD patches the cwd field of a lead session marker to a worktree path.
+// It is a no-op if:
+//   - the marker does not exist
+//   - the marker has a "parent" field (teammate marker)
+//   - newCWD does not contain "/.claude/worktrees/" (not a worktree path)
+//   - the current cwd already contains "/.claude/worktrees/" (already correct)
+func UpdateMarkerCWD(sessionID, newCWD string) {
+	if !strings.Contains(newCWD, "/.claude/worktrees/") {
+		return
+	}
+
+	dir := filepath.Join(os.TempDir(), "wf-agents-sessions")
+	marker := filepath.Join(dir, sessionID)
+
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		return
+	}
+
+	var m map[string]string
+	if json.Unmarshal(data, &m) != nil {
+		return
+	}
+
+	// Skip teammate markers.
+	if m["parent"] != "" {
+		return
+	}
+
+	// Only patch if current cwd is a repo root (not already a worktree path).
+	oldCWD := m["cwd"]
+	if strings.Contains(oldCWD, "/.claude/worktrees/") {
+		return
+	}
+
+	m["cwd"] = newCWD
+	updated, err := json.Marshal(m)
+	if err != nil {
+		return
+	}
+	if err := os.WriteFile(marker, updated, 0o644); err != nil {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "Session marker CWD patched: %s → %s\n", oldCWD, newCWD)
+}

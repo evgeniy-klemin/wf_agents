@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -18,6 +19,8 @@ import (
 	"time"
 
 	"github.com/eklemin/wf-agents/internal/model"
+	"github.com/eklemin/wf-agents/internal/phasedocs"
+	"github.com/eklemin/wf-agents/internal/session"
 )
 
 // ---------------------------------------------------------------------------
@@ -302,27 +305,30 @@ func TestPhaseInstructionsNonEmpty(t *testing.T) {
 	unresolvedPlaceholder := regexp.MustCompile(`\{\{[A-Z_]+\}\}`)
 
 	phases := []model.Phase{
-		model.PhasePlanning,
-		model.PhaseRespawn,
-		model.PhaseDeveloping,
-		model.PhaseReviewing,
-		model.PhaseCommitting,
-		model.PhasePRCreation,
-		model.PhaseFeedback,
-		model.PhaseComplete,
+		model.Phase("PLANNING"),
+		model.Phase("RESPAWN"),
+		model.Phase("DEVELOPING"),
+		model.Phase("REVIEWING"),
+		model.Phase("COMMITTING"),
+		model.Phase("PR_CREATION"),
+		model.Phase("FEEDBACK"),
+		model.Phase("COMPLETE"),
 		model.PhaseBlocked,
 	}
 
 	for _, phase := range phases {
 		t.Run(string(phase), func(t *testing.T) {
-			result := phaseInstructions(phase, "")
+			result, err := phasedocs.FullInstructions(phase, "", false)
+			if err != nil {
+				t.Skipf("phasedocs.FullInstructions(%s) skipped (no plugin default available): %v", phase, err)
+			}
 
 			if strings.TrimSpace(result) == "" {
-				t.Errorf("phaseInstructions(%s) returned empty string", phase)
+				t.Errorf("phasedocs.FullInstructions(%s) returned empty string", phase)
 			}
 
 			if matches := unresolvedPlaceholder.FindAllString(result, -1); len(matches) > 0 {
-				t.Errorf("phaseInstructions(%s) has unresolved placeholders: %v\nContent:\n%s",
+				t.Errorf("phasedocs.FullInstructions(%s) has unresolved placeholders: %v\nContent:\n%s",
 					phase, matches, result)
 			}
 		})
@@ -334,15 +340,15 @@ func TestPhaseInstructionsNonEmpty(t *testing.T) {
 func TestPhaseInstructionsFallbackOnMissingFile(t *testing.T) {
 	t.Setenv("CLAUDE_PLUGIN_ROOT", "/nonexistent/path")
 
-	// Should not panic, should return a non-empty fallback string.
-	result := phaseInstructions(model.PhasePlanning, "")
-	if strings.TrimSpace(result) == "" {
-		t.Error("phaseInstructions fallback must return non-empty string")
+	// Should not panic, should return an error (no plugin default at nonexistent path).
+	_, err := phasedocs.FullInstructions(model.Phase("PLANNING"), "", false)
+	if err == nil {
+		t.Error("phaseInstructions must return error when CLAUDE_PLUGIN_ROOT points to nonexistent path")
 	}
 }
 
-// TestPhaseInstructionsProjectOverride verifies that a project-level .wf-agents/<PHASE>.md
-// overrides the plugin's workflow/<PHASE>.md.
+// TestPhaseInstructionsProjectOverride verifies that a project-level .wf-agents/phases/<PHASE>.md
+// overrides the plugin's workflow/phases/<PHASE>.md.
 func TestPhaseInstructionsProjectOverride(t *testing.T) {
 	projectRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -350,18 +356,21 @@ func TestPhaseInstructionsProjectOverride(t *testing.T) {
 	}
 	t.Setenv("CLAUDE_PLUGIN_ROOT", projectRoot)
 
-	// Create a temp project dir with a .wf-agents/PLANNING.md override.
+	// Create a temp project dir with a .wf-agents/phases/PLANNING.md override.
 	projectDir := t.TempDir()
-	wfAgentsDir := filepath.Join(projectDir, ".wf-agents")
-	if err := os.MkdirAll(wfAgentsDir, 0755); err != nil {
-		t.Fatalf("cannot create .wf-agents dir: %v", err)
+	wfAgentsPhasesDir := filepath.Join(projectDir, ".wf-agents", "phases")
+	if err := os.MkdirAll(wfAgentsPhasesDir, 0755); err != nil {
+		t.Fatalf("cannot create .wf-agents/phases dir: %v", err)
 	}
 	overrideContent := "PROJECT OVERRIDE CONTENT FOR PLANNING"
-	if err := os.WriteFile(filepath.Join(wfAgentsDir, "PLANNING.md"), []byte(overrideContent), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(wfAgentsPhasesDir, "PLANNING.md"), []byte(overrideContent), 0644); err != nil {
 		t.Fatalf("cannot write override file: %v", err)
 	}
 
-	result := phaseInstructions(model.PhasePlanning, projectDir)
+	result, err := phasedocs.FullInstructions(model.Phase("PLANNING"), projectDir, false)
+	if err != nil {
+		t.Fatalf("phasedocs.FullInstructions returned unexpected error: %v", err)
+	}
 	if !strings.Contains(result, overrideContent) {
 		t.Errorf("phaseInstructions should use project override, got: %s", result)
 	}
@@ -505,6 +514,7 @@ func TestLogResponse_WritesJSONLEntry(t *testing.T) {
 	logDir := filepath.Join(os.TempDir(), "wf-agents-hook-logs")
 	logFile := filepath.Join(logDir, sessionID+".jsonl")
 
+	_ = os.MkdirAll(logDir, 0755)
 	// Ensure log file is cleaned up after the test
 	defer os.Remove(logFile)
 
@@ -555,6 +565,7 @@ func TestLogResponse_AppendMultipleEntries(t *testing.T) {
 	sessionID := "test-log-response-append-xyz789"
 	logDir := filepath.Join(os.TempDir(), "wf-agents-hook-logs")
 	logFile := filepath.Join(logDir, sessionID+".jsonl")
+	_ = os.MkdirAll(logDir, 0755)
 	defer os.Remove(logFile)
 
 	logResponse(sessionID, "PreToolUse", 0, map[string]string{"decision": "allow"})
@@ -583,6 +594,7 @@ func TestLogResponse_ExitCodePreserved(t *testing.T) {
 	sessionID := "test-log-response-exitcode-def456"
 	logDir := filepath.Join(os.TempDir(), "wf-agents-hook-logs")
 	logFile := filepath.Join(logDir, sessionID+".jsonl")
+	_ = os.MkdirAll(logDir, 0755)
 	defer os.Remove(logFile)
 
 	logResponse(sessionID, "TeammateIdle", 2, map[string]string{"action": "keep_working"})
@@ -748,8 +760,7 @@ func TestTrackPreToolUse_NoSignalWhenNoAgentIdentity(t *testing.T) {
 }
 
 // TestTrackPreToolUse_EditSendsInvalidateCommands verifies that an Edit tool use with
-// agent_type="developer-1" sends SignalInvalidateCommands for categories with
-// invalidate_on_file_change=true.
+// agent_type="developer-1" sends a single SignalInvalidateCommands signal.
 func TestTrackPreToolUse_EditSendsInvalidateCommands(t *testing.T) {
 	dir := t.TempDir()
 	mock := &mockSignaler{}
@@ -776,9 +787,6 @@ func TestTrackPreToolUse_EditSendsInvalidateCommands(t *testing.T) {
 			}
 			if sig.Tool != "Edit" {
 				t.Errorf("Tool = %q, want %q", sig.Tool, "Edit")
-			}
-			if len(sig.Categories) == 0 {
-				t.Error("Categories must be non-empty")
 			}
 			return
 		}
@@ -933,50 +941,50 @@ func TestTrackPreToolUse_PipedCommand(t *testing.T) {
 }
 
 // TestEvalTeammateIdleConfig_DefaultConfigAllowsAll verifies that the default config
-// allows non-developer agents and developers outside DEVELOPING to idle freely,
-// except reviewer* in REVIEWING which requires a send_message check.
+// allows non-developer agents and developers outside DEVELOPING to idle freely.
 // developer* in DEVELOPING has idle checks (lint+test) — those are enforced by default.
+// reviewer* in REVIEWING has a send_message check — denial expected without it.
 func TestEvalTeammateIdleConfig_DefaultConfigAllowsAll(t *testing.T) {
 	dir := t.TempDir()
 
 	// team-lead can idle freely in all phases.
 	for _, phase := range []string{"DEVELOPING", "REVIEWING", "COMMITTING"} {
-		reason := evalTeammateIdleConfig(dir, phase, "team-lead", nil)
+		reason := evalTeammateIdleConfig(dir, phase, "team-lead", nil, "")
 		if reason != "" {
 			t.Errorf("default config: expected no denial for team-lead in %s, got: %q", phase, reason)
 		}
 	}
 
-	// reviewer-1 in REVIEWING is denied (must send completion summary).
-	reason := evalTeammateIdleConfig(dir, "REVIEWING", "reviewer-1", nil)
-	if reason == "" {
-		t.Error("default config: expected denial for reviewer-1 in REVIEWING (send_message check)")
-	}
-
-	// reviewer-1 in other phases can idle freely.
+	// reviewer-1 can idle freely in DEVELOPING and COMMITTING.
 	for _, phase := range []string{"DEVELOPING", "COMMITTING"} {
-		reason := evalTeammateIdleConfig(dir, phase, "reviewer-1", nil)
+		reason := evalTeammateIdleConfig(dir, phase, "reviewer-1", nil, "")
 		if reason != "" {
 			t.Errorf("default config: expected no denial for reviewer-1 in %s, got: %q", phase, reason)
 		}
 	}
 
+	// reviewer-1 in REVIEWING is denied until send_message check is satisfied.
+	reviewerReviewingReason := evalTeammateIdleConfig(dir, "REVIEWING", "reviewer-1", nil, "")
+	if reviewerReviewingReason == "" {
+		t.Error("default config: expected denial for reviewer-1 in REVIEWING (send_message check), got empty string")
+	}
+
 	// developer-1 in non-DEVELOPING phases should idle freely.
 	for _, phase := range []string{"REVIEWING", "COMMITTING"} {
-		reason := evalTeammateIdleConfig(dir, phase, "developer-1", nil)
+		reason := evalTeammateIdleConfig(dir, phase, "developer-1", nil, "")
 		if reason != "" {
 			t.Errorf("default config: expected no denial for developer-1 in %s, got: %q", phase, reason)
 		}
 	}
 
 	// developer-1 in DEVELOPING has lint+test idle checks — denial expected without commands ran.
-	reason = evalTeammateIdleConfig(dir, "DEVELOPING", "developer-1", nil)
+	reason := evalTeammateIdleConfig(dir, "DEVELOPING", "developer-1", nil, "")
 	if reason == "" {
 		t.Error("default config: expected denial for developer-1 in DEVELOPING (lint+test not run)")
 	}
 
 	// developer-1 in DEVELOPING allowed when lint, test, and SendMessage have run.
-	reason = evalTeammateIdleConfig(dir, "DEVELOPING", "developer-1", map[string]bool{"lint": true, "test": true, "_sent_message": true})
+	reason = evalTeammateIdleConfig(dir, "DEVELOPING", "developer-1", map[string]bool{"lint": true, "test": true, "_sent_message": true}, "")
 	if reason != "" {
 		t.Errorf("default config: expected no denial for developer-1 in DEVELOPING with lint+test ran, got: %q", reason)
 	}
@@ -986,7 +994,7 @@ func TestEvalTeammateIdleConfig_DefaultConfigAllowsAll(t *testing.T) {
 // matched (wildcard "*" rule has empty checks), idle is allowed.
 func TestEvalTeammateIdleConfig_WildcardPhaseAllowsIdle(t *testing.T) {
 	dir := t.TempDir()
-	reason := evalTeammateIdleConfig(dir, "REVIEWING", "developer-1", nil)
+	reason := evalTeammateIdleConfig(dir, "REVIEWING", "developer-1", nil, "")
 	if reason != "" {
 		t.Errorf("all teammates should be allowed to idle in REVIEWING (wildcard), got: %q", reason)
 	}
@@ -1045,13 +1053,13 @@ teammate_idle:
         message: "Must run lint before going idle in DEVELOPING"
 `)
 	// No commands ran — should be denied
-	reason := evalTeammateIdleConfig(dir, "DEVELOPING", "developer-1", map[string]bool{})
+	reason := evalTeammateIdleConfig(dir, "DEVELOPING", "developer-1", map[string]bool{}, "")
 	if reason == "" {
 		t.Error("expected denial because lint has not been run, got empty string")
 	}
 
 	// Lint ran — should be allowed
-	reason = evalTeammateIdleConfig(dir, "DEVELOPING", "developer-1", map[string]bool{"lint": true})
+	reason = evalTeammateIdleConfig(dir, "DEVELOPING", "developer-1", map[string]bool{"lint": true}, "")
 	if reason != "" {
 		t.Errorf("expected no denial after lint ran, got: %q", reason)
 	}
@@ -1083,5 +1091,132 @@ func TestAutoAllowOutputHasPermissionDecisionAllow(t *testing.T) {
 	}
 	if strings.Contains(raw, `"continue"`) {
 		t.Errorf("auto-allow output must NOT contain \"continue\" field, got: %s", raw)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// isPushToProtectedBranch tests
+// ---------------------------------------------------------------------------
+
+// makeGitRepo creates a temp git repo on the given branch for testing plain "git push".
+func makeGitRepo(t *testing.T, branch string) string {
+	t.Helper()
+	dir := t.TempDir()
+	cmds := [][]string{
+		{"git", "init", "-b", branch, dir},
+		{"git", "-C", dir, "config", "user.email", "test@test.com"},
+		{"git", "-C", dir, "config", "user.name", "Test"},
+	}
+	for _, args := range cmds {
+		out, err := exec.Command(args[0], args[1:]...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("makeGitRepo %v: %v\n%s", args, err, out)
+		}
+	}
+	return dir
+}
+
+func TestIsPushToProtectedBranch(t *testing.T) {
+	mainRepo := makeGitRepo(t, "main")
+	masterRepo := makeGitRepo(t, "master")
+	featureRepo := makeGitRepo(t, "feature/foo")
+
+	cases := []struct {
+		name string
+		cmd  string
+		cwd  string
+		want bool
+	}{
+		{"explicit main", "git push origin main", "", true},
+		{"explicit master", "git push origin master", "", true},
+		{"explicit feature branch", "git push origin feature/foo", "", false},
+		{"refspec HEAD:main", "git push origin HEAD:main", "", true},
+		{"refspec HEAD:master", "git push origin HEAD:master", "", true},
+		{"refspec refs/heads/main", "git push origin refs/heads/main", "", true},
+		{"force push to main", "git push --force origin main", "", true},
+		{"set-upstream to main", "git push -u origin main", "", true},
+		{"plain push on non-main", "git push origin", featureRepo, false},
+		{"bare push on non-main", "git push", featureRepo, false},
+		{"bare push on main", "git push", mainRepo, true},
+		{"bare push on master", "git push", masterRepo, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isPushToProtectedBranch(tc.cmd, tc.cwd)
+			if got != tc.want {
+				t.Errorf("isPushToProtectedBranch(%q, %q) = %v, want %v", tc.cmd, tc.cwd, got, tc.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// UpdateMarkerCWD hook-handler integration test
+// ---------------------------------------------------------------------------
+
+// TestUpdateMarkerCWD_LeadHookPatchesMarker verifies that when a lead hook fires with a
+// worktree CWD, the marker's cwd field is updated from the repo root to the worktree path,
+// and that a teammate marker (has "parent" field) is NOT patched.
+func TestUpdateMarkerCWD_LeadHookPatchesMarker(t *testing.T) {
+	dir := setupMarkerDir(t)
+	leadSessionID := "lead-update-cwd-hook-test"
+	teammateSessionID := "teammate-update-cwd-hook-test"
+	repoRoot := "/some/repo"
+	worktreePath := "/some/repo/.claude/worktrees/feature-branch"
+
+	defer os.Remove(filepath.Join(dir, leadSessionID))
+	defer os.Remove(filepath.Join(dir, teammateSessionID))
+
+	// Create lead marker with repo root CWD (as if --repo was the repo root, not the worktree).
+	makeMarker(t, dir, leadSessionID, map[string]string{
+		"session_id":  leadSessionID,
+		"workflow_id": "coding-session-" + leadSessionID,
+		"cwd":         repoRoot,
+	})
+
+	// Create a teammate marker with repo root CWD — it must NOT be patched.
+	makeMarker(t, dir, teammateSessionID, map[string]string{
+		"session_id":  teammateSessionID,
+		"workflow_id": "coding-session-" + leadSessionID,
+		"cwd":         repoRoot,
+		"parent":      leadSessionID,
+	})
+
+	// Simulate what main() does after resolveWorkflowID succeeds for a lead session.
+	resolvedWorkflowID := resolveWorkflowID(leadSessionID, worktreePath)
+	if resolvedWorkflowID == "" {
+		t.Fatalf("resolveWorkflowID returned empty for lead session (marker should exist)")
+	}
+
+	workflowSessionID := strings.TrimPrefix(resolvedWorkflowID, "coding-session-")
+	if leadSessionID == workflowSessionID {
+		session.UpdateMarkerCWD(leadSessionID, worktreePath)
+	}
+
+	// Verify the lead marker now has the worktree CWD.
+	data, err := os.ReadFile(filepath.Join(dir, leadSessionID))
+	if err != nil {
+		t.Fatalf("cannot read lead marker: %v", err)
+	}
+	var m map[string]string
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("lead marker is not valid JSON: %v", err)
+	}
+	if m["cwd"] != worktreePath {
+		t.Errorf("lead marker cwd = %q, want %q", m["cwd"], worktreePath)
+	}
+
+	// Verify the teammate marker was NOT patched.
+	tdata, err := os.ReadFile(filepath.Join(dir, teammateSessionID))
+	if err != nil {
+		t.Fatalf("cannot read teammate marker: %v", err)
+	}
+	var tm map[string]string
+	if err := json.Unmarshal(tdata, &tm); err != nil {
+		t.Fatalf("teammate marker is not valid JSON: %v", err)
+	}
+	if tm["cwd"] != repoRoot {
+		t.Errorf("teammate marker cwd should not be patched, got %q, want %q", tm["cwd"], repoRoot)
 	}
 }

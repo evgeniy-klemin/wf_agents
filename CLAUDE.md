@@ -9,6 +9,7 @@ hooks/hooks.json              Hook configuration (all events → bin/hook-handle
 agents/                       Agent definitions with YAML frontmatter
 commands/                     Slash commands
 workflow/                    Workflow defaults + phase instructions (UPPERCASE .md) — read from disk
+presets/                     Pluggable preset configurations (e.g. presets/iriski/default-go/)
 ```
 
 ### Go backend
@@ -34,6 +35,8 @@ make web                      # start web dashboard (port 8090)
 
 Uses Colima as Docker runtime. If Docker socket stops responding: `colima restart && docker compose up -d`.
 
+`cmd/web/static/placeholder` ensures the `static/` directory exists for `go:embed` before a frontend build. `npm run build` in `web/` replaces it with real assets. `make frontend-build` auto-generates if missing. If the placeholder is lost in a worktree, restore it from main — do NOT recreate it with similar content: `git checkout main -- cmd/web/static/placeholder`.
+
 ## Agent Teams (experimental)
 
 This plugin uses Claude Code's Agent Teams feature for multi-agent coordination.
@@ -51,6 +54,10 @@ Requires Claude Code v2.1.32+ and the experimental flag enabled in settings.json
 
 On macOS, kitty terminal freezes when teammates are running in background. The only confirmed fix is `kitty-unstick` — run it in a separate terminal tab before starting Claude Code. See README for install instructions.
 
+## Web Dashboard Channels
+
+See `README.md` and `channels/wf-web/README.md` for channel plugin setup and usage.
+
 ## Testing
 
 ```bash
@@ -65,7 +72,7 @@ go test ./internal/model/ -v       # state machine tests
 - Transitions use `UpdateWorkflow` (synchronous allow/deny), not signals
 - `WaitForStage: client.WorkflowUpdateStageCompleted` required in UpdateWorkflow options
 - Task description set via `set-task` signal on first `UserPromptSubmit`
-- Phase instructions loaded from `workflow/*.md` and injected as `additionalContext` on every PreToolUse
+- Phase instructions loaded from `workflow/phases/*.md` and injected as `additionalContext` on every PreToolUse
 - Bash commands chained with `&&`, `||`, `|`, `;` are split and each segment checked independently in guards
 
 ## Important conventions

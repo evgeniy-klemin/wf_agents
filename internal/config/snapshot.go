@@ -1,6 +1,41 @@
 package config
 
-import "github.com/eklemin/wf-agents/internal/model"
+import (
+	"sort"
+
+	"github.com/eklemin/wf-agents/internal/model"
+)
+
+func computePhaseOrder(start string, phases map[string]PhaseConfig, transitions map[string][]TransitionConfig) []string {
+	visited := make(map[string]bool)
+	var order []string
+	queue := []string{start}
+	visited[start] = true
+
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		order = append(order, current)
+
+		for _, t := range transitions[current] {
+			if !visited[t.To] {
+				visited[t.To] = true
+				queue = append(queue, t.To)
+			}
+		}
+	}
+
+	var orphans []string
+	for name := range phases {
+		if !visited[name] {
+			orphans = append(orphans, name)
+		}
+	}
+	sort.Strings(orphans)
+	order = append(order, orphans...)
+
+	return order
+}
 
 // ExtractFlowSnapshot extracts the flow-relevant portion (phases + transitions)
 // from a full Config. Permissions, guards, idle rules are excluded.
@@ -9,10 +44,17 @@ func ExtractFlowSnapshot(cfg *Config) *model.FlowSnapshot {
 		return nil
 	}
 
+	var phaseOrder []string
+	if len(cfg.Phases.PhaseOrder) >= len(cfg.Phases.Phases) {
+		phaseOrder = cfg.Phases.PhaseOrder
+	} else {
+		phaseOrder = computePhaseOrder(cfg.Phases.Start, cfg.Phases.Phases, cfg.Transitions)
+	}
+
 	snap := &model.FlowSnapshot{
 		Start:       cfg.Phases.Start,
 		Stop:        cfg.Phases.Stop,
-		PhaseOrder:  cfg.Phases.PhaseOrder,
+		PhaseOrder:  phaseOrder,
 		Phases:      make(map[string]model.FlowPhase, len(cfg.Phases.Phases)),
 		Transitions: make(map[string][]model.FlowTransition, len(cfg.Transitions)),
 	}

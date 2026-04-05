@@ -1,0 +1,160 @@
+variables:
+  GO_VERSION: '1.26'
+  GOLANGCI_LINT_VERSION: '2.10'
+  GO_IMAGE: "934587711440.dkr.ecr.eu-central-1.amazonaws.com/devops/public/common-base-images/go/ci-bundle:${GO_VERSION}-alpine"
+  GOLANGCI_LINT_IMAGE: "934587711440.dkr.ecr.eu-central-1.amazonaws.com/devops/public/common-base-images/go/ci-linter:${GOLANGCI_LINT_VERSION}-alpine"
+  NODE_VERSION: '22.22.0'
+  NODE_IMAGE: "934587711440.dkr.ecr.eu-central-1.amazonaws.com/external/node:${NODE_VERSION}-alpine"
+
+stages:
+  - deps
+  - checks
+
+.common-rules:
+  rules:
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_REF_NAME == $CI_DEFAULT_BRANCH
+    - if: $CI_MERGE_REQUEST_IID
+
+go-modules:
+  extends: .common-rules
+  tags: [build]
+  stage: deps
+  dependencies: []
+  image: ${GO_IMAGE}
+  variables:
+    GOPRIVATE: "gitlab.diftech.org"
+    GOPROXY: "https://nexus.diftech.org/repository/go-public"
+  before_script:
+    - |
+      echo "--> Configure git ..."
+      git config --global --add url."https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.diftech.org/".insteadOf ssh://git@gitlab.diftech.org/
+      git config --global --add url."https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.diftech.org/".insteadOf https://gitlab.diftech.org/
+    - |
+      echo "--> Configure .netrc ..."
+      cat <<EOT >> ~/.netrc
+      machine gitlab.diftech.org
+      login gitlab-ci-token
+      password ${CI_JOB_TOKEN}
+      EOT
+      chmod 600 ~/.netrc
+    - |
+      echo "--> Print versions"
+      go version
+  script:
+    - |
+      echo "--> Download modules ..."
+      time go mod download
+    - |
+      echo "--> Tidy modules to see if go.mod and/or go.sum are reproducible ..."
+      time go mod tidy
+      git update-index -q --refresh
+      if ! git diff-index --quiet HEAD -- ; then
+        echo -e "\n\n\e[33mFound changes after 'go mod tidy'!\e[0m\n\n"
+        git diff-index -p --color=always HEAD --
+        exit 1
+      fi
+    - |
+      echo "--> Put modules to vendor ..."
+      time go mod vendor
+  artifacts:
+    name: "go-vendor-${CI_PIPELINE_ID}"
+    paths:
+      - vendor
+    expire_in: 1 hour
+
+go-unit-tests:
+  extends: .common-rules
+  tags: [build]
+  stage: checks
+  needs: [go-modules]
+  image: ${GO_IMAGE}
+  variables:
+    GOFLAGS: "-mod=vendor"
+    COVERAGE_PROFILE_DIR: "./coverreports"
+    COVERAGE_PROFILE_PATH: "${COVERAGE_PROFILE_DIR}/${CI_JOB_NAME_SLUG}.out"
+  before_script:
+    - |
+      echo "--> Print versions"
+      go version
+    - |
+      echo "--> Create folder for coverage reports"
+      mkdir -p ${COVERAGE_PROFILE_DIR}
+  script:
+    - |
+      echo "--> Run Go unit tests"
+      time gotestsum --junitfile report.xml --format testname -- \
+        -v \
+        -race \
+        -coverprofile=${COVERAGE_PROFILE_PATH} \
+        $(go list ./... | grep -v "$(go list -m)/test")
+      time gocover-cobertura < ${COVERAGE_PROFILE_PATH} > coverage.xml
+      go tool cover -func=${COVERAGE_PROFILE_PATH} | tail -n1
+  coverage: '/total:\s+\(statements\)\s+(\d+.\d+\%)/'
+  artifacts:
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
+      junit: report.xml
+
+go-linter:
+  extends: .common-rules
+  tags: [build]
+  stage: checks
+  needs: [go-modules]
+  image: ${GOLANGCI_LINT_IMAGE}
+  variables:
+    GOFLAGS: "-mod=vendor"
+    CGO_ENABLED: "0"
+    CC: "gcc"
+    CXX: "g++"
+  before_script:
+    - |
+      echo "--> Print versions"
+      go version
+      golangci-lint version
+  script:
+    - |
+      echo "--> Run linter ..."
+      set +e
+      golangci-lint run \
+        --modules-download-mode vendor \
+        --timeout 15m \
+        --concurrency 2 \
+        --verbose \
+        --print-resources-usage \
+        --output.code-climate.path=report.json \
+        --output.text.path=stdout
+      LINTER_EXIT_CODE=$?
+      set -e
+
+      cat report.json \
+        | jq '.[] += { check_name: "golangci-lint" }' \
+        | jq '.[] += { severity: "critical" }' \
+        > golangci-lint-report.json
+
+      if [ ${LINTER_EXIT_CODE} -eq 0 ] ; then
+        echo -e "\n\e[32mFound no issues.\e[0m\n"
+        exit 0
+      else
+        echo -e "\n\e[31mFound issues!\e[0m\n"
+        exit 1
+      fi
+  artifacts:
+    reports:
+      codequality: golangci-lint-report.json
+
+frontend-build:
+  extends: .common-rules
+  tags: [build]
+  stage: checks
+  needs: []
+  image: ${NODE_IMAGE}
+  before_script:
+    - node --version
+    - npm --version
+  script:
+    - cd web
+    - npm ci
+    - npm run build

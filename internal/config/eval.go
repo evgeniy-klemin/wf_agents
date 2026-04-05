@@ -17,6 +17,8 @@ type CheckContext interface {
 	OriginPhase() string
 	// CommandsRan tracks which commands have been run (Phase 2 state).
 	CommandsRan() map[string]bool
+	// MrUrl returns the MR/PR URL saved on the workflow, or "" if not yet set.
+	MrUrl() string
 }
 
 // EvalCheck evaluates a single Check against the given context.
@@ -74,6 +76,12 @@ func EvalCheck(check Check, ctx CheckContext) string {
 			return check.Message
 		}
 		return ""
+
+	case "mr_url_saved":
+		if ctx.MrUrl() != "" {
+			return ""
+		}
+		return check.Message
 
 	default:
 		return fmt.Sprintf("unknown check type %q", check.Type)

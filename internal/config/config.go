@@ -4,6 +4,7 @@ package config
 
 // Config is the top-level configuration structure.
 type Config struct {
+	Extends             string                        `yaml:"extends,omitempty"`
 	Tracking            TrackingConfig                `yaml:"tracking"`
 	Guards              []GuardRule                   `yaml:"guards"`
 	TeammateIdle        []IdleRule                    `yaml:"teammate_idle"`

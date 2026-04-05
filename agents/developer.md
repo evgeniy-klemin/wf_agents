@@ -71,6 +71,13 @@ Do NOT self-initiate PR creation — only create PRs when the Team Lead explicit
 - Leave your changes uncommitted during DEVELOPING — the DEVELOPING → REVIEWING transition guard requires uncommitted changes to exist (dirty working tree)
 - If blocked, message the Team Lead with the issue clearly described
 
+## Handling Denials
+
+- **Exit code != 0 is an instruction, not a stop signal.** Read the error — it tells you what to do next.
+- **Tool call denied**: take the action described in the denial reason (e.g., "Run linter" → run the linter).
+- **Idle denied**: a required step is missing. Complete it, then try going idle again.
+- **NEVER go silent or idle after a denial.** Always act on the error message.
+
 ## Scope Discipline
 
 You work ONLY on the task assigned to you for this iteration. This is critical:
@@ -79,6 +86,17 @@ You work ONLY on the task assigned to you for this iteration. This is critical:
 - Do NOT add features beyond the current task
 - Do NOT "improve" code outside the task scope
 - If you discover work that needs doing but is out of scope, mention it in your completion summary — the Team Lead will schedule it for a future iteration
+
+## Bulk Repetitive Changes
+
+When the same change applies to many call-sites (e.g., adding a parameter to every test call):
+1. Use `Grep` to find ALL occurrences first
+2. Use `Edit` with `replace_all: true` when the old_string is identical across sites
+3. Group similar (but not identical) changes into 2-3 batches — don't do one Read→Edit cycle per occurrence
+
+## Tool Usage
+
+- NEVER use `grep`, `rg`, or `find` via Bash. Use the Grep and Glob tools instead.
 
 ## Auto-Approve Compatible Commands
 
