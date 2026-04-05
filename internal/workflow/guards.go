@@ -14,6 +14,10 @@ import (
 // Initialized once at startup from the embedded defaults.yaml.
 var guardConfig *config.Config
 
+// guardProjectDir is the project directory set when InitGuardConfig is called.
+// Empty when using defaults-only init (via init()).
+var guardProjectDir string
+
 func init() {
 	cfg, err := config.DefaultConfig()
 	if err != nil {
@@ -22,20 +26,75 @@ func init() {
 	guardConfig = cfg
 }
 
-// sessionCheckContext adapts sessionState + evidence to the config.CheckContext interface.
-type sessionCheckContext struct {
-	evidence    map[string]string
-	state       *sessionState
-	originPhase string
+// InitGuardConfig loads the config for the given project directory (defaults + preset + project
+// overrides) and replaces the global guardConfig. On error the previous guardConfig is kept
+// and the error is returned so callers can log a warning without failing.
+func InitGuardConfig(projectDir string) error {
+	cfg, err := config.LoadConfig(projectDir)
+	if err != nil {
+		return err
+	}
+	guardConfig = cfg
+	guardProjectDir = filepath.Clean(projectDir)
+	return nil
 }
 
-func (c *sessionCheckContext) Evidence() map[string]string  { return c.evidence }
-func (c *sessionCheckContext) ActiveAgentCount() int        { return len(c.state.activeAgents) }
-func (c *sessionCheckContext) Iteration() int               { return c.state.iteration }
-func (c *sessionCheckContext) MaxIterations() int           { return c.state.maxIter }
-func (c *sessionCheckContext) OriginPhase() string          { return c.originPhase }
-func (c *sessionCheckContext) CommandsRan() map[string]bool { return nil }
-func (c *sessionCheckContext) TeammateName() string         { return "" }
+// LoadConfigForProject loads the three-level config (defaults + preset + project)
+// for a specific project directory. Returns the merged config without modifying
+// the global guardConfig.
+func LoadConfigForProject(projectDir string) (*config.Config, error) {
+	if projectDir == "" {
+		return config.DefaultConfig()
+	}
+	return config.LoadConfig(projectDir)
+}
+
+// guardParams captures workflow-internal state needed for guard evaluation.
+// Passed into SideEffect so the pure checkAllGuards function can evaluate
+// both evidence-based and state-based guards without workflow context.
+type guardParams struct {
+	RepoPath        string
+	From            string
+	To              string
+	Evidence        map[string]string
+	ActiveAgents    int
+	Iteration       int
+	MaxIterations   int
+	OriginPhase     string
+	CommandsRan     map[string]bool
+	TeammateName    string
+	MrUrl           string
+}
+
+// checkAllGuards is a pure function that evaluates all guard rules from config.
+// Extracted for testability — no I/O, no workflow context.
+func checkAllGuards(cfg *config.Config, p guardParams) string {
+	rules := config.FindGuards(cfg, p.From, p.To)
+	if len(rules) == 0 {
+		return ""
+	}
+	ctx := &guardCheckContext{params: p}
+	for _, rule := range rules {
+		if reason := config.EvalChecks(rule.Checks, ctx); reason != "" {
+			return reason
+		}
+	}
+	return ""
+}
+
+// guardCheckContext implements config.CheckContext using guardParams.
+type guardCheckContext struct {
+	params guardParams
+}
+
+func (c *guardCheckContext) Evidence() map[string]string  { return c.params.Evidence }
+func (c *guardCheckContext) ActiveAgentCount() int        { return c.params.ActiveAgents }
+func (c *guardCheckContext) Iteration() int               { return c.params.Iteration }
+func (c *guardCheckContext) MaxIterations() int           { return c.params.MaxIterations }
+func (c *guardCheckContext) OriginPhase() string          { return c.params.OriginPhase }
+func (c *guardCheckContext) CommandsRan() map[string]bool { return c.params.CommandsRan }
+func (c *guardCheckContext) TeammateName() string         { return c.params.TeammateName }
+func (c *guardCheckContext) MrUrl() string                { return c.params.MrUrl }
 
 // validateTransition checks whether the transition from→to is allowed given the current
 // session state and evidence. Returns "" to allow, or a non-empty denial reason.
@@ -61,43 +120,19 @@ func validateTransition(s *sessionState, from, to model.Phase, evidence map[stri
 		return ""
 	}
 
-	// Determine origin phase for max_iterations check (BLOCKED uses preBlockedPhase)
-	origin := s.phase
-	if origin == model.PhaseBlocked {
-		origin = s.preBlockedPhase
-	}
-
 	fromStr, toStr := string(from), string(to)
 
 	// Validate that this transition exists in the state machine.
-	// Prefer flow snapshot; fall back to guardConfig for workflows started without a snapshot.
-	if s.flow != nil {
-		if !s.flow.IsValidTransition(fromStr, toStr) {
-			return fmt.Sprintf("transition %s → %s is not allowed", from, to)
-		}
-	} else if !guardConfig.IsValidTransition(fromStr, toStr) {
+	if !s.flow.IsValidTransition(fromStr, toStr) {
 		return fmt.Sprintf("transition %s → %s is not allowed", from, to)
 	}
 
-	// Evaluate any guard rules from the config. Transitions absent from the
-	// config have no guard checks and are allowed unconditionally.
-	rules := config.FindGuards(guardConfig, fromStr, toStr)
-	if len(rules) == 0 {
-		return ""
-	}
-
-	ctx := &sessionCheckContext{
-		evidence:    evidence,
-		state:       s,
-		originPhase: string(origin),
-	}
-
-	for _, rule := range rules {
-		if reason := config.EvalChecks(rule.Checks, ctx); reason != "" {
-			return reason
-		}
-	}
 	return ""
+}
+
+// allowedTransitionsFor returns the list of valid target phases from the given phase.
+func allowedTransitionsFor(s *sessionState, from model.Phase) []string {
+	return s.flow.AllowedTransitions(string(from))
 }
 
 // --- Tool permission enforcement ---
@@ -152,6 +187,43 @@ func isClaudeInfraFile(toolInput json.RawMessage) bool {
 		(strings.Contains(input.FilePath, "/.claude/projects/") && strings.Contains(input.FilePath, "/memory/"))
 }
 
+// isPathInAllowedDirs returns true if toolInput contains a file_path within one of the allowed directories.
+// When guardProjectDir is set, the path must be within the project directory, and the allowed dir check
+// uses the relative path from the project root (prefix match) to prevent deep nested paths from matching.
+// Falls back to string-contains when guardProjectDir is empty.
+// Fail-closed: returns false on parse error.
+func isPathInAllowedDirs(toolInput json.RawMessage, allowedDirs []string) bool {
+	var input struct {
+		FilePath string `json:"file_path"`
+	}
+	if err := json.Unmarshal(toolInput, &input); err != nil || input.FilePath == "" {
+		return false
+	}
+	cleanPath := filepath.Clean(input.FilePath)
+	if guardProjectDir != "" {
+		prefix := guardProjectDir + string(filepath.Separator)
+		if !strings.HasPrefix(cleanPath, prefix) {
+			return false
+		}
+		relPath := cleanPath[len(prefix):]
+		for _, dir := range allowedDirs {
+			dir = strings.TrimSuffix(dir, "/")
+			if strings.HasPrefix(relPath, dir+"/") || relPath == dir {
+				return true
+			}
+		}
+		return false
+	}
+	// Fallback: no project root known — use string-contains.
+	for _, dir := range allowedDirs {
+		dir = strings.TrimSuffix(dir, "/")
+		if strings.Contains(cleanPath, "/"+dir+"/") {
+			return true
+		}
+	}
+	return false
+}
+
 // CheckToolPermission checks whether a tool is allowed given the phase, tool name,
 // agent ID, and the current set of active teammates.
 // This centralizes ALL permission logic alongside transition guards.
@@ -162,15 +234,24 @@ func CheckToolPermission(
 	agentID string,
 	activeAgents []string,
 ) ToolPermissionResult {
-	isTeamLead := !IsTeammate(agentID, activeAgents)
+	isTeamLead := !IsTeammate(agentID)
 
 	// Team Lead cannot edit PROJECT files directly — but CAN write plan/memory files
 	// (Claude Code infra: plan mode and memory system). Must delegate project file changes
 	// to Developer teammate.
-	if isTeamLead && guardConfig.LeadFileWritesDenied() && isFileWritingTool(toolName) && !isClaudeInfraFile(toolInput) {
-		return ToolPermissionResult{
-			Denied: true,
-			Reason: "Team Lead cannot edit files directly — delegate to Developer teammate",
+	if isTeamLead && isFileWritingTool(toolName) && !isClaudeInfraFile(toolInput) {
+		allowed, paths := guardConfig.LeadFileWritePermission(string(phase))
+		if !allowed {
+			return ToolPermissionResult{
+				Denied: true,
+				Reason: "Team Lead cannot edit files directly — delegate to Developer teammate",
+			}
+		}
+		if len(paths) > 0 && !isPathInAllowedDirs(toolInput, paths) {
+			return ToolPermissionResult{
+				Denied: true,
+				Reason: fmt.Sprintf("Team Lead file writes in %s restricted to: %v", phase, paths),
+			}
 		}
 	}
 
@@ -187,15 +268,6 @@ func CheckToolPermission(
 		}
 	}
 
-	// PLANNING and RESPAWN: project file writes forbidden, but plan/memory files allowed
-	// so that Claude Code's plan mode and memory system continue to function.
-	if (phase == model.PhasePlanning || phase == model.PhaseRespawn) && isFileWritingTool(toolName) && !isClaudeInfraFile(toolInput) {
-		return ToolPermissionResult{
-			Denied: true,
-			Reason: fmt.Sprintf("File writes are forbidden in %s phase. %s", phase, PhaseHint(phase)),
-		}
-	}
-
 	// Teammate permissions: config-driven per-phase/per-agent tool restrictions
 	if !isTeamLead && !isClaudeInfraFile(toolInput) {
 		bashCmd := ""
@@ -203,7 +275,7 @@ func CheckToolPermission(
 			var input struct {
 				Command string `json:"command"`
 			}
-			json.Unmarshal(toolInput, &input)
+			_ = json.Unmarshal(toolInput, &input)
 			bashCmd = strings.TrimSpace(input.Command)
 		}
 		if rule := config.FindTeammatePermission(guardConfig, string(phase), agentID, toolName, bashCmd); rule != nil {
@@ -222,6 +294,23 @@ func CheckToolPermission(
 				return ToolPermissionResult{
 					Denied: true,
 					Reason: fmt.Sprintf("%s (current phase: %s)", msg, phase),
+				}
+			}
+		}
+	}
+
+	// Teammates cannot call "wf-client transition" — only Team Lead triggers phase transitions.
+	if !isTeamLead && toolName == "Bash" {
+		var input struct {
+			Command string `json:"command"`
+		}
+		if err := json.Unmarshal(toolInput, &input); err == nil {
+			for _, seg := range splitBashCommands(strings.TrimSpace(input.Command)) {
+				if isWfClientTransition(strings.TrimSpace(seg)) {
+					return ToolPermissionResult{
+						Denied: true,
+						Reason: "Teammates cannot call 'wf-client transition' — only Team Lead can trigger phase transitions",
+					}
 				}
 			}
 		}
@@ -250,8 +339,18 @@ func CheckToolPermission(
 // Agent Teams teammates may not have fired SubagentStart before PreToolUse, so
 // checking against activeAgents is unreliable. Any non-empty agentID is treated
 // as a teammate; an empty agentID means the main agent (Team Lead).
-func IsTeammate(agentID string, activeAgents []string) bool {
+func IsTeammate(agentID string) bool {
 	return agentID != ""
+}
+
+// isWfClientTransition returns true if seg is a "wf-client transition" invocation.
+// Handles absolute paths like /path/to/bin/wf-client.
+func isWfClientTransition(seg string) bool {
+	parts := strings.Fields(seg)
+	if len(parts) < 2 {
+		return false
+	}
+	return filepath.Base(parts[0]) == "wf-client" && parts[1] == "transition"
 }
 
 // isAutoApproveBashCommand returns true if the command matches a safe command from config.
@@ -354,13 +453,13 @@ func checkBashPermission(phase model.Phase, toolInput json.RawMessage) ToolPermi
 		return ToolPermissionResult{Denied: true, Reason: "cannot parse Bash command input"}
 	}
 
-	// PLANNING: whitelist approach — only safe commands allowed
-	if phase == model.PhasePlanning {
-		return checkPlanningBash(cmd)
+	// Whitelist-policy phases: only safe/whitelisted commands allowed (e.g. PLANNING).
+	if guardConfig.PhaseBashPolicy(string(phase)) == "whitelist" {
+		return checkWhitelistBash(phase, cmd)
 	}
 
-	// PR_CREATION: auto-approve commands matching safe_commands + PR_CREATION whitelist
-	if phase == model.PhasePRCreation {
+	// Phases with a non-empty whitelist: auto-approve commands that match safe_commands + phase whitelist.
+	if len(guardConfig.PhaseWhitelist(string(phase))) > 0 {
 		allApproved := true
 		for _, segment := range splitBashCommands(cmd) {
 			seg := strings.TrimSpace(segment)
@@ -395,15 +494,6 @@ func checkBashPermission(phase model.Phase, toolInput json.RawMessage) ToolPermi
 				}
 			}
 		}
-		// File-modifying commands restricted to DEVELOPING/REVIEWING
-		if phase != model.PhaseDeveloping && phase != model.PhaseReviewing {
-			if matchesBashPrefix(seg, "gofmt") {
-				return ToolPermissionResult{
-					Denied: true,
-					Reason: fmt.Sprintf("gofmt is only allowed in DEVELOPING and REVIEWING phases, current phase: %s", phase),
-				}
-			}
-		}
 		// Track whether every segment is in the auto-approve list (for auto-allow).
 		// Only truly read-only git commands are auto-approved; git config etc. are not.
 		isGitReadOnly := isAutoApproveGitCommand(seg)
@@ -425,9 +515,9 @@ var safeGitStashSubcommands = map[string]bool{
 	"list": true, "show": true,
 }
 
-// checkPlanningBash uses a whitelist: only safe read-only commands in PLANNING.
-// Combines safe_commands (global defaults) and PLANNING phase whitelist from config.
-func checkPlanningBash(cmd string) ToolPermissionResult {
+// checkWhitelistBash enforces a whitelist-only bash policy for the given phase.
+// Only commands in safe_commands (global defaults) or the phase's whitelist are allowed.
+func checkWhitelistBash(phase model.Phase, cmd string) ToolPermissionResult {
 	// Handle pipes/chains: check each sub-command
 	for _, segment := range splitBashCommands(cmd) {
 		seg := strings.TrimSpace(segment)
@@ -436,36 +526,27 @@ func checkPlanningBash(cmd string) ToolPermissionResult {
 		}
 
 		if strings.HasPrefix(seg, "git ") || seg == "git" {
-			if !isAllowedGitInPlanning(seg) {
+			if !isAllowedGitInPhase(phase, seg) {
 				return ToolPermissionResult{
 					Denied: true,
 					Reason: fmt.Sprintf(
-						"git command %q is not allowed in PLANNING phase — only read-only git operations permitted. Transition to RESPAWN first.",
-						seg,
+						"git command %q is not allowed in %s phase — only read-only git operations permitted. %s",
+						seg, phase, PhaseHint(phase),
 					),
 				}
 			}
 			continue
 		}
 
-		// gofmt can write files (-w flag) — deny explicitly in PLANNING even though
-		// it is in safe_commands for auto-approval in DEVELOPING/REVIEWING phases.
-		if matchesBashPrefix(seg, "gofmt") {
-			return ToolPermissionResult{
-				Denied: true,
-				Reason: fmt.Sprintf("gofmt is only allowed in DEVELOPING and REVIEWING phases, current phase: %s", model.PhasePlanning),
-			}
-		}
-
-		if isSafeBashCommand(seg) {
+		if isSafeBashCommandInPhase(phase, seg) {
 			continue
 		}
 
 		return ToolPermissionResult{
 			Denied: true,
 			Reason: fmt.Sprintf(
-				"Command %q is not in the allowed list for PLANNING phase — no repository modifications allowed. Transition to RESPAWN to begin development.",
-				truncateCmd(seg, 60),
+				"Command %q is not in the allowed list for %s phase. %s",
+				truncateCmd(seg, 60), phase, PhaseHint(phase),
 			),
 		}
 	}
@@ -473,10 +554,10 @@ func checkPlanningBash(cmd string) ToolPermissionResult {
 	return ToolPermissionResult{Denied: false}
 }
 
-// isAllowedGitInPlanning checks if a git command is allowed in PLANNING.
-// Git commands are checked against the PLANNING phase whitelist from config,
+// isAllowedGitInPhase checks if a git command is allowed in the given whitelist-policy phase.
+// Git commands are checked against the phase whitelist from config,
 // with special handling for "git stash" which requires a safe sub-operation.
-func isAllowedGitInPlanning(cmd string) bool {
+func isAllowedGitInPhase(phase model.Phase, cmd string) bool {
 	parts := strings.Fields(cmd)
 	if len(parts) < 2 {
 		return false
@@ -510,22 +591,22 @@ func isAllowedGitInPlanning(cmd string) bool {
 		return true
 	}
 
-	// Check against PLANNING phase whitelist — covers git checkout, pull, fetch, etc.
-	return isPhaseWhitelistedCommand(model.PhasePlanning, cmd)
+	// Check against phase whitelist — covers git checkout, pull, fetch, etc.
+	return isPhaseWhitelistedCommand(phase, cmd)
 }
 
-// isSafeBashCommand checks if a non-git command matches any safe prefix for PLANNING.
-// Checks both safe_commands (global) and PLANNING whitelist from config.
+// isSafeBashCommandInPhase checks if a non-git command matches any safe prefix for the given phase.
+// Checks both safe_commands (global) and the phase whitelist from config.
 // It first tries matching the command as-is, then strips path components from
 // the first word so that "/usr/bin/ls -la" matches prefix "ls" and
 // "/path/to/bin/wf-client status" matches prefix "wf-client".
-func isSafeBashCommand(cmd string) bool {
+func isSafeBashCommandInPhase(phase model.Phase, cmd string) bool {
 	// Check global safe_commands
 	if isAutoApproveBashCommand(cmd) {
 		return true
 	}
-	// Check PLANNING phase whitelist
-	if isPhaseWhitelistedCommand(model.PhasePlanning, cmd) {
+	// Check phase whitelist
+	if isPhaseWhitelistedCommand(phase, cmd) {
 		return true
 	}
 	return false

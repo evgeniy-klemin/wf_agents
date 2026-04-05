@@ -14,6 +14,7 @@ import (
 	"github.com/eklemin/wf-agents/internal/config"
 	"github.com/eklemin/wf-agents/internal/model"
 	"github.com/eklemin/wf-agents/internal/noplog"
+	"github.com/eklemin/wf-agents/internal/phasedocs"
 	"github.com/eklemin/wf-agents/internal/platform"
 	"github.com/eklemin/wf-agents/internal/session"
 	internaltemporal "github.com/eklemin/wf-agents/internal/temporal"
@@ -29,6 +30,17 @@ func main() {
 	if len(os.Args) < 2 {
 		printUsage()
 		os.Exit(1)
+	}
+
+	// lead-protocol does not need a Temporal connection — handle it early.
+	if os.Args[1] == "lead-protocol" {
+		cmdLeadProtocol(os.Args[2:])
+		return
+	}
+
+	// Load default config so terminal phases are available to all subcommands.
+	if defaultCfg, err := config.DefaultConfig(); err == nil {
+		model.SetTerminalPhases(defaultCfg.StopPhases())
 	}
 
 	c, err := client.Dial(client.Options{
@@ -61,6 +73,8 @@ func main() {
 		cmdShutDown(ctx, c, os.Args[2:])
 	case "deregister-all-agents":
 		cmdDeregisterAllAgents(ctx, c, os.Args[2:])
+	case "set-mr-url":
+		cmdSetMrUrl(ctx, c, os.Args[2:])
 	case "list":
 		cmdList(ctx, c)
 	default:
@@ -77,13 +91,15 @@ Commands:
   start                 --session <id> --task <desc> [--repo <path>] [--max-iter <n>]
   status                <workflow-id>
   timeline              <workflow-id>
-  transition            <workflow-id> --to <PHASE> [--reason <text>]
+  transition            <workflow-id> --to <PHASE> [--reason <text>] [--evidence <key>=<value> ...]
   journal               <workflow-id> --message <text>
   complete              <workflow-id>
   reset-iterations      <workflow-id>
   shut-down             <workflow-id> --agent <agent-type>
   deregister-all-agents <workflow-id>
-  list`)
+  set-mr-url            <workflow-id> --url <url>
+  list
+  lead-protocol`)
 }
 
 // buildStartOptions constructs StartWorkflowOptions with an explicit reuse policy
@@ -105,9 +121,20 @@ func isAlreadyStartedError(errMsg string) bool {
 	return strings.Contains(errMsg, "already started") || strings.Contains(errMsg, "AlreadyStarted")
 }
 
+// denialReason returns the guard explanation for a denied transition, falling back to "not allowed".
+func denialReason(reason string) string {
+	if reason == "" {
+		return "not allowed"
+	}
+	return reason
+}
+
 // alreadyStartedMessage returns a human-friendly error message for the given session.
 func alreadyStartedMessage(sessionID string) string {
-	return fmt.Sprintf("A workflow is already running for session %s. Complete or terminate it first, then retry.", sessionID)
+	return fmt.Sprintf(
+		"A workflow is already running for session %s. Complete or terminate it first, then retry.",
+		sessionID,
+	)
 }
 
 func cmdStart(ctx context.Context, c client.Client, args []string) {
@@ -121,7 +148,7 @@ func cmdStart(ctx context.Context, c client.Client, args []string) {
 		case "--repo":
 			input.RepoPath = args[i+1]
 		case "--max-iter":
-			fmt.Sscanf(args[i+1], "%d", &input.MaxIterations)
+			_, _ = fmt.Sscanf(args[i+1], "%d", &input.MaxIterations)
 		}
 	}
 
@@ -131,13 +158,24 @@ func cmdStart(ctx context.Context, c client.Client, args []string) {
 	if input.TaskDescription == "" {
 		log.Fatal("--task is required")
 	}
+	if len(input.TaskDescription) > 60 {
+		log.Fatalf("--task must be at most 60 characters (got %d); use a short English summary", len(input.TaskDescription))
+	}
+	if input.RepoPath == "" {
+		log.Fatalf(
+			"--repo is required for 'start'.\n\n" +
+				"The marker file stores --repo as the session CWD; teammates use it for workflow resolution.\n\n" +
+				"How to detect the correct path:\n" +
+				"  - Check your CLAUDE.md path. If it contains .claude/worktrees/<name>/, use that worktree root.\n" +
+				"  - Otherwise use the repository root.\n\n" +
+				"Correct command:\n" +
+				"  wf-client start --session <id> --repo $(pwd) --task \"<description>\"",
+		)
+	}
 
 	// Snapshot the flow topology (phases + transitions) at session start.
 	// Uses LoadConfig to merge embedded defaults with project-level .wf-agents.yaml.
 	projectDir := input.RepoPath
-	if projectDir == "" {
-		projectDir, _ = os.Getwd()
-	}
 	cfg, err := config.LoadConfig(projectDir)
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
@@ -146,8 +184,21 @@ func cmdStart(ctx context.Context, c client.Client, args []string) {
 
 	workflowID := "coding-session-" + input.SessionID
 	opts := buildStartOptions(workflowID, taskQueue)
+
+	projectName := ""
+	repoURL := ""
+	if remoteOut, remoteErr := platform.RunCmdInDir(5*time.Second, input.RepoPath, "git", "remote", "get-url", "origin"); remoteErr == nil {
+		remote := strings.TrimSpace(remoteOut)
+		projectName = platform.ProjectNameFromURL(remote)
+		repoURL = platform.GitRemoteToWebURL(remote)
+	} else {
+		projectName = filepath.Base(input.RepoPath)
+	}
+
 	opts.Memo = map[string]interface{}{
-		"task": input.TaskDescription,
+		"task":         input.TaskDescription,
+		"project_name": projectName,
+		"repo_url":     repoURL,
 	}
 
 	run, err := c.ExecuteWorkflow(ctx, opts, wf.CodingSessionWorkflow, input)
@@ -158,19 +209,22 @@ func cmdStart(ctx context.Context, c client.Client, args []string) {
 		log.Fatalf("Failed to start workflow: %v", err)
 	}
 
-	// Determine CWD: use --repo flag if provided, otherwise current directory.
-	cwd := input.RepoPath
-	if cwd == "" {
-		if wd, err := os.Getwd(); err == nil {
-			cwd = wd
-		}
-	}
-
 	// Create marker file so hook-handler knows this session is active
-	createSessionMarker(input.SessionID, cwd)
+	createSessionMarker(input.SessionID, input.RepoPath)
 
-	fmt.Printf("Workflow started:\n  ID:    %s\n  RunID: %s\n  UI:    http://localhost:8080/namespaces/default/workflows/%s\n",
-		run.GetID(), run.GetRunID(), workflowID)
+	fmt.Printf(
+		"Workflow started:\n  ID:    %s\n  RunID: %s\n",
+		run.GetID(),
+		run.GetRunID(),
+	)
+
+	startingPhase := model.Phase(cfg.Phases.Start)
+	instructions, err := phasedocs.FullInstructions(startingPhase, input.RepoPath, false)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not load phase instructions: %v\n", err)
+	} else if instructions != "" {
+		fmt.Println(instructions)
+	}
 }
 
 func cmdStatus(ctx context.Context, c client.Client, args []string) {
@@ -190,24 +244,27 @@ func cmdStatus(ctx context.Context, c client.Client, args []string) {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintf(w, "Phase:\t%s\n", status.Phase)
-	fmt.Fprintf(w, "Iteration:\t%d\n", status.Iteration)
-	fmt.Fprintf(w, "Events:\t%d\n", status.EventCount)
-	fmt.Fprintf(w, "Active Agents:\t%v\n", status.ActiveAgents)
-	fmt.Fprintf(w, "Started:\t%s\n", status.StartedAt)
-	fmt.Fprintf(w, "Updated:\t%s\n", status.LastUpdatedAt)
-	fmt.Fprintf(w, "Task:\t%s\n", status.Task)
+	_, _ = fmt.Fprintf(w, "Phase:\t%s\n", status.Phase)
+	_, _ = fmt.Fprintf(w, "Iteration:\t%d\n", status.Iteration)
+	_, _ = fmt.Fprintf(w, "Events:\t%d\n", status.EventCount)
+	_, _ = fmt.Fprintf(w, "Active Agents:\t%v\n", status.ActiveAgents)
+	_, _ = fmt.Fprintf(w, "Started:\t%s\n", status.StartedAt)
+	_, _ = fmt.Fprintf(w, "Updated:\t%s\n", status.LastUpdatedAt)
+	_, _ = fmt.Fprintf(w, "Task:\t%s\n", status.Task)
+	if status.MRUrl != "" {
+		_, _ = fmt.Fprintf(w, "MR URL:\t%s\n", status.MRUrl)
+	}
 	if len(status.CommandsRan) > 0 {
-		fmt.Fprintf(w, "Commands Ran:\t\n")
+		_, _ = fmt.Fprintf(w, "Commands Ran:\t\n")
 		for agent, cats := range status.CommandsRan {
 			for cat, ran := range cats {
 				if ran {
-					fmt.Fprintf(w, "  %s/%s:\ttrue\n", agent, cat)
+					_, _ = fmt.Fprintf(w, "  %s/%s:\ttrue\n", agent, cat)
 				}
 			}
 		}
 	}
-	w.Flush()
+	_ = w.Flush()
 }
 
 func cmdTimeline(ctx context.Context, c client.Client, args []string) {
@@ -229,7 +286,7 @@ func cmdTimeline(ctx context.Context, c client.Client, args []string) {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	for _, evt := range timeline.Events {
-		enc.Encode(evt)
+		_ = enc.Encode(evt)
 	}
 }
 
@@ -240,6 +297,7 @@ func cmdTransition(ctx context.Context, c client.Client, args []string) {
 	workflowID := resolveWorkflowID(args[0])
 
 	req := model.SignalTransition{SessionID: "cli"}
+	var repoPath string
 	for i := 1; i < len(args)-1; i += 2 {
 		switch args[i] {
 		case "--to":
@@ -248,6 +306,10 @@ func cmdTransition(ctx context.Context, c client.Client, args []string) {
 			req.Reason = args[i+1]
 		case "--session":
 			req.SessionID = args[i+1]
+		case "--repo":
+			repoPath = args[i+1]
+		case "--evidence":
+			// consumed below via parseEvidenceFlags
 		}
 	}
 	if req.To == "" {
@@ -256,7 +318,27 @@ func cmdTransition(ctx context.Context, c client.Client, args []string) {
 	req.To = model.Phase(strings.ToUpper(string(req.To)))
 
 	// Collect evidence for transition guards
-	req.Guards = collectEvidence()
+	req.Guards = collectEvidence(repoPath)
+
+	// Record which keys were system-collected so CLI cannot override them.
+	systemKeys := make(map[string]bool)
+	for k := range req.Guards {
+		systemKeys[k] = true
+	}
+
+	// Merge CLI-provided evidence, skipping system-collected keys.
+	cliEvidence, err := parseEvidenceFlags(args[1:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	for k, v := range cliEvidence {
+		if systemKeys[k] {
+			fmt.Fprintf(os.Stderr, "Warning: ignoring --evidence %s (system-collected key)\n", k)
+			continue
+		}
+		req.Guards[k] = v
+	}
 
 	// Use UpdateWorkflow for synchronous allow/deny response
 	handle, err := c.UpdateWorkflow(ctx, client.UpdateWorkflowOptions{
@@ -275,14 +357,39 @@ func cmdTransition(ctx context.Context, c client.Client, args []string) {
 	}
 
 	if result.Allowed {
-		fmt.Printf("TRANSITION ALLOWED: %s → %s\n", result.From, result.To)
-		if result.To == model.PhaseComplete {
+		if result.NoOp {
+			fmt.Printf("TRANSITION NO-OP: already in %s\n", result.To)
+		} else {
+			fmt.Printf("TRANSITION ALLOWED: %s → %s\n", result.From, result.To)
+		}
+		cwd, err := os.Getwd()
+		if err != nil {
+			cwd = ""
+		}
+		instructions, err := phasedocs.FullInstructions(result.To, cwd, false)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "CRITICAL: %v\n", err)
+			fmt.Fprintf(
+				os.Stderr,
+				"You MUST stop and ask the user to fix the plugin configuration. Do NOT proceed without phase instructions.\n",
+			)
+			os.Exit(1)
+		}
+		if instructions != "" {
+			fmt.Println(instructions)
+		}
+		if result.To.IsTerminal() {
 			sessionID := strings.TrimPrefix(workflowID, "coding-session-")
 			removeSessionMarker(sessionID)
 		}
 	} else {
-		fmt.Fprintf(os.Stderr, "TRANSITION DENIED: %s → %s\nReason: %s\n", result.From, result.To, result.Reason)
-		os.Exit(1)
+		fmt.Printf("TRANSITION DENIED: %s → %s (%s)\n", result.From, result.To, denialReason(result.Reason))
+		if len(result.AllowedTransitions) > 0 {
+			fmt.Printf(
+				"Choose one of the allowed transitions: %s\n",
+				strings.Join(result.AllowedTransitions, ", "),
+			)
+		}
 	}
 }
 
@@ -316,12 +423,29 @@ func cmdComplete(ctx context.Context, c client.Client, args []string) {
 	}
 	workflowID := resolveWorkflowID(args[0])
 
-	// Use the same UpdateWorkflow path as transition — goes through state machine validation
+	var repoPath string
+	for i := 1; i < len(args)-1; i += 2 {
+		if args[i] == "--repo" {
+			repoPath = args[i+1]
+		}
+	}
+
+	// Use the same UpdateWorkflow path as transition — goes through state machine validation.
+	// Target the first configured stop phase (from defaults.yaml phases.stop).
+	defaultCfg, err := config.DefaultConfig()
+	if err != nil {
+		log.Fatalf("cannot load workflow config: %v", err)
+	}
+	stops := defaultCfg.StopPhases()
+	if len(stops) == 0 {
+		log.Fatal("no stop phases configured")
+	}
+	stopPhase := model.Phase(stops[0])
 	req := model.SignalTransition{
-		To:        model.PhaseComplete,
+		To:        stopPhase,
 		SessionID: "cli",
 		Reason:    "manual complete",
-		Guards:    collectEvidence(),
+		Guards:    collectEvidence(repoPath),
 	}
 	handle, err := c.UpdateWorkflow(ctx, client.UpdateWorkflowOptions{
 		WorkflowID:   workflowID,
@@ -339,12 +463,22 @@ func cmdComplete(ctx context.Context, c client.Client, args []string) {
 	}
 
 	if result.Allowed {
-		fmt.Printf("COMPLETE: %s → %s\n", result.From, result.To)
-		sessionID := strings.TrimPrefix(workflowID, "coding-session-")
-		removeSessionMarker(sessionID)
+		if result.NoOp {
+			fmt.Printf("COMPLETE NO-OP: already in %s\n", result.To)
+		} else {
+			fmt.Printf("COMPLETE: %s → %s\n", result.From, result.To)
+			sessionID := strings.TrimPrefix(workflowID, "coding-session-")
+			removeSessionMarker(sessionID)
+		}
 	} else {
-		fmt.Fprintf(os.Stderr, "COMPLETE DENIED: %s → %s\nReason: %s\n", result.From, result.To, result.Reason)
-		os.Exit(1)
+		fmt.Printf("COMPLETE DENIED: %s → %s\nReason: %s\n", result.From, result.To, result.Reason)
+		if len(result.AllowedTransitions) > 0 {
+			fmt.Printf(
+				"Allowed transitions from %s: %s\n",
+				result.From,
+				strings.Join(result.AllowedTransitions, ", "),
+			)
+		}
 	}
 }
 
@@ -407,6 +541,30 @@ func cmdDeregisterAllAgents(ctx context.Context, c client.Client, args []string)
 	fmt.Printf("All active agents cleared in workflow %s\n", workflowID)
 }
 
+func cmdSetMrUrl(ctx context.Context, c client.Client, args []string) {
+	if len(args) < 1 {
+		log.Fatal("workflow-id required")
+	}
+	workflowID := resolveWorkflowID(args[0])
+
+	var url string
+	for i := 1; i < len(args)-1; i += 2 {
+		switch args[i] {
+		case "--url":
+			url = args[i+1]
+		}
+	}
+	if url == "" {
+		log.Fatal("--url is required")
+	}
+
+	err := c.SignalWorkflow(ctx, workflowID, "", wf.SignalSetMrUrl, url)
+	if err != nil {
+		log.Fatalf("Signal failed: %v", err)
+	}
+	fmt.Printf("MR URL set to %s in workflow %s\n", url, workflowID)
+}
+
 func cmdList(ctx context.Context, c client.Client) {
 	resp, err := c.ListWorkflow(ctx, &workflowservice.ListWorkflowExecutionsRequest{
 		Namespace: "default",
@@ -417,27 +575,72 @@ func cmdList(ctx context.Context, c client.Client) {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintf(w, "WORKFLOW ID\tSTATUS\tSTART TIME\n")
+	_, _ = fmt.Fprintf(w, "WORKFLOW ID\tSTATUS\tTASK\tSTART TIME\n")
 	for _, wfe := range resp.Executions {
 		startTime := ""
 		if wfe.StartTime != nil {
 			startTime = wfe.StartTime.AsTime().Format("2006-01-02 15:04:05")
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\n",
+		task := ""
+		if wfe.Memo != nil {
+			if payload, ok := wfe.Memo.Fields["task"]; ok {
+				var t string
+				if json.Unmarshal(payload.Data, &t) == nil {
+					task = t
+				}
+			}
+		}
+		if len([]rune(task)) > 40 {
+			task = string([]rune(task)[:40]) + "…"
+		}
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
 			wfe.Execution.WorkflowId,
 			wfe.Status.String(),
+			task,
 			startTime,
 		)
 	}
-	w.Flush()
+	_ = w.Flush()
+}
+
+// cmdLeadProtocol resolves the team-lead.md protocol file using three-level resolution:
+// project override (.wf-agents/team-lead.md) → preset → plugin default (workflow/team-lead.md).
+// Prints the absolute path on success (exit 0) or exits 1 if not found.
+func cmdLeadProtocol(args []string) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cannot determine working directory: %v\n", err)
+		os.Exit(1)
+	}
+
+	root, err := config.PluginRoot()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cannot determine plugin root: %v\n", err)
+		os.Exit(1)
+	}
+
+	workflowDir := filepath.Join(root, "workflow")
+	path, err := config.ResolveFile("team-lead.md", cwd, workflowDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "team-lead.md not found: %v\n", err)
+		os.Exit(1)
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cannot read team-lead.md: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Team Lead protocol file (re-read at: %s):\n\n%s\n", path, content)
 }
 
 func resolveWorkflowID(id string) string {
 	return session.ResolveWorkflowID(id)
 }
 
-// collectGitHubEvidence populates evidence map using GitHub's gh CLI.
-func collectGitHubEvidence(evidence map[string]string, runner platform.CmdRunner) {
+// collectGitHubEvidenceWithRunner populates evidence using GitHub's gh CLI via the provided runner.
+func collectGitHubEvidenceWithRunner(evidence map[string]string, runner platform.CmdRunner) {
 	// PR checks status via JSON — reliable parsing of check states.
 	// Empty array or no PR = no CI configured → pass (don't block).
 	if out, err := runner(15*time.Second, "gh", "pr", "checks", "--json", "name,state"); err == nil {
@@ -464,21 +667,22 @@ func collectGitHubEvidence(evidence map[string]string, runner platform.CmdRunner
 				}
 			}
 		} else {
-			evidence["ci_passed"] = "true"
+			evidence["ci_passed"] = "false"
 			evidence["pr_checks_detail"] = "could not parse checks"
 		}
 	} else {
 		// gh pr checks failed entirely (no PR, no git remote, etc.) → don't block
-		evidence["ci_passed"] = "true"
+		evidence["ci_passed"] = "false"
 		evidence["pr_checks_detail"] = "no PR found or gh unavailable"
 	}
 
-	// PR review approval and merge status — for FEEDBACK → COMPLETE.
-	// Allows completion if PR is approved OR already merged.
-	if out, err := runner(10*time.Second, "gh", "pr", "view", "--json", "reviewDecision,state"); err == nil {
+	// PR review approval and draft status — for FEEDBACK → COMPLETE.
+	// Allows completion if PR is approved OR MR moved from draft to ready.
+	if out, err := runner(10*time.Second, "gh", "pr", "view", "--json", "reviewDecision,state,isDraft"); err == nil {
 		var pr struct {
 			ReviewDecision string `json:"reviewDecision"`
 			State          string `json:"state"`
+			IsDraft        bool   `json:"isDraft"`
 		}
 		if json.Unmarshal([]byte(out), &pr) == nil {
 			if pr.ReviewDecision == "APPROVED" {
@@ -496,22 +700,39 @@ func collectGitHubEvidence(evidence map[string]string, runner platform.CmdRunner
 			} else {
 				evidence["merged"] = "false"
 			}
+			if !pr.IsDraft {
+				evidence["mr_ready"] = "true"
+			} else {
+				evidence["mr_ready"] = "false"
+			}
+		} else {
+			evidence["review_approved"] = "false"
+			evidence["pr_approved_detail"] = "could not parse PR"
+			evidence["merged"] = "false"
+			evidence["mr_ready"] = "false"
 		}
 	} else {
 		evidence["review_approved"] = "false"
 		evidence["pr_approved_detail"] = "no PR found"
 		evidence["merged"] = "false"
+		evidence["mr_ready"] = "false"
 	}
 }
 
-// collectGitLabEvidence populates evidence map using GitLab's glab CLI.
-func collectGitLabEvidence(evidence map[string]string, runner platform.CmdRunner) {
+// collectGitHubEvidence populates evidence map using GitHub's gh CLI, running in repoPath.
+func collectGitHubEvidence(evidence map[string]string, repoPath string) {
+	collectGitHubEvidenceWithRunner(evidence, cmdRunnerForDir(repoPath))
+}
+
+// collectGitLabEvidenceWithRunner populates evidence using GitLab's glab CLI via the provided runner.
+func collectGitLabEvidenceWithRunner(evidence map[string]string, runner platform.CmdRunner) {
 	out, err := runner(15*time.Second, "glab", "mr", "view", "-F", "json")
 	if err != nil {
 		// No MR or glab unavailable — use permissive defaults
-		evidence["ci_passed"] = "true"
+		evidence["ci_passed"] = "false"
 		evidence["review_approved"] = "false"
 		evidence["merged"] = "false"
+		evidence["mr_ready"] = "false"
 		return
 	}
 
@@ -521,13 +742,15 @@ func collectGitLabEvidence(evidence map[string]string, runner platform.CmdRunner
 		} `json:"head_pipeline"`
 		ApprovedBy []interface{} `json:"approved_by"`
 		State      string        `json:"state"`
+		Draft      bool          `json:"draft"`
 	}
 
 	if json.Unmarshal([]byte(out), &mr) != nil {
 		// Malformed JSON — use permissive defaults
-		evidence["ci_passed"] = "true"
+		evidence["ci_passed"] = "false"
 		evidence["review_approved"] = "false"
 		evidence["merged"] = "false"
+		evidence["mr_ready"] = "false"
 		return
 	}
 
@@ -550,12 +773,24 @@ func collectGitLabEvidence(evidence map[string]string, runner platform.CmdRunner
 		evidence["review_approved"] = "false"
 	}
 
-	// Merge status
+	// Merged status
 	if mr.State == "merged" {
 		evidence["merged"] = "true"
 	} else {
 		evidence["merged"] = "false"
 	}
+
+	// MR ready status (not a draft and not merged)
+	if !mr.Draft && mr.State != "merged" {
+		evidence["mr_ready"] = "true"
+	} else {
+		evidence["mr_ready"] = "false"
+	}
+}
+
+// collectGitLabEvidence populates evidence map using GitLab's glab CLI, running in repoPath.
+func collectGitLabEvidence(evidence map[string]string, repoPath string) {
+	collectGitLabEvidenceWithRunner(evidence, cmdRunnerForDir(repoPath))
 }
 
 // collectBranchPushedEvidence checks whether the local HEAD matches the upstream
@@ -578,14 +813,60 @@ func collectBranchPushedEvidence(evidence map[string]string, runner platform.Cmd
 	}
 }
 
+// parseEvidenceFlags extracts --evidence key=value pairs from args.
+// Returns an error if any value does not contain '='.
+func parseEvidenceFlags(args []string) (map[string]string, error) {
+	evidence := make(map[string]string)
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "--evidence" {
+			val := args[i+1]
+			idx := strings.Index(val, "=")
+			if idx < 0 {
+				return nil, fmt.Errorf("invalid --evidence value %q: must be key=value", val)
+			}
+			evidence[val[:idx]] = val[idx+1:]
+			i++ // skip the value token
+		}
+	}
+	return evidence, nil
+}
+
+// gitRunnerForRepo returns a CmdRunner that prepends "git -C repoPath" to all git
+// invocations when repoPath is non-empty. This lets evidence collection run git in
+// the correct worktree directory rather than the process CWD.
+func gitRunnerForRepo(repoPath string) platform.CmdRunner {
+	if repoPath == "" {
+		return platform.RunCmd
+	}
+	return func(timeout time.Duration, name string, args ...string) (string, error) {
+		if name == "git" {
+			args = append([]string{"-C", repoPath}, args...)
+		}
+		return platform.RunCmd(timeout, name, args...)
+	}
+}
+
+// cmdRunnerForDir returns a CmdRunner that runs commands with Dir set to repoPath
+// when repoPath is non-empty. Used for CLI tools like glab/gh that don't support -C.
+func cmdRunnerForDir(repoPath string) platform.CmdRunner {
+	if repoPath == "" {
+		return platform.RunCmd
+	}
+	return func(timeout time.Duration, name string, args ...string) (string, error) {
+		return platform.RunCmdInDir(timeout, repoPath, name, args...)
+	}
+}
+
 // collectEvidence gathers local git/PR state to send with the transition request.
 // The Temporal workflow uses this evidence for guard validation.
 // Evidence is best-effort: failures result in missing keys, not errors.
-func collectEvidence() map[string]string {
+// repoPath, if non-empty, overrides the directory used for git commands (e.g. a worktree path).
+func collectEvidence(repoPath string) map[string]string {
 	evidence := make(map[string]string)
+	gitRunner := gitRunnerForRepo(repoPath)
 
 	// git working tree status — platform-agnostic
-	if out, err := platform.RunCmd(10*time.Second, "git", "status", "--porcelain"); err == nil {
+	if out, err := gitRunner(10*time.Second, "git", "status", "--porcelain"); err == nil {
 		if strings.TrimSpace(out) == "" {
 			evidence["working_tree_clean"] = "true"
 		} else {
@@ -593,18 +874,19 @@ func collectEvidence() map[string]string {
 		}
 	}
 
-	collectBranchPushedEvidence(evidence, platform.RunCmd)
+	collectBranchPushedEvidence(evidence, gitRunner)
 
 	switch platform.DetectPlatform() {
 	case "github":
-		collectGitHubEvidence(evidence, platform.RunCmd)
+		collectGitHubEvidence(evidence, repoPath)
 	case "gitlab":
-		collectGitLabEvidence(evidence, platform.RunCmd)
+		collectGitLabEvidence(evidence, repoPath)
 	default:
-		// Unknown platform — use permissive defaults so we don't block
-		evidence["ci_passed"] = "true"
+		// Unknown platform — use conservative defaults
+		evidence["ci_passed"] = "false"
 		evidence["review_approved"] = "false"
 		evidence["merged"] = "false"
+		evidence["mr_ready"] = "false"
 	}
 
 	return evidence
@@ -614,7 +896,7 @@ func collectEvidence() map[string]string {
 // has an active workflow and can resolve teammates by CWD. Without the marker, hooks are no-ops.
 func createSessionMarker(sessionID, cwd string) {
 	dir := filepath.Join(os.TempDir(), "wf-agents-sessions")
-	os.MkdirAll(dir, 0o755)
+	_ = os.MkdirAll(dir, 0o755)
 	marker := filepath.Join(dir, sessionID)
 	data, _ := json.Marshal(map[string]string{
 		"session_id":  sessionID,
@@ -654,14 +936,7 @@ func removeSessionMarker(sessionID string) {
 			continue
 		}
 		if m["parent"] == sessionID {
-			os.Remove(filepath.Join(dir, entry.Name()))
+			_ = os.Remove(filepath.Join(dir, entry.Name()))
 		}
 	}
-}
-
-func firstLine(s string) string {
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return s[:i]
-	}
-	return s
 }

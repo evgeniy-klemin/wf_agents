@@ -19,6 +19,18 @@ func (c *Config) IsValidTransition(from, to string) bool {
 	return false
 }
 
+// AllowedTransitions returns all valid target phases for a given from phase.
+func (c *Config) AllowedTransitions(from string) []string {
+	if c.Transitions == nil {
+		return nil
+	}
+	var result []string
+	for _, t := range c.Transitions[from] {
+		result = append(result, t.To)
+	}
+	return result
+}
+
 // PhaseHint returns the hint for a phase from config.
 func (c *Config) PhaseHint(phase string) string {
 	if c.Phases == nil {
@@ -44,6 +56,51 @@ func (c *Config) StopPhases() []string {
 		return nil
 	}
 	return c.Phases.Stop
+}
+
+// PhaseBashPolicy returns the bash_policy for a given phase ("whitelist" or "").
+func (c *Config) PhaseBashPolicy(phase string) string {
+	if c.Phases == nil {
+		return ""
+	}
+	if pc, ok := c.Phases.Phases[phase]; ok {
+		return pc.BashPolicy
+	}
+	return ""
+}
+
+// PhaseAllowsFileWritingCommands returns true if any teammate agent has file_writes==allow
+// in the given phase, meaning file-modifying commands (like gofmt -w) are permitted.
+func (c *Config) PhaseAllowsFileWritingCommands(phase string) bool {
+	if c.Phases == nil {
+		return false
+	}
+	if pc, ok := c.Phases.Phases[phase]; ok {
+		for _, ap := range pc.Permissions.Teammate {
+			if ap.FileWrites == "allow" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// IterationIncrementPhases returns the names of phases that have an
+// on_enter action of type "increment_iteration".
+func (c *Config) IterationIncrementPhases() []string {
+	if c.Phases == nil {
+		return nil
+	}
+	var phases []string
+	for name, pc := range c.Phases.Phases {
+		for _, effect := range pc.OnEnter {
+			if effect.Type == "increment_iteration" {
+				phases = append(phases, name)
+				break
+			}
+		}
+	}
+	return phases
 }
 
 // SafeCommands returns the default safe bash commands from config.
@@ -81,12 +138,50 @@ func (c *Config) FileWritingTools() []string {
 	return c.Phases.Defaults.Permissions.FileWritingTools
 }
 
-// LeadFileWritesDenied returns true if team lead file writes are denied by default.
-func (c *Config) LeadFileWritesDenied() bool {
+// LeadFileWritePermission returns whether the Team Lead is allowed to write files
+// in a given phase, and optional path restrictions.
+// Checks phase-specific lead override first, then falls back to default.
+func (c *Config) LeadFileWritePermission(phase string) (allowed bool, paths []string) {
+	if c.Phases == nil {
+		return true, nil
+	}
+	// Phase-specific lead override
+	if pc, ok := c.Phases.Phases[phase]; ok {
+		if pc.Permissions.Lead != nil {
+			if pc.Permissions.Lead.FileWrites == "allow" {
+				return true, pc.Permissions.Lead.FileWritesPaths
+			}
+			if pc.Permissions.Lead.FileWrites == "deny" {
+				return false, nil
+			}
+		}
+	}
+	// Default
+	if c.Phases.Defaults.Permissions.Lead.FileWrites == "deny" {
+		return false, nil
+	}
+	return true, nil
+}
+
+// IsTeammate returns true if agentName matches any teammate glob pattern defined in
+// Phases.Defaults.Permissions.Teammate or any per-phase Permissions.Teammate entry.
+func (c *Config) IsTeammate(agentName string) bool {
 	if c.Phases == nil {
 		return false
 	}
-	return c.Phases.Defaults.Permissions.Lead.FileWrites == "deny"
+	for _, ap := range c.Phases.Defaults.Permissions.Teammate {
+		if agentGlobMatch(ap.Agent, agentName) {
+			return true
+		}
+	}
+	for _, pc := range c.Phases.Phases {
+		for _, ap := range pc.Permissions.Teammate {
+			if agentGlobMatch(ap.Agent, agentName) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // TeammateFileWritePermission returns the file_writes permission for a matching agent in a given phase.
@@ -176,6 +271,7 @@ type PhaseConfig struct {
 	Display      PhaseDisplay     `yaml:"display,omitempty" json:"display,omitempty"`
 	Instructions string           `yaml:"instructions,omitempty" json:"instructions,omitempty"`
 	Hint         string           `yaml:"hint,omitempty" json:"hint,omitempty"`
+	BashPolicy   string           `yaml:"bash_policy,omitempty" json:"bash_policy,omitempty"` // "whitelist" or "" (default blacklist)
 	Permissions  PhasePermissions `yaml:"permissions,omitempty" json:"permissions,omitempty"`
 	Idle         []PhaseIdleRule  `yaml:"idle,omitempty" json:"idle,omitempty"`
 	OnEnter      []SideEffect     `yaml:"on_enter,omitempty" json:"on_enter,omitempty"`
@@ -191,13 +287,16 @@ type PhaseDisplay struct {
 // PhasePermissions defines the permission rules for a phase.
 type PhasePermissions struct {
 	Whitelist []string          `yaml:"whitelist,omitempty" json:"whitelist,omitempty"`
+	// Lead is a pointer to distinguish "not configured" (nil) from "configured with empty string".
+	// DefaultPermissions.Lead uses a value type because it is always present.
 	Lead      *RolePermission   `yaml:"lead,omitempty" json:"lead,omitempty"`
 	Teammate  []AgentPermission `yaml:"teammate,omitempty" json:"teammate,omitempty"`
 }
 
 // RolePermission defines file-write permissions for a role (lead or teammate).
 type RolePermission struct {
-	FileWrites string `yaml:"file_writes,omitempty" json:"file_writes,omitempty"` // "allow" or "deny"
+	FileWrites      string   `yaml:"file_writes,omitempty" json:"file_writes,omitempty"`           // "allow" or "deny"
+	FileWritesPaths []string `yaml:"file_writes_paths,omitempty" json:"file_writes_paths,omitempty"` // restrict writes to these dirs
 }
 
 // AgentPermission defines permissions for a specific agent (by glob pattern).
@@ -297,32 +396,59 @@ func splitAnd(expr string) []string {
 // parseSingleWhenExpr parses a single (non-compound) when expression token.
 // The message is used for evidence checks. For no_active_agents and max_iterations,
 // the message is left empty so EvalCheck uses its built-in fallback messages.
+//
+// Supported forms:
+//
+//	active_agents == 0          → no_active_agents (structural)
+//	iteration < max_iterations  → max_iterations (structural)
+//	not <identifier>            → evidence key=identifier value=false
+//	<key> == "<value>"          → evidence key=key value=value (quoted string)
+//	<id1> or <id2> [or ...]     → evidence key=id1 value=true, alternatives=[{id2,true},...]
+//	<identifier>                → evidence key=identifier value=true
 func parseSingleWhenExpr(expr, message string) Check {
-	switch expr {
-	case "working_tree_clean":
-		return Check{Type: "evidence", Key: "working_tree_clean", Value: "true", Message: message}
-	case "not working_tree_clean":
-		return Check{Type: "evidence", Key: "working_tree_clean", Value: "false", Message: message}
-	case "active_agents == 0":
-		// EvalCheck has a built-in message for no_active_agents; leave empty to use it.
+	// Structural special cases — not evidence-based.
+	if expr == "active_agents == 0" {
 		return Check{Type: "no_active_agents"}
-	case "iteration < max_iterations":
-		// EvalCheck has a built-in fallback message for max_iterations; leave empty to use it.
+	}
+	if expr == "iteration < max_iterations" {
 		return Check{Type: "max_iterations"}
-	case "ci_passed":
-		return Check{Type: "evidence", Key: "ci_passed", Value: "true", Message: message}
-	case "branch_pushed":
-		return Check{Type: "evidence", Key: "branch_pushed", Value: "true", Message: message}
-	case "review_approved or merged":
+	}
+	if expr == "mr_url_saved" {
+		return Check{Type: "mr_url_saved", Message: message}
+	}
+
+	// "not <identifier>" → evidence value=false
+	if strings.HasPrefix(expr, "not ") {
+		key := strings.TrimSpace(expr[4:])
+		return Check{Type: "evidence", Key: key, Value: "false", Message: message}
+	}
+
+	// `<key> == "<value>"` with a quoted string value
+	if idx := strings.Index(expr, ` == "`); idx >= 0 {
+		key := strings.TrimSpace(expr[:idx])
+		rest := expr[idx+5:] // skip ' == "'
+		// strip trailing quote
+		value := strings.TrimSuffix(rest, `"`)
+		return Check{Type: "evidence", Key: key, Value: value, Message: message}
+	}
+
+	// "<id1> or <id2> [or ...]" → primary + alternatives
+	if strings.Contains(expr, " or ") {
+		parts := strings.Split(expr, " or ")
+		primary := strings.TrimSpace(parts[0])
+		var alts []KV
+		for _, p := range parts[1:] {
+			alts = append(alts, KV{Key: strings.TrimSpace(p), Value: "true"})
+		}
 		return Check{
 			Type:         "evidence",
-			Key:          "review_approved",
+			Key:          primary,
 			Value:        "true",
-			Alternatives: []KV{{Key: "merged", Value: "true"}},
+			Alternatives: alts,
 			Message:      message,
 		}
-	default:
-		// Unknown expression — return a check that always fails with a descriptive message.
-		return Check{Type: "evidence", Key: "_unknown_when_expr_" + expr, Value: "true", Message: message}
 	}
+
+	// Bare identifier → evidence key=identifier value=true
+	return Check{Type: "evidence", Key: expr, Value: "true", Message: message}
 }

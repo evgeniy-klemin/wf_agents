@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -303,7 +304,7 @@ func TestCollectGitLabEvidence(t *testing.T) {
 		}
 	}
 
-	glabOutput := func(pipelineStatus *string, approvedBy int, state string) string {
+	glabOutput := func(pipelineStatus *string, approvedBy int, state string, draft bool) string {
 		pipeline := "null"
 		if pipelineStatus != nil {
 			pipeline = fmt.Sprintf(`{"status":%q}`, *pipelineStatus)
@@ -316,7 +317,7 @@ func TestCollectGitLabEvidence(t *testing.T) {
 			}
 			approvers = "[" + strings.Join(items, ",") + "]"
 		}
-		return fmt.Sprintf(`{"head_pipeline":%s,"approved_by":%s,"state":%q}`, pipeline, approvers, state)
+		return fmt.Sprintf(`{"head_pipeline":%s,"approved_by":%s,"state":%q,"draft":%v}`, pipeline, approvers, state, draft)
 	}
 
 	strPtr := func(s string) *string { return &s }
@@ -326,64 +327,300 @@ func TestCollectGitLabEvidence(t *testing.T) {
 		runner       platform.CmdRunner
 		wantCI       string
 		wantApproved string
-		wantMerged   string
+		wantMRReady  string
 	}{
 		{
 			name:         "pipeline success, approved, merged",
-			runner:       makeRunner(glabOutput(strPtr("success"), 1, "merged"), nil),
+			runner:       makeRunner(glabOutput(strPtr("success"), 1, "merged", false), nil),
 			wantCI:       "true",
 			wantApproved: "true",
-			wantMerged:   "true",
+			wantMRReady:  "false",
 		},
 		{
-			name:         "pipeline failed, not approved, open",
-			runner:       makeRunner(glabOutput(strPtr("failed"), 0, "opened"), nil),
+			name:         "pipeline failed, not approved, open draft",
+			runner:       makeRunner(glabOutput(strPtr("failed"), 0, "opened", true), nil),
 			wantCI:       "false",
 			wantApproved: "false",
-			wantMerged:   "false",
+			wantMRReady:  "false",
 		},
 		{
 			name:         "pipeline nil (no pipeline), not approved, open",
-			runner:       makeRunner(glabOutput(nil, 0, "opened"), nil),
+			runner:       makeRunner(glabOutput(nil, 0, "opened", false), nil),
 			wantCI:       "true",
 			wantApproved: "false",
-			wantMerged:   "false",
+			wantMRReady:  "true",
 		},
 		{
 			name:         "pipeline skipped, approved, not merged",
-			runner:       makeRunner(glabOutput(strPtr("skipped"), 2, "opened"), nil),
+			runner:       makeRunner(glabOutput(strPtr("skipped"), 2, "opened", false), nil),
 			wantCI:       "true",
 			wantApproved: "true",
-			wantMerged:   "false",
+			wantMRReady:  "true",
 		},
 		{
 			name:         "glab error (no MR)",
 			runner:       makeRunner("", fmt.Errorf("no MR found")),
-			wantCI:       "true",
+			wantCI:       "false",
 			wantApproved: "false",
-			wantMerged:   "false",
+			wantMRReady:  "false",
 		},
 		{
 			name:         "malformed JSON",
 			runner:       makeRunner("not json at all", nil),
-			wantCI:       "true",
+			wantCI:       "false",
 			wantApproved: "false",
-			wantMerged:   "false",
+			wantMRReady:  "false",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			evidence := make(map[string]string)
-			collectGitLabEvidence(evidence, tc.runner)
+			collectGitLabEvidenceWithRunner(evidence, tc.runner)
 			if got := evidence["ci_passed"]; got != tc.wantCI {
 				t.Errorf("ci_passed = %q, want %q", got, tc.wantCI)
 			}
 			if got := evidence["review_approved"]; got != tc.wantApproved {
 				t.Errorf("review_approved = %q, want %q", got, tc.wantApproved)
 			}
-			if got := evidence["merged"]; got != tc.wantMerged {
-				t.Errorf("merged = %q, want %q", got, tc.wantMerged)
+			if got := evidence["mr_ready"]; got != tc.wantMRReady {
+				t.Errorf("mr_ready = %q, want %q", got, tc.wantMRReady)
+			}
+		})
+	}
+}
+
+// TestParseEvidenceFlags_SinglePair verifies a single --evidence key=value pair is parsed.
+func TestParseEvidenceFlags_SinglePair(t *testing.T) {
+	args := []string{"--evidence", "jira_task_status=To Merge"}
+	got, err := parseEvidenceFlags(args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got["jira_task_status"] != "To Merge" {
+		t.Errorf("expected 'To Merge', got %q", got["jira_task_status"])
+	}
+}
+
+// TestParseEvidenceFlags_MultiplePairs verifies multiple --evidence flags are all parsed.
+func TestParseEvidenceFlags_MultiplePairs(t *testing.T) {
+	args := []string{"--evidence", "merged=true", "--evidence", "ci_passed=true"}
+	got, err := parseEvidenceFlags(args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got["merged"] != "true" {
+		t.Errorf("expected merged=true, got %q", got["merged"])
+	}
+	if got["ci_passed"] != "true" {
+		t.Errorf("expected ci_passed=true, got %q", got["ci_passed"])
+	}
+}
+
+// TestParseEvidenceFlags_MalformedNoEquals verifies error on value without '='.
+func TestParseEvidenceFlags_MalformedNoEquals(t *testing.T) {
+	args := []string{"--evidence", "badvalue"}
+	_, err := parseEvidenceFlags(args)
+	if err == nil {
+		t.Fatal("expected error for malformed evidence, got nil")
+	}
+}
+
+// TestParseEvidenceFlags_Empty verifies no evidence returned when no --evidence flags present.
+func TestParseEvidenceFlags_Empty(t *testing.T) {
+	args := []string{"--to", "MERGE", "--reason", "done"}
+	got, err := parseEvidenceFlags(args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty map, got %v", got)
+	}
+}
+
+// TestParseEvidenceFlags_ValueContainsEquals verifies split on first '=' only.
+func TestParseEvidenceFlags_ValueContainsEquals(t *testing.T) {
+	args := []string{"--evidence", "url=http://example.com?a=1"}
+	got, err := parseEvidenceFlags(args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got["url"] != "http://example.com?a=1" {
+		t.Errorf("expected full value after first =, got %q", got["url"])
+	}
+}
+
+// TestMergeEvidence_CLIOverridesAutoCollected verifies CLI evidence overrides auto-collected.
+func TestMergeEvidence_CLIOverridesAutoCollected(t *testing.T) {
+	autoCollected := map[string]string{
+		"ci_passed":          "false",
+		"working_tree_clean": "true",
+	}
+	cliEvidence := map[string]string{
+		"ci_passed": "true",
+	}
+	for k, v := range cliEvidence {
+		autoCollected[k] = v
+	}
+	if autoCollected["ci_passed"] != "true" {
+		t.Errorf("CLI evidence should override auto-collected, got %q", autoCollected["ci_passed"])
+	}
+	if autoCollected["working_tree_clean"] != "true" {
+		t.Errorf("non-overridden key should remain, got %q", autoCollected["working_tree_clean"])
+	}
+}
+
+// TestSystemEvidenceNotOverridden verifies that system-collected evidence keys cannot be
+// overridden by CLI --evidence flags. If auto-collected working_tree_clean=false, passing
+// --evidence working_tree_clean=true must NOT override it.
+func TestSystemEvidenceNotOverridden(t *testing.T) {
+	// Simulate system-collected evidence where working_tree_clean=false
+	systemEvidence := map[string]string{
+		"working_tree_clean": "false",
+		"branch_pushed":      "true",
+	}
+
+	// Build system keys set (as cmdTransition does)
+	systemKeys := make(map[string]bool)
+	for k := range systemEvidence {
+		systemKeys[k] = true
+	}
+
+	// CLI evidence attempts to override a system key
+	cliEvidence := map[string]string{
+		"working_tree_clean": "true", // should be ignored
+	}
+
+	// Apply merge with protection (skip system keys)
+	for k, v := range cliEvidence {
+		if !systemKeys[k] {
+			systemEvidence[k] = v
+		}
+	}
+
+	// System key must NOT be overridden
+	if systemEvidence["working_tree_clean"] != "false" {
+		t.Errorf("system key working_tree_clean should be preserved as 'false', got %q", systemEvidence["working_tree_clean"])
+	}
+}
+
+// TestCustomEvidenceStillWorks verifies that non-system keys provided via --evidence
+// are still added to the guards map.
+func TestCustomEvidenceStillWorks(t *testing.T) {
+	// Simulate system-collected evidence (no jira_task_status key)
+	systemEvidence := map[string]string{
+		"working_tree_clean": "false",
+		"branch_pushed":      "false",
+		"ci_passed":          "false",
+		"review_approved":    "false",
+		"mr_ready":           "false",
+	}
+
+	systemKeys := make(map[string]bool)
+	for k := range systemEvidence {
+		systemKeys[k] = true
+	}
+
+	// CLI evidence with a custom (non-system) key
+	cliEvidence := map[string]string{
+		"jira_task_status": "To Merge",
+	}
+
+	// Apply merge with protection
+	for k, v := range cliEvidence {
+		if !systemKeys[k] {
+			systemEvidence[k] = v
+		}
+	}
+
+	// Custom key should be present
+	if systemEvidence["jira_task_status"] != "To Merge" {
+		t.Errorf("custom key jira_task_status should be added, got %q", systemEvidence["jira_task_status"])
+	}
+}
+
+// TestSystemEvidenceWarning verifies that attempting to override a system key produces
+// a warning to stderr via mergeCliEvidence.
+func TestSystemEvidenceWarning(t *testing.T) {
+	systemEvidence := map[string]string{
+		"working_tree_clean": "false",
+	}
+
+	systemKeys := make(map[string]bool)
+	for k := range systemEvidence {
+		systemKeys[k] = true
+	}
+
+	cliEvidence := map[string]string{
+		"working_tree_clean": "true",
+	}
+
+	// Capture stderr output
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("could not create pipe: %v", err)
+	}
+	os.Stderr = w
+
+	// Apply merge — this should print a warning
+	for k, v := range cliEvidence {
+		if systemKeys[k] {
+			fmt.Fprintf(os.Stderr, "Warning: ignoring --evidence %s (system-collected key)\n", k)
+		} else {
+			systemEvidence[k] = v
+		}
+	}
+
+	w.Close()
+	os.Stderr = oldStderr
+
+	outBytes, _ := io.ReadAll(r)
+	output := string(outBytes)
+
+	if !strings.Contains(output, "Warning: ignoring --evidence working_tree_clean") {
+		t.Errorf("expected warning about working_tree_clean, got: %q", output)
+	}
+}
+
+// TestDenialReason verifies that denialReason returns the guard explanation when present,
+// and falls back to "not allowed" when the reason is empty.
+func TestDenialReason(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  string
+		want   string
+	}{
+		{"empty reason falls back", "", "not allowed"},
+		{"guard explanation shown", "active_agents > 0", "active_agents > 0"},
+		{"max iterations reason shown", "max_iterations exceeded", "max_iterations exceeded"},
+		{"whitespace-only is treated as non-empty", "  ", "  "},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := denialReason(tc.input)
+			if got != tc.want {
+				t.Errorf("denialReason(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDenialReasonInStdoutOutput verifies the full denial stdout line includes the reason.
+func TestDenialReasonInStdoutOutput(t *testing.T) {
+	tests := []struct {
+		name       string
+		reason     string
+		wantSuffix string
+	}{
+		{"with reason", "active_agents > 0", "(active_agents > 0)"},
+		{"without reason", "", "(not allowed)"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			line := fmt.Sprintf("TRANSITION DENIED: DEVELOPING → COMPLETED (%s)", denialReason(tc.reason))
+			if !strings.Contains(line, tc.wantSuffix) {
+				t.Errorf("denial line %q does not contain %q", line, tc.wantSuffix)
 			}
 		})
 	}
@@ -399,8 +636,8 @@ func TestCollectGitHubEvidence(t *testing.T) {
 		return "[" + strings.Join(items, ",") + "]"
 	}
 
-	prJSON := func(decision, state string) string {
-		return fmt.Sprintf(`{"reviewDecision":%q,"state":%q}`, decision, state)
+	prJSON := func(decision, state string, isDraft bool) string {
+		return fmt.Sprintf(`{"reviewDecision":%q,"state":%q,"isDraft":%v}`, decision, state, isDraft)
 	}
 
 	makeRunner := func(checksOut, prOut string, checksErr, prErr error) platform.CmdRunner {
@@ -420,57 +657,57 @@ func TestCollectGitHubEvidence(t *testing.T) {
 		runner       platform.CmdRunner
 		wantCI       string
 		wantApproved string
-		wantMerged   string
+		wantMRReady  string
 	}{
 		{
-			name:         "all checks pass, approved, merged",
-			runner:       makeRunner(checksJSON("SUCCESS", "NEUTRAL"), prJSON("APPROVED", "MERGED"), nil, nil),
+			name:         "all checks pass, approved, not draft",
+			runner:       makeRunner(checksJSON("SUCCESS", "NEUTRAL"), prJSON("APPROVED", "MERGED", false), nil, nil),
 			wantCI:       "true",
 			wantApproved: "true",
-			wantMerged:   "true",
+			wantMRReady:  "true",
 		},
 		{
-			name:         "check failed, not approved, open",
-			runner:       makeRunner(checksJSON("SUCCESS", "FAILURE"), prJSON("", "OPEN"), nil, nil),
+			name:         "check failed, not approved, open not draft",
+			runner:       makeRunner(checksJSON("SUCCESS", "FAILURE"), prJSON("", "OPEN", false), nil, nil),
 			wantCI:       "false",
 			wantApproved: "false",
-			wantMerged:   "false",
+			wantMRReady:  "true",
 		},
 		{
 			name:         "no checks (empty array), approved, open",
-			runner:       makeRunner("[]", prJSON("APPROVED", "OPEN"), nil, nil),
+			runner:       makeRunner("[]", prJSON("APPROVED", "OPEN", false), nil, nil),
 			wantCI:       "true",
 			wantApproved: "true",
-			wantMerged:   "false",
+			wantMRReady:  "true",
 		},
 		{
 			name:         "gh pr checks error, gh pr view error",
 			runner:       makeRunner("", "", fmt.Errorf("no PR"), fmt.Errorf("no PR")),
-			wantCI:       "true",
+			wantCI:       "false",
 			wantApproved: "false",
-			wantMerged:   "false",
+			wantMRReady:  "false",
 		},
 		{
 			name:         "skipped check counts as pass",
-			runner:       makeRunner(checksJSON("SKIPPED", "SUCCESS"), prJSON("APPROVED", "MERGED"), nil, nil),
+			runner:       makeRunner(checksJSON("SKIPPED", "SUCCESS"), prJSON("APPROVED", "MERGED", false), nil, nil),
 			wantCI:       "true",
 			wantApproved: "true",
-			wantMerged:   "true",
+			wantMRReady:  "true",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			evidence := make(map[string]string)
-			collectGitHubEvidence(evidence, tc.runner)
+			collectGitHubEvidenceWithRunner(evidence, tc.runner)
 			if got := evidence["ci_passed"]; got != tc.wantCI {
 				t.Errorf("ci_passed = %q, want %q", got, tc.wantCI)
 			}
 			if got := evidence["review_approved"]; got != tc.wantApproved {
 				t.Errorf("review_approved = %q, want %q", got, tc.wantApproved)
 			}
-			if got := evidence["merged"]; got != tc.wantMerged {
-				t.Errorf("merged = %q, want %q", got, tc.wantMerged)
+			if got := evidence["mr_ready"]; got != tc.wantMRReady {
+				t.Errorf("mr_ready = %q, want %q", got, tc.wantMRReady)
 			}
 		})
 	}

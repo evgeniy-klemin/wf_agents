@@ -11,7 +11,7 @@ import (
 // The no-op logger exists solely to suppress the "No logger configured" warning from
 // the Temporal client; its methods must be callable without panicking.
 func TestNew(t *testing.T) {
-	var _ log.Logger = noplog.New()
+	var _ log.Logger = noplog.New() //nolint:staticcheck
 }
 
 func TestNoplogMethodsDoNotPanic(t *testing.T) {

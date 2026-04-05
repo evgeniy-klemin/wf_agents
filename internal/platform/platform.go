@@ -20,6 +20,17 @@ func RunCmd(timeout time.Duration, name string, args ...string) (string, error) 
 	return string(out), err
 }
 
+// RunCmdInDir runs an external command with the given timeout in the specified
+// directory and returns combined output. Used for tools that don't support -C.
+func RunCmdInDir(timeout time.Duration, dir string, name string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
 // ParsePlatformFromURL detects the git hosting platform from a remote URL.
 func ParsePlatformFromURL(remoteURL string) string {
 	if strings.Contains(remoteURL, "github.com") {
@@ -41,6 +52,51 @@ func ParsePlatformFromURL(remoteURL string) string {
 		return "gitlab"
 	}
 	return "unknown"
+}
+
+// GitRemoteToWebURL converts a git remote URL to a browsable HTTPS URL.
+// Handles both SSH (git@host:org/repo.git) and HTTPS (https://host/org/repo.git) forms.
+// Returns empty string if input is empty or unparseable.
+func GitRemoteToWebURL(remoteURL string) string {
+	if remoteURL == "" {
+		return ""
+	}
+	u := strings.TrimSpace(remoteURL)
+	u = strings.TrimSuffix(u, ".git")
+
+	// SSH form: git@host:path
+	if !strings.Contains(u, "://") {
+		if idx := strings.Index(u, "@"); idx >= 0 {
+			u = u[idx+1:]
+		} else {
+			return ""
+		}
+		colonIdx := strings.Index(u, ":")
+		if colonIdx < 0 {
+			return ""
+		}
+		host := u[:colonIdx]
+		path := u[colonIdx+1:]
+		return "https://" + host + "/" + path
+	}
+
+	// HTTPS form: already has scheme
+	return u
+}
+
+// ProjectNameFromURL extracts the last path segment (repo name) from a git remote URL,
+// stripping the .git suffix. Returns empty string if input is empty.
+func ProjectNameFromURL(remoteURL string) string {
+	if remoteURL == "" {
+		return ""
+	}
+	u := strings.TrimSpace(remoteURL)
+	u = strings.TrimSuffix(u, ".git")
+	// Get last segment after "/" or ":"
+	if idx := strings.LastIndexAny(u, "/:"); idx >= 0 {
+		return u[idx+1:]
+	}
+	return u
 }
 
 // DetectPlatform determines the git hosting platform of the current repo.

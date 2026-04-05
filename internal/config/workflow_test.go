@@ -242,17 +242,12 @@ func TestValidateWorkflowConfig_UnreachablePhase(t *testing.T) {
 }
 
 func TestValidateWorkflowConfig_UnknownWhenVariable(t *testing.T) {
+	// Custom bare identifiers are now valid evidence keys — no "unknown variable" error.
+	// A missing message is still an error when 'when' is set.
 	cfg := makeValidConfig()
-	cfg.Transitions["A"] = []TransitionConfig{{To: "B", When: "unknown_var"}}
+	cfg.Transitions["A"] = []TransitionConfig{{To: "B", When: "custom_var", Message: "msg"}}
 	errs := ValidateWorkflowConfig(cfg)
-	require.NotEmpty(t, errs)
-	hasErr := false
-	for _, e := range errs {
-		if containsStr(e.Error(), "unknown_var") || containsStr(e.Error(), "unknown") {
-			hasErr = true
-		}
-	}
-	assert.True(t, hasErr, "expected error about unknown when variable")
+	assert.Empty(t, errs, "custom bare identifier with message should produce no errors")
 }
 
 func TestValidateWorkflowConfig_EmptyMessageWithWhen(t *testing.T) {
@@ -272,7 +267,7 @@ func TestValidateWorkflowConfig_EmptyMessageWithWhen(t *testing.T) {
 func TestValidateWorkflowConfig_KnownWhenVariablesPasses(t *testing.T) {
 	knownVars := []string{
 		"working_tree_clean", "ci_passed", "review_approved",
-		"merged", "active_agents", "iteration", "max_iterations",
+		"mr_ready", "active_agents", "iteration", "max_iterations",
 	}
 	for _, v := range knownVars {
 		cfg := makeValidConfig()
@@ -417,14 +412,14 @@ func TestParseWhenExpression_BranchPushed(t *testing.T) {
 	assert.Equal(t, "branch not pushed to remote", checks[0].Message)
 }
 
-func TestParseWhenExpression_ReviewApprovedOrMerged(t *testing.T) {
-	checks := ParseWhenExpression("review_approved or merged", "not approved")
+func TestParseWhenExpression_ReviewApprovedOrMRReady(t *testing.T) {
+	checks := ParseWhenExpression("review_approved or mr_ready", "not approved")
 	require.Len(t, checks, 1)
 	assert.Equal(t, "evidence", checks[0].Type)
 	assert.Equal(t, "review_approved", checks[0].Key)
 	assert.Equal(t, "true", checks[0].Value)
 	require.Len(t, checks[0].Alternatives, 1)
-	assert.Equal(t, "merged", checks[0].Alternatives[0].Key)
+	assert.Equal(t, "mr_ready", checks[0].Alternatives[0].Key)
 	assert.Equal(t, "true", checks[0].Alternatives[0].Value)
 }
 
@@ -434,6 +429,82 @@ func TestParseWhenExpression_AndExpression(t *testing.T) {
 	assert.Equal(t, "evidence", checks[0].Type)
 	assert.Equal(t, "working_tree_clean", checks[0].Key)
 	assert.Equal(t, "max_iterations", checks[1].Type)
+}
+
+func TestParseWhenExpression_BareIdentifier(t *testing.T) {
+	checks := ParseWhenExpression("review_approved", "not approved")
+	require.Len(t, checks, 1)
+	assert.Equal(t, "evidence", checks[0].Type)
+	assert.Equal(t, "review_approved", checks[0].Key)
+	assert.Equal(t, "true", checks[0].Value)
+}
+
+func TestParseWhenExpression_BareIdentifierMRReady(t *testing.T) {
+	checks := ParseWhenExpression("mr_ready", "not ready")
+	require.Len(t, checks, 1)
+	assert.Equal(t, "evidence", checks[0].Type)
+	assert.Equal(t, "mr_ready", checks[0].Key)
+	assert.Equal(t, "true", checks[0].Value)
+}
+
+func TestParseWhenExpression_KeyEqQuotedValue(t *testing.T) {
+	checks := ParseWhenExpression(`jira_task_status == "To Merge"`, "jira status not To Merge")
+	require.Len(t, checks, 1)
+	assert.Equal(t, "evidence", checks[0].Type)
+	assert.Equal(t, "jira_task_status", checks[0].Key)
+	assert.Equal(t, "To Merge", checks[0].Value)
+}
+
+func TestParseWhenExpression_MergedAndCIPassed(t *testing.T) {
+	checks := ParseWhenExpression("mr_ready and ci_passed", "mr ready and CI not passed")
+	require.Len(t, checks, 2)
+	assert.Equal(t, "evidence", checks[0].Type)
+	assert.Equal(t, "mr_ready", checks[0].Key)
+	assert.Equal(t, "true", checks[0].Value)
+	assert.Equal(t, "evidence", checks[1].Type)
+	assert.Equal(t, "ci_passed", checks[1].Key)
+	assert.Equal(t, "true", checks[1].Value)
+}
+
+func TestParseWhenExpression_NotCIPassed(t *testing.T) {
+	checks := ParseWhenExpression("not ci_passed", "CI passed")
+	require.Len(t, checks, 1)
+	assert.Equal(t, "evidence", checks[0].Type)
+	assert.Equal(t, "ci_passed", checks[0].Key)
+	assert.Equal(t, "false", checks[0].Value)
+}
+
+func TestParseWhenExpression_OrExpression(t *testing.T) {
+	checks := ParseWhenExpression("review_approved or mr_ready", "not approved or ready")
+	require.Len(t, checks, 1)
+	assert.Equal(t, "evidence", checks[0].Type)
+	assert.Equal(t, "review_approved", checks[0].Key)
+	assert.Equal(t, "true", checks[0].Value)
+	require.Len(t, checks[0].Alternatives, 1)
+	assert.Equal(t, "mr_ready", checks[0].Alternatives[0].Key)
+	assert.Equal(t, "true", checks[0].Alternatives[0].Value)
+}
+
+func TestParseWhenExpression_CustomBareIdentifier(t *testing.T) {
+	checks := ParseWhenExpression("deploy_done", "not deployed")
+	require.Len(t, checks, 1)
+	assert.Equal(t, "evidence", checks[0].Type)
+	assert.Equal(t, "deploy_done", checks[0].Key)
+	assert.Equal(t, "true", checks[0].Value)
+}
+
+func TestValidateWorkflowConfig_CustomWhenVarPasses(t *testing.T) {
+	cfg := makeValidConfig()
+	cfg.Transitions["A"] = []TransitionConfig{{To: "B", When: "deploy_done", Message: "not deployed"}}
+	errs := ValidateWorkflowConfig(cfg)
+	assert.Empty(t, errs, "custom bare identifier should not produce validation errors")
+}
+
+func TestValidateWorkflowConfig_QuotedStringInWhenPasses(t *testing.T) {
+	cfg := makeValidConfig()
+	cfg.Transitions["A"] = []TransitionConfig{{To: "B", When: `jira_task_status == "To Merge"`, Message: "jira status wrong"}}
+	errs := ValidateWorkflowConfig(cfg)
+	assert.Empty(t, errs, "quoted value in when expression should not flag as unknown")
 }
 
 func TestParseWhenExpression_AllDefaultTransitions(t *testing.T) {
@@ -451,6 +522,55 @@ func TestParseWhenExpression_AllDefaultTransitions(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestIsTeammate(t *testing.T) {
+	cfg := &Config{
+		Phases: &PhasesConfig{
+			Defaults: PhaseDefaults{
+				Permissions: DefaultPermissions{
+					Teammate: []AgentPermission{
+						{Agent: "developer*", FileWrites: "deny"},
+					},
+				},
+			},
+			Phases: map[string]PhaseConfig{
+				"REVIEWING": {
+					Permissions: PhasePermissions{
+						Teammate: []AgentPermission{
+							{Agent: "reviewer*", FileWrites: "deny"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// Matches default teammate glob
+	assert.True(t, cfg.IsTeammate("developer"), "developer should match developer*")
+	assert.True(t, cfg.IsTeammate("developer-1"), "developer-1 should match developer*")
+
+	// Matches per-phase teammate glob
+	assert.True(t, cfg.IsTeammate("reviewer"), "reviewer should match reviewer*")
+	assert.True(t, cfg.IsTeammate("reviewer-2"), "reviewer-2 should match reviewer*")
+
+	// Does not match any pattern
+	assert.False(t, cfg.IsTeammate("lead"), "lead should not match any teammate pattern")
+	assert.False(t, cfg.IsTeammate("unknown-agent"), "unknown-agent should not match")
+
+	// Nil phases
+	nilCfg := &Config{}
+	assert.False(t, nilCfg.IsTeammate("developer"), "nil Phases should return false")
+}
+
+func TestIsTeammate_DefaultConfig(t *testing.T) {
+	cfg, err := DefaultConfig()
+	require.NoError(t, err)
+
+	assert.True(t, cfg.IsTeammate("developer"), "developer should match developer* in default config")
+	assert.True(t, cfg.IsTeammate("developer-abc"), "developer-abc should match developer* in default config")
+	assert.False(t, cfg.IsTeammate("lead"), "lead should not be a teammate")
+	assert.True(t, cfg.IsTeammate("reviewer"), "reviewer should match reviewer* in default config")
 }
 
 // containsStr is a helper to check if a string contains a substring.

@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/eklemin/wf-agents/internal/config"
 	"github.com/eklemin/wf-agents/internal/model"
 	"github.com/eklemin/wf-agents/internal/noplog"
+	"github.com/eklemin/wf-agents/internal/phasedocs"
 	"github.com/eklemin/wf-agents/internal/session"
 	internaltemporal "github.com/eklemin/wf-agents/internal/temporal"
 	wf "github.com/eklemin/wf-agents/internal/workflow"
@@ -75,9 +77,9 @@ func logResponse(sessionID string, event string, exitCode int, response interfac
 	line, _ := json.Marshal(entry)
 	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err == nil {
-		f.Write(line)
-		f.Write([]byte("\n"))
-		f.Close()
+		_, _ = f.Write(line)
+		_, _ = f.Write([]byte("\n"))
+		_ = f.Close()
 	}
 }
 
@@ -96,6 +98,13 @@ func main() {
 		log.Fatalf("Failed to parse hook input: %v", err)
 	}
 
+	// Load project-level config overrides so guardConfig reflects preset + project permissions.
+	if input.CWD != "" {
+		if err := wf.InitGuardConfig(input.CWD); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to load project guard config from %s: %v\n", input.CWD, err)
+		}
+	}
+
 	// Append to session log file (JSONL format — one JSON object per line)
 	logDir := filepath.Join(os.TempDir(), "wf-agents-hook-logs")
 	_ = os.MkdirAll(logDir, 0755)
@@ -111,9 +120,9 @@ func main() {
 	logLine, _ := json.Marshal(logEntry)
 	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err == nil {
-		f.Write(logLine)
-		f.Write([]byte("\n"))
-		f.Close()
+		_, _ = f.Write(logLine)
+		_, _ = f.Write([]byte("\n"))
+		_ = f.Close()
 	}
 
 	// Capture any fields not in our struct
@@ -150,6 +159,10 @@ func main() {
 	// Detect teammate sessions: their session_id differs from the workflow's.
 	// Set a synthetic agent_id so IsTeammate() returns true and teammates get auto-approve.
 	workflowSessionID := strings.TrimPrefix(workflowID, "coding-session-")
+	if input.SessionID == workflowSessionID {
+		// Lead session: patch marker CWD if it was recorded as repo root but we're in a worktree.
+		session.UpdateMarkerCWD(input.SessionID, input.CWD)
+	}
 	if input.SessionID != workflowSessionID {
 		if input.AgentID == "" {
 			input.AgentID = "teammate-" + input.SessionID
@@ -180,7 +193,11 @@ func main() {
 
 	switch input.HookEventName {
 	case "PreToolUse":
-		status := queryStatus(ctx, c, workflowID)
+		status, err := queryStatus(ctx, c, workflowID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
+			os.Exit(0)
+		}
 		phase := status.Phase
 
 		// Per-agent command tracking: run before permission check so that tracking
@@ -198,6 +215,37 @@ func main() {
 		if agentName == "" {
 			agentName = input.AgentID
 		}
+
+		// Guard: deny git push to main/master in all phases.
+		if input.ToolName == "Bash" {
+			var bashInput struct {
+				Command string `json:"command"`
+			}
+			if err := json.Unmarshal(input.ToolInput, &bashInput); err == nil {
+				for _, seg := range wf.SplitBashCommandsExported(strings.TrimSpace(bashInput.Command)) {
+					seg = strings.TrimSpace(seg)
+					if strings.HasPrefix(seg, "git ") && isPushToProtectedBranch(seg, input.CWD) {
+						const reason = "Direct push to main/master is not allowed. Create a feature branch first."
+						detail["denied"] = "true"
+						detail["reason"] = reason
+						sendHookEvent(ctx, c, workflowID, model.SignalHookEvent{
+							HookType:  "PreToolUse",
+							SessionID: input.SessionID,
+							Tool:      input.ToolName,
+							Detail:    detail,
+						})
+						fmt.Fprintf(os.Stderr, "DENIED: %s\n", reason)
+						_, _ = fmt.Fprintf(os.Stdout, "%s\n", reason)
+						logResponse(input.SessionID, "PreToolUse", 2, map[string]string{
+							"decision": "deny",
+							"reason":   reason,
+						})
+						os.Exit(2)
+					}
+				}
+			}
+		}
+
 		decision := wf.CheckToolPermission(phase, input.ToolName, input.ToolInput, agentName, status.ActiveAgents)
 
 		if decision.Denied {
@@ -215,7 +263,7 @@ func main() {
 			// Exit code 2 signals a denial to Claude Code.
 			// Write reason to stderr (logged) and stdout (shown to Claude).
 			fmt.Fprintf(os.Stderr, "DENIED: %s\n", decision.Reason)
-			fmt.Fprintf(os.Stdout, "%s\n", decision.Reason)
+			_, _ = fmt.Fprintf(os.Stdout, "%s\n", decision.Reason)
 			logResponse(input.SessionID, "PreToolUse", 2, map[string]string{
 				"decision": "deny",
 				"reason":   decision.Reason,
@@ -231,21 +279,23 @@ func main() {
 				Tool:      input.ToolName,
 				Detail:    detail,
 			})
-			currentStatus := queryStatus(ctx, c, workflowID)
-			currentPhase := currentStatus.Phase
-			instructions := phaseInstructions(currentPhase, input.CWD)
+			preamble, err := phasedocs.Preamble(phase, input.CWD, wf.IsTeammate(agentName))
+			if err != nil {
+				log.Printf("phasedocs.Preamble error: %v", err)
+				os.Exit(1)
+			}
 			out := hookOutput{
 				HookSpecificOutput: &hookSpecificOutput{
 					HookEventName:            "PreToolUse",
 					PermissionDecision:       "allow",
 					PermissionDecisionReason: "Safe command auto-approved by workflow",
-					AdditionalContext:        fmt.Sprintf("[Workflow Phase: %s] %s", currentPhase, instructions),
+					AdditionalContext:        fmt.Sprintf("[Workflow Phase: %s] %s", phase, preamble),
 				},
 			}
-			json.NewEncoder(os.Stdout).Encode(out)
+			_ = json.NewEncoder(os.Stdout).Encode(out)
 			logResponse(input.SessionID, "PreToolUse", 0, map[string]string{
 				"decision": "allow",
-				"phase":    string(currentPhase),
+				"phase":    string(phase),
 			})
 			os.Exit(0)
 		}
@@ -257,22 +307,23 @@ func main() {
 			Tool:      input.ToolName,
 			Detail:    detail,
 		})
-		// Re-query status after possible auto-transition (e.g., AskUserQuestion → BLOCKED)
-		currentStatus := queryStatus(ctx, c, workflowID)
-		currentPhase := currentStatus.Phase
-		instructions := phaseInstructions(currentPhase, input.CWD)
-		if instructions != "" {
+		preamble, err := phasedocs.Preamble(phase, input.CWD, wf.IsTeammate(agentName))
+		if err != nil {
+			log.Printf("phasedocs.Preamble error: %v", err)
+			os.Exit(1)
+		}
+		if preamble != "" {
 			out := hookOutput{
 				HookSpecificOutput: &hookSpecificOutput{
 					HookEventName:     "PreToolUse",
-					AdditionalContext: fmt.Sprintf("[Workflow Phase: %s] %s", currentPhase, instructions),
+					AdditionalContext: fmt.Sprintf("[Workflow Phase: %s] %s", phase, preamble),
 				},
 			}
-			json.NewEncoder(os.Stdout).Encode(out)
+			_ = json.NewEncoder(os.Stdout).Encode(out)
 		}
 		logResponse(input.SessionID, "PreToolUse", 0, map[string]string{
 			"decision": "pass",
-			"phase":    string(currentPhase),
+			"phase":    string(phase),
 		})
 
 	case "PostToolUse":
@@ -331,7 +382,12 @@ func main() {
 		// Determine who is idle and enforce appropriate constraints.
 		// If teammate_name is non-empty (or agent_id is non-empty), this is a teammate going idle.
 		// If both are empty, assume it is the Team Lead.
-		phase := queryPhase(ctx, c, workflowID)
+		status, err := queryStatus(ctx, c, workflowID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
+			break
+		}
+		phase := status.Phase
 		isTeammate := input.TeammateName != "" || input.AgentID != ""
 
 		if !isTeammate {
@@ -354,7 +410,7 @@ func main() {
 			if !commandsRan["_file_changed"] {
 				break
 			}
-			if reason := evalTeammateIdleConfig(input.CWD, string(phase), agentName, commandsRan); reason != "" {
+			if reason := evalTeammateIdleConfig(input.CWD, string(phase), agentName, commandsRan, status.MRUrl); reason != "" {
 				fmt.Fprintf(os.Stderr, "%s\n", reason)
 				logResponse(input.SessionID, "TeammateIdle", 2, map[string]string{
 					"action": "keep_working",
@@ -374,7 +430,11 @@ func main() {
 		// Deny Stop from Team Lead if config says so for this phase.
 		isTeammate := input.TeammateName != "" || input.AgentID != ""
 		if !isTeammate {
-			phase := queryPhase(ctx, c, workflowID)
+			phase, err := queryPhase(ctx, c, workflowID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
+				break
+			}
 			if msg := evalLeadStopConfig(input.CWD, string(phase)); msg != "" {
 				reason := fmt.Sprintf("DENIED: %s", msg)
 				fmt.Fprintf(os.Stderr, "%s\n", reason)
@@ -394,8 +454,41 @@ func main() {
 			SessionID: input.SessionID,
 			Detail:    detail,
 		})
+		// Sync preset agents to ~/.claude/agents/ if preset defines agents/
+		syncPresetAgents(input.CWD)
 		// Inject session context so Claude knows its workflow ID and wf-client path
 		wfClientPath := wfClientBin()
+		var startCritical string
+		cfg, cfgErr := config.LoadConfig(input.CWD)
+		if cfgErr != nil {
+			startCritical = "workflow config not found (searched: project .wf-agents/workflow.yaml, preset if configured, plugin default)"
+		} else if cfg.Phases == nil || cfg.Phases.Start == "" {
+			startCritical = "phases.start not configured in workflow config"
+		}
+		if startCritical != "" {
+			out := hookOutput{
+				Continue: boolPtr(false),
+				HookSpecificOutput: &hookSpecificOutput{
+					HookEventName:     "SessionStart",
+					AdditionalContext: fmt.Sprintf("CRITICAL: %s\nSession cannot start. Fix the plugin configuration and retry.", startCritical),
+				},
+			}
+			_ = json.NewEncoder(os.Stdout).Encode(out)
+			return
+		}
+		startingPhase := model.Phase(cfg.Phases.Start)
+		startingInstructions, err := phasedocs.FullInstructions(startingPhase, input.CWD, false)
+		if err != nil {
+			out := hookOutput{
+				Continue: boolPtr(false),
+				HookSpecificOutput: &hookSpecificOutput{
+					HookEventName:     "SessionStart",
+					AdditionalContext: fmt.Sprintf("CRITICAL: %v\nSession cannot start without phase instructions. Fix the plugin configuration and retry.", err),
+				},
+			}
+			_ = json.NewEncoder(os.Stdout).Encode(out)
+			return
+		}
 		out := hookOutput{
 			Continue: boolPtr(true),
 			HookSpecificOutput: &hookSpecificOutput{
@@ -405,13 +498,13 @@ func main() {
 						"Session ID: %s\n"+
 						"Workflow ID: %s\n"+
 						"wf-client path: %s\n"+
-						"Current phase: PLANNING.\n"+
-						"To transition phases: %s transition %s --to <PHASE> --reason \"<why>\"\n"+
-						"Read CLAUDE.md for your full autonomous workflow protocol. You are the Team Lead.",
-					input.SessionID, workflowID, wfClientPath, wfClientPath, workflowID),
+						"Current phase: %s.\n"+
+						"To transition phases: %s transition %s --to <PHASE> --reason \"<why>\"\n\n"+
+						"%s",
+					input.SessionID, workflowID, wfClientPath, startingPhase, wfClientPath, workflowID, startingInstructions),
 			},
 		}
-		json.NewEncoder(os.Stdout).Encode(out)
+		_ = json.NewEncoder(os.Stdout).Encode(out)
 		logResponse(input.SessionID, "SessionStart", 0, map[string]string{
 			"action":      "context_injected",
 			"workflow_id": workflowID,
@@ -461,84 +554,18 @@ func main() {
 }
 
 // queryPhase fetches current workflow phase via Temporal query.
-func queryPhase(ctx context.Context, c client.Client, workflowID string) model.Phase {
+func queryPhase(ctx context.Context, c client.Client, workflowID string) (model.Phase, error) {
 	resp, err := c.QueryWorkflow(ctx, workflowID, "", wf.QueryPhase)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: cannot query phase for %s: %v\n", workflowID, err)
-		return model.PhasePlanning // default
+		return "", fmt.Errorf("cannot query phase for %s: %w", workflowID, err)
 	}
 	var phase model.Phase
 	if err := resp.Get(&phase); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: cannot decode phase: %v\n", err)
-		return model.PhasePlanning
+		return "", fmt.Errorf("cannot decode phase: %w", err)
 	}
-	return phase
+	return phase, nil
 }
 
-// phaseInstructions returns comprehensive enforcement instructions for the current phase.
-// Injected as additionalContext on every PreToolUse — this is the PRIMARY mechanism
-// that keeps Claude on track (since plugin CLAUDE.md is project docs, not workflow rules).
-// Content is loaded from workflow/<PHASE>.md under CLAUDE_PLUGIN_ROOT, with a project-level
-// override checked first at <cwd>/.wf-agents/<PHASE>.md. Placeholders
-// ({{WF_CLIENT}}, {{PLUGIN_ROOT}}, {{AGENT_FILE}}) are substituted.
-// The .md filename defaults to PHASE.md (uppercase); it is no longer read from config.
-func phaseInstructions(phase model.Phase, cwd string) string {
-	wfc := wfClientBin()
-
-	pluginRoot := os.Getenv("CLAUDE_PLUGIN_ROOT")
-	if pluginRoot == "" {
-		pluginRoot = "${CLAUDE_PLUGIN_ROOT}"
-	}
-	agentFile := pluginRoot + "/agents/iriski-team-lead.md"
-
-	// Preamble for Team Lead phases — where the main agent is acting
-	teamLeadPreamble := "You are the Team Lead. You NEVER write code or review code. You plan, delegate, and coordinate.\n" +
-		"If a tool call is denied, DO NOT retry — follow the denial reason.\n" +
-		"CONTEXT RECOVERY: If context was compressed or you lost your role instructions, " +
-		"re-read your full protocol: " + agentFile + "\n\n"
-
-	// Enforcement-only preamble for phases where teammates act
-	enforcementPreamble := "If a tool call is denied, DO NOT retry — follow the denial reason.\n\n"
-
-	// Phases where teammates act (not the Team Lead).
-	teammatePhases := map[model.Phase]bool{
-		model.PhaseDeveloping: true,
-		model.PhaseReviewing:  true,
-	}
-
-	preamble := teamLeadPreamble
-	if teammatePhases[phase] {
-		preamble = enforcementPreamble
-	}
-
-	// Filename is PHASE.md (uppercase). No longer read from config.
-	filename := string(phase) + ".md"
-
-	// Check for project-level override first: <cwd>/.wf-agents/<PHASE>.md
-	var raw []byte
-	var err error
-	if cwd != "" {
-		projectFile := filepath.Join(cwd, ".wf-agents", filename)
-		raw, err = os.ReadFile(projectFile)
-	}
-
-	// Fall back to plugin's workflow/ directory
-	if err != nil || len(raw) == 0 {
-		stateFile := filepath.Join(pluginRoot, "workflow", filename)
-		raw, err = os.ReadFile(stateFile)
-		if err != nil {
-			return fmt.Sprintf("PHASE: %s", phase)
-		}
-	}
-
-	content := strings.NewReplacer(
-		"{{WF_CLIENT}}", wfc,
-		"{{PLUGIN_ROOT}}", pluginRoot,
-		"{{AGENT_FILE}}", agentFile,
-	).Replace(string(raw))
-
-	return preamble + content
-}
 
 func resolveWorkflowID(sessionID, cwd string) string {
 	return session.ResolveWorkflowIDByCWD(sessionID, cwd)
@@ -585,18 +612,16 @@ func buildDetail(input claudeHookInput) map[string]string {
 }
 
 // queryStatus fetches full workflow status (phase + pre_blocked_phase) via Temporal query.
-func queryStatus(ctx context.Context, c client.Client, workflowID string) model.WorkflowStatus {
+func queryStatus(ctx context.Context, c client.Client, workflowID string) (model.WorkflowStatus, error) {
 	resp, err := c.QueryWorkflow(ctx, workflowID, "", wf.QueryStatus)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: cannot query status for %s: %v\n", workflowID, err)
-		return model.WorkflowStatus{Phase: model.PhasePlanning}
+		return model.WorkflowStatus{}, fmt.Errorf("cannot query status for %s: %w", workflowID, err)
 	}
 	var status model.WorkflowStatus
 	if err := resp.Get(&status); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: cannot decode status: %v\n", err)
-		return model.WorkflowStatus{Phase: model.PhasePlanning}
+		return model.WorkflowStatus{}, fmt.Errorf("cannot decode status: %w", err)
 	}
-	return status
+	return status, nil
 }
 
 func setTask(ctx context.Context, c client.Client, workflowID string, task string) {
@@ -633,6 +658,7 @@ func temporalHost() string {
 // idleCheckContext implements config.CheckContext for teammate idle evaluation.
 type idleCheckContext struct {
 	commandsRan map[string]bool
+	mrUrl       string
 }
 
 func (c *idleCheckContext) Evidence() map[string]string  { return nil }
@@ -641,6 +667,7 @@ func (c *idleCheckContext) Iteration() int               { return 0 }
 func (c *idleCheckContext) MaxIterations() int           { return 0 }
 func (c *idleCheckContext) OriginPhase() string          { return "" }
 func (c *idleCheckContext) CommandsRan() map[string]bool { return c.commandsRan }
+func (c *idleCheckContext) MrUrl() string                { return c.mrUrl }
 
 // queryAgentCommands fetches the command tracking state for a specific agent via Temporal query.
 func queryAgentCommands(ctx context.Context, c client.Client, workflowID, agentName string) map[string]bool {
@@ -696,22 +723,13 @@ func trackPreToolUse(ctx context.Context, c workflowSignaler, workflowID string,
 	// File-change tool: invalidate categories that have invalidate_on_file_change=true
 	// and record _file_changed so idle checks know the agent has started making changes.
 	if config.IsFileChangeTool(input.ToolName) {
-		var toInvalidate []string
-		for catName, cat := range cfg.Tracking {
-			if cat.ShouldInvalidateOnFileChange() {
-				toInvalidate = append(toInvalidate, catName)
-			}
-		}
-		if len(toInvalidate) > 0 {
-			err := c.SignalWorkflow(ctx, workflowID, "", wf.SignalInvalidateCommands, model.SignalInvalidateCommands{
-				SessionID:  input.SessionID,
-				AgentName:  agentName,
-				Categories: toInvalidate,
-				Tool:       input.ToolName,
-			})
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to send invalidate-commands signal: %v\n", err)
-			}
+		err := c.SignalWorkflow(ctx, workflowID, "", wf.SignalInvalidateCommands, model.SignalInvalidateCommands{
+			SessionID: input.SessionID,
+			AgentName: agentName,
+			Tool:      input.ToolName,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to send invalidate-commands signal: %v\n", err)
 		}
 		// Record that this agent has made at least one file change.
 		_ = c.SignalWorkflow(ctx, workflowID, "", wf.SignalCommandRan, model.SignalCommandRan{
@@ -812,7 +830,7 @@ func matchesBashPatternPrefix(cmd, pattern string) bool {
 // evalTeammateIdleConfig loads the project config (with optional .wf-agents/workflow.yaml override),
 // finds the idle rule matching the current phase, and evaluates its checks.
 // Returns a non-empty denial reason if the teammate should not idle, or "" if idle is allowed.
-func evalTeammateIdleConfig(projectDir, phase, teammateName string, commandsRan map[string]bool) string {
+func evalTeammateIdleConfig(projectDir, phase, teammateName string, commandsRan map[string]bool, mrUrl string) string {
 	cfg, err := config.LoadConfig(projectDir)
 	if err != nil {
 		// Config load failure: log but allow idle to avoid blocking teammates unexpectedly.
@@ -823,8 +841,124 @@ func evalTeammateIdleConfig(projectDir, phase, teammateName string, commandsRan 
 	if rule == nil {
 		return ""
 	}
-	ctx := &idleCheckContext{commandsRan: commandsRan}
+	ctx := &idleCheckContext{commandsRan: commandsRan, mrUrl: mrUrl}
 	return config.EvalChecks(rule.Checks, ctx)
+}
+
+// syncPresetAgents copies agent definition files from the preset's agents/ directory
+// into ~/.claude/agents/ so Claude Code can discover them. A marker file
+// ~/.claude/agents/.wf-agents-preset records the active preset identifier to track
+// ownership. Files owned by a different preset or user are not overwritten.
+func syncPresetAgents(cwd string) {
+	if cwd == "" {
+		return
+	}
+	cfgData, err := os.ReadFile(filepath.Join(cwd, ".wf-agents", "workflow.yaml"))
+	if err != nil {
+		return
+	}
+	presetDir, err := config.ResolvePresetDirFromYAML(cfgData)
+	if err != nil || presetDir == "" {
+		return
+	}
+
+	agentsDir := filepath.Join(presetDir, "agents")
+	if _, err := os.Stat(agentsDir); err != nil {
+		return // preset has no agents/ directory
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: wf-agents: cannot determine home dir for agent sync: %v\n", err)
+		return
+	}
+	destDir := filepath.Join(home, ".claude", "agents")
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: wf-agents: cannot create agents dir %s: %v\n", destDir, err)
+		return
+	}
+
+	markerPath := filepath.Join(destDir, ".wf-agents-preset")
+	markerData, _ := os.ReadFile(markerPath)
+	activePreset := strings.TrimSpace(string(markerData))
+	presetID := filepath.ToSlash(presetDir)
+
+	entries, err := os.ReadDir(agentsDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: wf-agents: cannot read preset agents dir: %v\n", err)
+		return
+	}
+
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+			continue
+		}
+		destFile := filepath.Join(destDir, e.Name())
+		// Don't overwrite files owned by a different preset or user
+		if _, statErr := os.Stat(destFile); statErr == nil && activePreset != presetID {
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join(agentsDir, e.Name()))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: wf-agents: cannot read preset agent %s: %v\n", e.Name(), err)
+			continue
+		}
+		if err := os.WriteFile(destFile, content, 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: wf-agents: cannot write agent %s: %v\n", destFile, err)
+		}
+	}
+
+	_ = os.WriteFile(markerPath, []byte(presetID), 0644)
+}
+
+// isPushToProtectedBranch returns true if the given bash command is pushing to main or master.
+// It handles:
+//   - "git push origin main" / "git push origin master"
+//   - "git push <remote> main" / "git push <remote> master"
+//   - "git push origin HEAD:main" (refspec notation)
+//   - "git push origin refs/heads/main" (full ref notation)
+//   - Plain "git push" when the current branch (resolved via git symbolic-ref in cwd) is main/master
+func isPushToProtectedBranch(cmd, cwd string) bool {
+	parts := strings.Fields(cmd)
+	if len(parts) < 2 {
+		return false
+	}
+	// Skip flags before subcommand
+	idx := 1
+	for idx < len(parts) && strings.HasPrefix(parts[idx], "-") {
+		idx++
+	}
+	if idx >= len(parts) || parts[idx] != "push" {
+		return false
+	}
+	// Collect non-flag arguments after "push"
+	var args []string
+	for i := idx + 1; i < len(parts); i++ {
+		if !strings.HasPrefix(parts[i], "-") {
+			args = append(args, parts[i])
+		}
+	}
+	// "git push <remote> <branch>" — check if branch is main or master
+	if len(args) >= 2 {
+		branch := args[1]
+		// Strip refspec notation (e.g. "HEAD:main" → "main")
+		if colon := strings.LastIndex(branch, ":"); colon >= 0 {
+			branch = branch[colon+1:]
+		}
+		// Strip full ref prefix (e.g. "refs/heads/main" → "main")
+		branch = strings.TrimPrefix(branch, "refs/heads/")
+		return branch == "main" || branch == "master"
+	}
+	// Plain "git push" or "git push <remote>" — check current branch
+	if cwd == "" {
+		return false
+	}
+	out, err := exec.Command("git", "-C", cwd, "symbolic-ref", "--short", "HEAD").Output()
+	if err != nil {
+		return false
+	}
+	currentBranch := strings.TrimSpace(string(out))
+	return currentBranch == "main" || currentBranch == "master"
 }
 
 // evalLeadStopConfig loads the project config and checks whether the Team Lead is allowed

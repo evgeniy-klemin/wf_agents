@@ -1,12 +1,27 @@
-.PHONY: build worker web up down status install list timeline start clean
+.PHONY: build worker web up down status install list timeline start clean lint frontend-build
+
+LOCAL_BIN := $(CURDIR)/.bin
+GO_VERSION := 1.26.1
+GOLANGCI_LINT_VERSION := v2.11.4
+GOLANGCI_LINT := $(LOCAL_BIN)/golangci-lint
+
+# Install frontend dependencies
+web/node_modules: web/package.json web/package-lock.json
+	cd web && npm ci
+
+# Build frontend
+frontend-build: web/node_modules
+	cd web && npm run build
+	@printf '%s' '<!-- Placeholder for go:embed. Replaced by Vite build output. -->' > cmd/web/static/placeholder
 
 # Build all binaries
-build:
+build: frontend-build
 	go build -o bin/worker ./cmd/worker
 	go build -o bin/wf-client ./cmd/client
 	go build -o bin/hook-handler ./cmd/hook-handler
 	go build -o bin/wf-web ./cmd/web
 	go build -o bin/feedback-poll ./cmd/feedback-poll
+	go build -o bin/pipeline-poll ./cmd/pipeline-poll
 
 # Start Temporal infrastructure
 up:
@@ -48,3 +63,9 @@ install: build
 # Clean build artifacts
 clean:
 	rm -rf bin/
+
+$(GOLANGCI_LINT):
+	GOTOOLCHAIN=go$(GO_VERSION) GOBIN=$(LOCAL_BIN) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+
+lint: $(GOLANGCI_LINT)
+	$(GOLANGCI_LINT) run ./...

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -130,5 +131,49 @@ func TestHandleWorkflowDetail_BadPath(t *testing.T) {
 	srv.handleWorkflowDetail(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for missing action, got %d", rec.Code)
+	}
+}
+
+// ---- message endpoint tests ----
+
+func TestHandleMessage_RequiresPOST(t *testing.T) {
+	srv := &server{temporal: nil}
+	req := httptest.NewRequest(http.MethodGet, "/api/workflows/coding-session-test/message", nil)
+	rec := httptest.NewRecorder()
+	srv.handleWorkflowDetail(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405 for GET on message, got %d", rec.Code)
+	}
+}
+
+func TestHandleMessage_RejectsEmptyBody(t *testing.T) {
+	srv := &server{temporal: nil}
+	// POST with empty message field
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/coding-session-test/message",
+		strings.NewReader(`{"message":""}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.handleWorkflowDetail(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for empty message, got %d", rec.Code)
+	}
+}
+
+func TestHandleMessage_CORSPreflight(t *testing.T) {
+	srv := &server{temporal: nil}
+	req := httptest.NewRequest(http.MethodOptions, "/api/workflows/coding-session-test/message", nil)
+	rec := httptest.NewRecorder()
+	srv.handleWorkflowDetail(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 for OPTIONS preflight, got %d", rec.Code)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Errorf("Access-Control-Allow-Origin = %q, want %q", got, "*")
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Methods"); got != "GET, POST, OPTIONS" {
+		t.Errorf("Access-Control-Allow-Methods = %q, want %q", got, "GET, POST, OPTIONS")
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Headers"); got != "Content-Type" {
+		t.Errorf("Access-Control-Allow-Headers = %q, want %q", got, "Content-Type")
 	}
 }

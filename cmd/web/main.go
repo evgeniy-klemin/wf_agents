@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -65,8 +67,12 @@ type workflowListItem struct {
 	Status        string `json:"status"`
 	Phase         string `json:"phase,omitempty"`
 	Task          string `json:"task,omitempty"`
+	MRUrl         string `json:"mr_url,omitempty"`
+	ProjectName   string `json:"project_name,omitempty"`
+	RepoURL       string `json:"repo_url,omitempty"`
 	StartTime     string `json:"start_time"`
-	LastUpdatedAt string `json:"last_updated_at,omitempty"`
+	LastUpdatedAt     string `json:"last_updated_at,omitempty"`
+	ActiveAgentsCount int    `json:"active_agents_count,omitempty"`
 }
 
 func (s *server) handleListWorkflows(w http.ResponseWriter, r *http.Request) {
@@ -92,18 +98,22 @@ func (s *server) handleListWorkflows(w http.ResponseWriter, r *http.Request) {
 		sessionID := strings.TrimPrefix(wfID, "coding-session-")
 
 		status := "RUNNING"
-		if wfe.Status == enums.WORKFLOW_EXECUTION_STATUS_COMPLETED {
+		switch wfe.Status {
+		case enums.WORKFLOW_EXECUTION_STATUS_COMPLETED:
 			status = "COMPLETED"
-		} else if wfe.Status == enums.WORKFLOW_EXECUTION_STATUS_FAILED {
+		case enums.WORKFLOW_EXECUTION_STATUS_FAILED:
 			status = "FAILED"
-		} else if wfe.Status == enums.WORKFLOW_EXECUTION_STATUS_TERMINATED {
+		case enums.WORKFLOW_EXECUTION_STATUS_TERMINATED:
 			status = "TERMINATED"
-		} else if wfe.Status == enums.WORKFLOW_EXECUTION_STATUS_CANCELED {
+		case enums.WORKFLOW_EXECUTION_STATUS_CANCELED:
 			status = "CANCELED"
 		}
 
-		// Extract task from memo
+		// Extract task, mr_url, project_name, and repo_url from memo
 		task := ""
+		mrUrl := ""
+		projectName := ""
+		repoURL := ""
 		if wfe.Memo != nil {
 			if payload, ok := wfe.Memo.Fields["task"]; ok {
 				var t string
@@ -111,18 +121,39 @@ func (s *server) handleListWorkflows(w http.ResponseWriter, r *http.Request) {
 					task = t
 				}
 			}
+			if payload, ok := wfe.Memo.Fields["mr_url"]; ok {
+				var u string
+				if json.Unmarshal(payload.Data, &u) == nil {
+					mrUrl = u
+				}
+			}
+			if payload, ok := wfe.Memo.Fields["project_name"]; ok {
+				var p string
+				if json.Unmarshal(payload.Data, &p) == nil {
+					projectName = p
+				}
+			}
+			if payload, ok := wfe.Memo.Fields["repo_url"]; ok {
+				var p string
+				if json.Unmarshal(payload.Data, &p) == nil {
+					repoURL = p
+				}
+			}
 		}
 
 		item := workflowListItem{
-			WorkflowID: wfID,
-			RunID:      wfe.Execution.RunId,
-			SessionID:  sessionID,
-			Status:     status,
-			Task:       task,
-			StartTime:  startTime,
+			WorkflowID:  wfID,
+			RunID:       wfe.Execution.RunId,
+			SessionID:   sessionID,
+			Status:      status,
+			Task:        task,
+			MRUrl:       mrUrl,
+			ProjectName: projectName,
+			RepoURL:     repoURL,
+			StartTime:   startTime,
 		}
 
-		// Query current phase and last update time for running workflows
+		// Query current phase, last update time, and mr_url for running workflows
 		if status == "RUNNING" {
 			qctx, qcancel := context.WithTimeout(ctx, 2*time.Second)
 			resp, err := s.temporal.QueryWorkflow(qctx, wfID, "", wf.QueryStatus)
@@ -132,6 +163,10 @@ func (s *server) handleListWorkflows(w http.ResponseWriter, r *http.Request) {
 				if resp.Get(&wfStatus) == nil {
 					item.Phase = string(wfStatus.Phase)
 					item.LastUpdatedAt = wfStatus.LastUpdatedAt
+					item.ActiveAgentsCount = len(wfStatus.ActiveAgents)
+					if wfStatus.MRUrl != "" {
+						item.MRUrl = wfStatus.MRUrl
+					}
 				}
 			}
 		}
@@ -155,6 +190,14 @@ func (s *server) handleWorkflowDetail(w http.ResponseWriter, r *http.Request) {
 	action := parts[1]
 	runID := r.URL.Query().Get("run_id")
 
+	if r.Method == http.MethodOptions {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
@@ -170,18 +213,41 @@ func (s *server) handleWorkflowDetail(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("Decode failed: %v", err), http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, status)
+		sessionID := strings.TrimPrefix(workflowID, "coding-session-")
+		writeJSON(w, workflowStatusResponse{WorkflowStatus: status, ChannelAvailable: channelAvailable(sessionID)})
 
 	case "timeline":
-		limit := 500
-		// Try timeline-recent first (bounded size, avoids Temporal 2MB query limit)
-		resp, err := s.temporal.QueryWorkflow(ctx, workflowID, runID, wf.QueryTimelineRecent, limit)
-		if err != nil {
-			// Fall back to full timeline for older workflows that don't have the new query
-			resp, err = s.temporal.QueryWorkflow(ctx, workflowID, runID, wf.QueryTimeline)
+		afterStr := r.URL.Query().Get("after")
+		var resp interface{ Get(interface{}) error }
+		var err error
+		if afterStr != "" {
+			after, parseErr := strconv.Atoi(afterStr)
+			if parseErr == nil {
+				resp, err = s.temporal.QueryWorkflow(ctx, workflowID, runID, wf.QueryTimelineIncremental, after)
+			}
+		}
+		if resp == nil {
+			// No valid "after" param — use recent (bounded) query with fallback to full timeline
+			limit := 500
+			resp, err = s.temporal.QueryWorkflow(ctx, workflowID, runID, wf.QueryTimelineRecent, limit)
 			if err != nil {
-				http.Error(w, fmt.Sprintf("Query failed: %v", err), http.StatusInternalServerError)
-				return
+				// Fall back to full timeline for older workflows that don't have the new query
+				resp, err = s.temporal.QueryWorkflow(ctx, workflowID, runID, wf.QueryTimeline)
+				if err != nil {
+					http.Error(w, fmt.Sprintf("Query failed: %v", err), http.StatusInternalServerError)
+					return
+				}
+			}
+		} else if err != nil {
+			// QueryTimelineIncremental failed — fall back to QueryTimelineRecent then QueryTimeline
+			limit := 500
+			resp, err = s.temporal.QueryWorkflow(ctx, workflowID, runID, wf.QueryTimelineRecent, limit)
+			if err != nil {
+				resp, err = s.temporal.QueryWorkflow(ctx, workflowID, runID, wf.QueryTimeline)
+				if err != nil {
+					http.Error(w, fmt.Sprintf("Query failed: %v", err), http.StatusInternalServerError)
+					return
+				}
 			}
 		}
 		var timeline model.WorkflowTimeline
@@ -204,6 +270,30 @@ func (s *server) handleWorkflowDetail(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, flowSnapshotToConfigResponse(&flow))
+
+	case "message":
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST required", http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			Message string `json:"message"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Message == "" {
+			http.Error(w, "message field required", http.StatusBadRequest)
+			return
+		}
+		sessionID := strings.TrimPrefix(workflowID, "coding-session-")
+		err := s.temporal.SignalWorkflow(ctx, workflowID, runID, wf.SignalJournal, model.SignalJournal{
+			SessionID: "web-dashboard",
+			Message:   body.Message,
+		})
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to send message: %v", err), http.StatusInternalServerError)
+			return
+		}
+		channelDelivered := forwardToChannel(sessionID, body.Message)
+		writeJSON(w, map[string]interface{}{"status": "sent", "channel_delivered": channelDelivered})
 
 	default:
 		http.Error(w, "Unknown action: "+action, http.StatusBadRequest)
@@ -237,8 +327,39 @@ func (s *server) handleTerminate(w http.ResponseWriter, r *http.Request) {
 
 // workflowConfigResponse is the JSON shape returned by GET /api/workflow-config.
 type workflowConfigResponse struct {
-	Phases      *config.PhasesConfig                 `json:"phases"`
-	Transitions map[string][]config.TransitionConfig `json:"transitions"`
+	Phases             *config.PhasesConfig                 `json:"phases"`
+	Transitions        map[string][]config.TransitionConfig `json:"transitions"`
+	RequiredCategories map[string][]string                  `json:"required_categories,omitempty"`
+}
+
+// requiredCategoriesFromConfig builds a map of phase → sorted unique command categories
+// required before a teammate can go idle (type: command_ran idle checks).
+func requiredCategoriesFromConfig(cfg *config.Config) map[string][]string {
+	result := map[string][]string{}
+	seen := map[string]map[string]bool{}
+	if cfg.Phases == nil {
+		return nil
+	}
+	for phaseName, phaseConfig := range cfg.Phases.Phases {
+		for _, rule := range phaseConfig.Idle {
+			for _, check := range rule.Checks {
+				if check.Type != "command_ran" || check.Category == "" {
+					continue
+				}
+				if seen[phaseName] == nil {
+					seen[phaseName] = map[string]bool{}
+				}
+				if !seen[phaseName][check.Category] {
+					seen[phaseName][check.Category] = true
+					result[phaseName] = append(result[phaseName], check.Category)
+				}
+			}
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
 }
 
 // flowSnapshotToConfigResponse converts a FlowSnapshot into the same JSON shape
@@ -276,7 +397,11 @@ func flowSnapshotToConfigResponse(flow *model.FlowSnapshot) workflowConfigRespon
 			})
 		}
 	}
-	return workflowConfigResponse{Phases: phases, Transitions: transitions}
+	var requiredCats map[string][]string
+	if defaultCfg, err := config.DefaultConfig(); err == nil {
+		requiredCats = requiredCategoriesFromConfig(defaultCfg)
+	}
+	return workflowConfigResponse{Phases: phases, Transitions: transitions, RequiredCategories: requiredCats}
 }
 
 // handleWorkflowConfig returns the phases and transitions from the embedded default config.
@@ -287,15 +412,57 @@ func handleWorkflowConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, workflowConfigResponse{
-		Phases:      cfg.Phases,
-		Transitions: cfg.Transitions,
+		Phases:             cfg.Phases,
+		Transitions:        cfg.Transitions,
+		RequiredCategories: requiredCategoriesFromConfig(cfg),
 	})
+}
+
+func channelPortFile(sessionID string) string {
+	return os.TempDir() + "/wf-agents-channel-ports/" + sessionID + ".json"
+}
+
+func channelAvailable(sessionID string) bool {
+	_, err := os.Stat(channelPortFile(sessionID))
+	return err == nil
+}
+
+type workflowStatusResponse struct {
+	model.WorkflowStatus
+	ChannelAvailable bool `json:"channel_available"`
+}
+
+// forwardToChannel POSTs a message to the Claude Code channel for the given session.
+// Returns true if delivered, false if channel is unavailable or any error occurs.
+func forwardToChannel(sessionID, message string) bool {
+	data, err := os.ReadFile(channelPortFile(sessionID))
+	if err != nil {
+		return false
+	}
+	var portInfo struct {
+		Port int `json:"port"`
+	}
+	if err := json.Unmarshal(data, &portInfo); err != nil || portInfo.Port == 0 {
+		return false
+	}
+	payload, err := json.Marshal(map[string]string{"message": message})
+	if err != nil {
+		return false
+	}
+	httpClient := &http.Client{Timeout: 2 * time.Second}
+	url := fmt.Sprintf("http://127.0.0.1:%d/message", portInfo.Port)
+	resp, err := httpClient.Post(url, "application/json", bytes.NewReader(payload))
+	if err != nil {
+		return false
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode >= 200 && resp.StatusCode < 300
 }
 
 func writeJSON(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	json.NewEncoder(w).Encode(v)
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 func resolveWorkflowID(id string) string {

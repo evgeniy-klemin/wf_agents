@@ -38,9 +38,9 @@ func TestDefaultConfig_HasExpectedGuardedTransitions(t *testing.T) {
 		assert.NotEmpty(t, rules, "expected guard rule for %s→%s", pair[0], pair[1])
 	}
 
-	// PR_CREATION→FEEDBACK has an empty when (ci_passed check is commented out) — no guard.
+	// PR_CREATION→FEEDBACK now requires mr_url_saved guard.
 	rules := FindGuards(cfg, "PR_CREATION", "FEEDBACK")
-	assert.Empty(t, rules, "PR_CREATION→FEEDBACK should have no guard (when is empty)")
+	assert.NotEmpty(t, rules, "PR_CREATION→FEEDBACK should have a guard (mr_url_saved)")
 }
 
 func TestLoadConfig_NoProjectFile(t *testing.T) {
@@ -179,6 +179,7 @@ type simpleCtx struct {
 	maxIter     int
 	originPhase string
 	commandsRan map[string]bool
+	mrUrl       string
 }
 
 func (c *simpleCtx) Evidence() map[string]string  { return c.evidence }
@@ -187,6 +188,7 @@ func (c *simpleCtx) Iteration() int               { return c.iteration }
 func (c *simpleCtx) MaxIterations() int           { return c.maxIter }
 func (c *simpleCtx) OriginPhase() string          { return c.originPhase }
 func (c *simpleCtx) CommandsRan() map[string]bool { return c.commandsRan }
+func (c *simpleCtx) MrUrl() string                { return c.mrUrl }
 
 func TestEvalCheck_EvidencePass(t *testing.T) {
 	c := Check{Type: "evidence", Key: "k", Value: "v", Message: "failed"}
@@ -465,7 +467,7 @@ func TestFindIdleRule_DefaultConfigAllowsIdleByDefault(t *testing.T) {
 	cfg, err := DefaultConfig()
 	require.NoError(t, err)
 
-	// team-lead has no idle checks in any phase — idle is always allowed.
+	// team-lead has no idle checks in DEVELOPING/REVIEWING/COMMITTING — idle is always allowed.
 	for _, phase := range []string{"DEVELOPING", "REVIEWING", "COMMITTING"} {
 		rule := FindIdleRule(cfg, phase, "team-lead")
 		if rule != nil {
@@ -475,14 +477,7 @@ func TestFindIdleRule_DefaultConfigAllowsIdleByDefault(t *testing.T) {
 		}
 	}
 
-	// reviewer-1 in REVIEWING is required to send a completion summary before idling.
-	reviewerReviewingRule := FindIdleRule(cfg, "REVIEWING", "reviewer-1")
-	require.NotNil(t, reviewerReviewingRule, "expected idle rule for reviewer-1 in REVIEWING")
-	reviewerCtx := &simpleCtx{}
-	reviewerReason := EvalChecks(reviewerReviewingRule.Checks, reviewerCtx)
-	assert.NotEmpty(t, reviewerReason, "reviewer-1 in REVIEWING should be denied idle (send_message check)")
-
-	// reviewer-1 in other phases (DEVELOPING, COMMITTING) should idle freely.
+	// reviewer-1 has no idle checks in DEVELOPING/COMMITTING.
 	for _, phase := range []string{"DEVELOPING", "COMMITTING"} {
 		rule := FindIdleRule(cfg, phase, "reviewer-1")
 		if rule != nil {
@@ -491,6 +486,11 @@ func TestFindIdleRule_DefaultConfigAllowsIdleByDefault(t *testing.T) {
 			assert.Empty(t, reason, "default config should allow idle for reviewer-1 in %s", phase)
 		}
 	}
+
+	// reviewer* in REVIEWING has a send_message check (must send summary before going idle).
+	reviewerReviewingRule := FindIdleRule(cfg, "REVIEWING", "reviewer-1")
+	require.NotNil(t, reviewerReviewingRule, "expected idle rule for reviewer-1 in REVIEWING")
+	assert.NotEmpty(t, reviewerReviewingRule.Checks, "reviewer* in REVIEWING should have send_message idle check")
 
 	// developer-1 in DEVELOPING has lint+test checks from the phases config.
 	devDevelopingRule := FindIdleRule(cfg, "DEVELOPING", "developer-1")

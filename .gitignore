@@ -1,11 +1,11 @@
 bin/
+.bin/
 /hook-handler
-/web
 .DS_Store
 /client
 TODO.md
-# Project-specific wf-agents config directory (workflow.yaml overrides + per-phase .md overrides)
-.wf-agents/
 # Local Claude Code settings (machine-specific, not for version control)
-.claude/settings.local.json
-.claude/scheduled_tasks.lock
+.claude/
+web/node_modules/
+cmd/web/static/*
+!cmd/web/static/placeholder

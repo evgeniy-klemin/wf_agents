@@ -1,0 +1,24 @@
+# Local workflow overrides for wf_agents development.
+# Merged on top of plugin defaults (workflow/defaults.yaml).
+
+phases:
+  MR_PIPELINE:
+    display: { label: "Pipeline", icon: "play", color: "#f97316" }
+    hint: "Monitor CI pipeline. Poll status every 60s. Transition when green."
+    idle:
+      - agent: lead
+        deny: true
+        message: "Pipeline monitoring requires active polling. Run: sleep 60 (foreground) → pipeline-poll → parse JSON status → repeat."
+
+transitions:
+  PR_CREATION:
+    - to: MR_PIPELINE
+
+  MR_PIPELINE:
+    - to: FEEDBACK
+      when: "ci_passed"
+      message: "CI pipeline must pass before moving to feedback"
+    - to: DEVELOPING
+      label: "Pipeline fix"
+      when: "iteration < max_iterations"
+      message: "max iterations reached"

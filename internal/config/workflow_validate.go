@@ -14,6 +14,7 @@ var knownWhenVariables = map[string]bool{
 	"ci_passed":          true,
 	"review_approved":    true,
 	"merged":             true,
+	"mr_ready":           true,
 	"active_agents":      true,
 	"iteration":          true,
 	"max_iterations":     true,
@@ -166,7 +167,8 @@ func bfsReachable(start string, transitions map[string][]TransitionConfig) map[s
 }
 
 // unknownWhenVars parses a when expression and returns any unknown variable names.
-// Tokens are split by whitespace; numbers and operators are excluded.
+// Tokens are split by whitespace; numbers, operators, and quoted strings are excluded.
+// Custom bare identifiers (snake_case) are accepted as valid evidence keys.
 func unknownWhenVars(when string) []string {
 	var unknowns []string
 	tokens := strings.Fields(when)
@@ -179,12 +181,34 @@ func unknownWhenVars(when string) []string {
 		if isNumeric(tok) {
 			continue
 		}
-		// Must be a known variable
-		if !knownWhenVariables[tok] {
-			unknowns = append(unknowns, tok)
+		// Skip quoted string tokens (e.g. "To Merge" split across tokens, or single-word "value")
+		if strings.HasPrefix(tok, `"`) || strings.HasSuffix(tok, `"`) {
+			continue
 		}
+		// Known variables are always valid
+		if knownWhenVariables[tok] {
+			continue
+		}
+		// Custom bare identifiers (snake_case / alphanumeric) are valid evidence keys
+		if isIdentifier(tok) {
+			continue
+		}
+		unknowns = append(unknowns, tok)
 	}
 	return unknowns
+}
+
+// isIdentifier returns true if s looks like a valid identifier (letters, digits, underscores).
+func isIdentifier(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for _, c := range s {
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 // isNumeric returns true if s is an integer literal.

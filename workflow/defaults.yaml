@@ -32,7 +32,8 @@ phases:
         - pwd
         - jq
         - yq
-        - gofmt
+        # gofmt is intentionally NOT in safe_commands — it can write files (-w flag).
+        # It is whitelisted only in DEVELOPING and REVIEWING via phase-level whitelists.
         - git status
         - git log
         - git diff
@@ -90,9 +91,11 @@ phases:
         - gh issue
         # GitLab CLI read-only operations
         - glab mr view
+        - glab mr list
         - glab ci status
         # feedback polling binary
         - feedback-poll
+        - pipeline-poll
 
       read_only_tools:
         - Read
@@ -127,6 +130,7 @@ phases:
   PLANNING:
     display: { label: "Planning", icon: "clipboard", color: "#6366f1" }
     hint: "Transition to RESPAWN first."
+    bash_policy: whitelist
     idle:
       - agent: lead
         deny: true
@@ -164,6 +168,8 @@ phases:
     on_enter:
       - type: increment_iteration
     permissions:
+      whitelist:
+        - gofmt
       teammate:
         - agent: "developer*"
           file_writes: allow
@@ -172,16 +178,19 @@ phases:
         checks:
           - type: command_ran
             category: lint
-            message: "Run linter before going idle"
+            message: "Run linter before going idle. Use one of the tracked commands: golangci-lint, go vet, npm run lint, cargo clippy."
           - type: command_ran
             category: test
-            message: "Run tests before going idle"
+            message: "Run tests before going idle. Use one of the tracked commands: go test, npm test, cargo test, pytest."
           - type: send_message
             message: "Send your completion summary to the Team Lead via SendMessage before going idle."
 
   REVIEWING:
     display: { label: "Reviewing", icon: "search", color: "#f59e0b" }
     hint: "Delegate review to Reviewer teammate. Do NOT review code directly. If issues found, transition to DEVELOPING (not RESPAWN)."
+    permissions:
+      whitelist:
+        - gofmt
     idle:
       - agent: "reviewer*"
         checks:
@@ -197,9 +206,6 @@ phases:
       # TODO: once per-teammate bash whitelists are supported, restrict these to
       # developer* only and remove from the phase-level whitelist.
       whitelist: [git add, git commit, git push]
-      teammate:
-        - agent: "developer*"
-          file_writes: allow
 
   PR_CREATION:
     display:
@@ -207,6 +213,13 @@ phases:
     hint: "Only PR creation commands allowed."
     permissions:
       whitelist: [glab mr create, glab mr view, glab mr list]
+    idle:
+      - agent: "developer*"
+        checks:
+          - type: mr_url_saved
+            message: "Save MR URL before going idle. Use: wf-client set-mr-url <workflow-id> <url>"
+          - type: send_message
+            message: "Send MR creation summary to the Team Lead via SendMessage before going idle."
 
   FEEDBACK:
     display: { label: "Feedback", icon: "message-circle", color: "#f97316" }
@@ -220,7 +233,7 @@ phases:
     idle:
       - agent: lead
         deny: true
-        message: "FEEDBACK requires active polling. Run: sleep 60 (foreground, NOT run_in_background) → feedback-poll → parse result → repeat. Do NOT use run_in_background for sleep — it causes idle attempts which are denied. The sleep must block your turn."
+        message: "FEEDBACK requires transitioning to BLOCKED. Run: {{WF_CLIENT}} transition <id> --to BLOCKED --reason \"MR review expected. Please review the MR, leave comments, and move it from Draft to Ready when done.\" — do NOT idle without transitioning to BLOCKED first."
 
   COMPLETE:
     display: { label: "Complete", icon: "check-circle", color: "#22c55e" }
@@ -263,20 +276,23 @@ transitions:
 
   PR_CREATION:
     - to: FEEDBACK
-      # when: ci_passed
-      #message: "CI has not passed — wait for pipeline"
+      when: mr_url_saved
+      message: "MR link must be saved before leaving PR_CREATION (use set-mr-url)"
 
   FEEDBACK:
     - to: COMPLETE
       label: "Done"
-      when: review_approved or merged
-      message: "PR has not been approved or merged"
+      when: review_approved or mr_ready
+      message: "PR has not been approved and MR is still a draft"
     - to: RESPAWN
       label: "Rework"
       when: iteration < max_iterations
       message: "max iterations reached"
 
 # ─── Tracking (command categories for idle rules) ────────────────────────────
+# Only commands matching these patterns are tracked. Makefile wrappers (make lint,
+# make test) are NOT detected — agents must use the tools directly.
+# To add project-specific patterns, override in .wf-agents/workflow.yaml.
 
 tracking:
   lint:
